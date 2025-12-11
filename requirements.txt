@@ -6,6 +6,9 @@ matplotlib
 colormaps
 
 # Geospatial/GIS Libraries
+# Note: In Colab, gdal/rasterio/pyproj/shapely/geopandas are installed via conda
+# to avoid compilation issues. The notebook setup automatically excludes these
+# from pip installation when running in Colab.
 rasterio
 pyproj
 gdal
@@ -14,6 +17,8 @@ shapely
 rioxarray
 
 # Point Cloud Processing
+# Note: In Colab, pdal is installed as 'python-pdal' via conda to avoid build errors.
+# small_gicp is also handled via conda. Both are excluded from pip in Colab.
 pdal
 small_gicp
 
