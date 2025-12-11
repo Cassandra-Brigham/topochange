@@ -3,6 +3,7 @@ numpy
 pandas
 scipy
 matplotlib
+colormaps
 
 # Geospatial/GIS Libraries
 rasterio
