@@ -3,7 +3,7 @@ numpy
 pandas
 scipy
 matplotlib
-colormaps
+colormaps  # Note: not on conda-forge, installed via pip in Colab
 
 # Geospatial/GIS Libraries
 # Note: In Colab, gdal/rasterio/pyproj/shapely/geopandas are installed via conda
