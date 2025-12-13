@@ -1681,11 +1681,12 @@ class PointCloudPair:
             print("# Pipeline Complete")
             print(f"{'#' * 60}")
             
-            stats = diff_result.get('statistics', {})
+            stats = diff_result.get('stats', {})
             print(f"\nFinal Difference Statistics:")
-            print(f"  Mean: {stats.get('mean', np.nan):.4f} m")
-            print(f"  Std:  {stats.get('std', np.nan):.4f} m")
-            print(f"  NMAD: {stats.get('nmad', np.nan):.4f} m")
+            print(f"  Mean:   {stats.get('mean', np.nan):.4f} m")
+            print(f"  Std:    {stats.get('std', np.nan):.4f} m")
+            print(f"  Median: {stats.get('median', np.nan):.4f} m")
+            print(f"  NMAD:   {stats.get('nmad', np.nan):.4f} m")
             print(f"\nDifference raster: {diff_result.get('difference_raster', {}).filename}")
             print(f"{'#' * 60}\n")
         

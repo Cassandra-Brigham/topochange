@@ -17,6 +17,7 @@ The transformation pipeline follows the order:
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
@@ -418,17 +419,18 @@ def _compute_overlap_polygon(
 def _create_valid_data_mask(data: np.ndarray, nodata: Any) -> np.ndarray:
     """
     Create a boolean mask where True = valid data, False = invalid.
-    
+
     Handles various nodata representations including explicit nodata values,
-    NaN, and Inf values.
-    
+    NaN, and Inf values. Uses tolerance-based comparison for numeric nodata
+    values to handle floating-point precision issues.
+
     Parameters
     ----------
     data : np.ndarray
         The raster data array
     nodata : Any
         The nodata value (can be None, NaN, or a numeric value)
-        
+
     Returns
     -------
     np.ndarray
@@ -436,19 +438,25 @@ def _create_valid_data_mask(data: np.ndarray, nodata: Any) -> np.ndarray:
     """
     # Start with all valid
     valid = np.ones(data.shape, dtype=bool)
-    
+
     # Mask explicit nodata value
     if nodata is not None:
-        if np.isnan(nodata) if isinstance(nodata, float) else False:
+        if isinstance(nodata, float) and np.isnan(nodata):
             # nodata is NaN - will be handled below
             pass
         else:
-            valid &= (data != nodata)
-    
+            # Use tolerance-based comparison for numeric nodata values
+            # This handles float32/float64 precision issues during reprojection
+            # Common nodata values like -9999.0 may become -9999.00001 after transforms
+            if np.issubdtype(data.dtype, np.floating):
+                valid &= ~np.isclose(data, nodata, rtol=1e-5, atol=1e-8)
+            else:
+                valid &= (data != nodata)
+
     # Always mask NaN and Inf
     valid &= ~np.isnan(data)
     valid &= ~np.isinf(data)
-    
+
     return valid
 
 
@@ -1648,11 +1656,26 @@ class RasterPair:
                 'p84': float(percentiles[3]),
                 'p97.5': float(percentiles[4]),
             }
+
+            # Compute NMAD (Normalized Median Absolute Deviation) - robust measure
+            nmad = 1.4826 * np.median(np.abs(valid_diff - stats['median']))
+            stats['nmad'] = float(nmad)
+
+            # Sanity check for potential nodata leakage
+            # Extreme values often indicate nodata values weren't properly masked
+            extreme_threshold = 100.0  # meters - adjust based on expected topographic change
+            if np.abs(stats['max']) > extreme_threshold or np.abs(stats['min']) > extreme_threshold:
+                warnings.warn(
+                    f"Extreme difference values detected (min={stats['min']:.1f}m, max={stats['max']:.1f}m). "
+                    f"This may indicate NoData value leakage. Check that nodata values are properly "
+                    f"set in both input rasters. Median={stats['median']:.4f}m, NMAD={nmad:.4f}m",
+                    UserWarning
+                )
         else:
             stats = {
                 'min': None, 'max': None, 'mean': None, 'std': None,
                 'median': None, 'count_valid': 0, 'count_total': int(data1.size),
-                'rmse': None, 'mae': None, 'percentiles': None
+                'rmse': None, 'mae': None, 'percentiles': None, 'nmad': None
             }
             histogram = {'hist': [], 'bin_edges': []}
         
@@ -1664,6 +1687,7 @@ class RasterPair:
                 print(f"    Mean:   {stats['mean']:.4f} m", file=sys.stderr)
                 print(f"    Std:    {stats['std']:.4f} m", file=sys.stderr)
                 print(f"    Median: {stats['median']:.4f} m", file=sys.stderr)
+                print(f"    NMAD:   {stats['nmad']:.4f} m", file=sys.stderr)
                 print(f"    RMSE:   {stats['rmse']:.4f} m", file=sys.stderr)
             else:
                 print("    No valid pixels for statistics", file=sys.stderr)

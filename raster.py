@@ -1924,8 +1924,34 @@ class Raster:
                     w01 = (1 - dr) * dc
                     w11 = dr * dc
 
-                    # Interpolate (NaN propagates)
-                    interp = v00 * w00 + v10 * w10 + v01 * w01 + v11 * w11
+                    # NaN-aware bilinear interpolation
+                    # Create validity masks for each corner
+                    valid00 = ~np.isnan(v00)
+                    valid10 = ~np.isnan(v10)
+                    valid01 = ~np.isnan(v01)
+                    valid11 = ~np.isnan(v11)
+
+                    # Zero out weights for invalid corners
+                    w00_adj = np.where(valid00, w00, 0.0)
+                    w10_adj = np.where(valid10, w10, 0.0)
+                    w01_adj = np.where(valid01, w01, 0.0)
+                    w11_adj = np.where(valid11, w11, 0.0)
+
+                    # Sum of valid weights
+                    weight_sum = w00_adj + w10_adj + w01_adj + w11_adj
+
+                    # Replace NaN values with 0 for computation
+                    v00_safe = np.where(valid00, v00, 0.0)
+                    v10_safe = np.where(valid10, v10, 0.0)
+                    v01_safe = np.where(valid01, v01, 0.0)
+                    v11_safe = np.where(valid11, v11, 0.0)
+
+                    # Compute weighted sum
+                    weighted_sum = v00_safe * w00_adj + v10_safe * w10_adj + v01_safe * w01_adj + v11_safe * w11_adj
+
+                    # Normalize by weight sum (avoid division by zero)
+                    # If no valid corners, result is NaN
+                    interp = np.where(weight_sum > 0, weighted_sum / weight_sum, np.nan)
 
                     # Assign to output (using flat indexing)
                     dst_data_flat = dst_data.ravel()
@@ -1963,6 +1989,8 @@ class Raster:
                         dst_transform=dst_transform,
                         dst_crs=dst_crs,
                         resampling=resampling,
+                        src_nodata=np.nan,
+                        dst_nodata=np.nan,
                     )
             else:
                 dst_data = src_data.copy()
@@ -1998,14 +2026,17 @@ class Raster:
                 dst_data, dst_transform, dst_crs, dst_geoid, direction="subtract"
             )
         
-        # Handle nodata
-        if src_nodata is not None:
-            nan_mask = np.isnan(dst_data)
+        # Handle nodata - always use a canonical nodata value
+        # Use source nodata if available, otherwise default to NaN for float data
+        nan_mask = np.isnan(dst_data)
+        if src_nodata is not None and not np.isnan(src_nodata):
+            # Use the source's numeric nodata value
             if np.any(nan_mask):
                 dst_data[nan_mask] = src_nodata
             out_nodata = src_nodata
         else:
-            out_nodata = None
+            # Use NaN as canonical nodata for float data
+            out_nodata = np.nan
 
         # Write output
         dst_data_float32 = dst_data.astype('float32')
