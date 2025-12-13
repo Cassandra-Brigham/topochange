@@ -1275,6 +1275,7 @@ class PointCloud:
                     "gdaldriver": "GTiff",
                     "data_type": "float32",
                     "nodata": nodata_value,
+                    "gdalopts": "TILED=YES,COMPRESS=DEFLATE,BIGTIFF=IF_SAFER",
                 }
             )
 
@@ -1332,6 +1333,7 @@ class PointCloud:
                 "COMPRESS": "DEFLATE",
                 "PREDICTOR": "2",
                 "ZLEVEL": "9",
+                "BIGTIFF": "IF_SAFER",
             }
             if gdal_options:
                 base_gdal_options.update(gdal_options)
@@ -1376,6 +1378,8 @@ class PointCloud:
 
                 # Ensure profile nodata is set
                 profile["nodata"] = out_nodata
+                # Enable BIGTIFF for large files
+                profile["BIGTIFF"] = "IF_SAFER"
 
                 # Rewrite to the same path atomically
                 tmp_fix = f"{temp_path}.nodatatmp.tif"
