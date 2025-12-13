@@ -1,10 +1,333 @@
 import os
 import re
+import subprocess
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from pyproj import datadir
+
+
+# -------- PROJ Data Directory Detection ---------
+
+def get_all_proj_data_dirs() -> List[str]:
+    """
+    Get all PROJ data directories that might be used by pyproj, PDAL, or GDAL.
+
+    This function discovers directories from multiple sources:
+    1. pyproj's configured data directory
+    2. pyproj's user data directory
+    3. PROJ_LIB and PROJ_DATA environment variables
+    4. System PROJ directories (from `projinfo --searchpaths` if available)
+    5. Common system paths (/usr/share/proj, /usr/local/share/proj, etc.)
+
+    Returns
+    -------
+    List[str]
+        List of existing directories where PROJ looks for grid files.
+        Directories are deduplicated and only existing paths are returned.
+    """
+    dirs = set()
+
+    # 1. pyproj's data directory
+    try:
+        dd = datadir.get_data_dir()
+        if dd and os.path.isdir(dd):
+            dirs.add(dd)
+    except Exception:
+        pass
+
+    # 2. pyproj's user data directory
+    try:
+        ud = datadir.get_user_data_dir()
+        if ud and os.path.isdir(ud):
+            dirs.add(ud)
+    except Exception:
+        pass
+
+    # 3. Environment variables
+    for env_var in ['PROJ_LIB', 'PROJ_DATA']:
+        env_val = os.environ.get(env_var, '')
+        for path in env_val.split(os.pathsep):
+            if path and os.path.isdir(path):
+                dirs.add(path)
+
+    # 4. System PROJ directories (via projinfo --searchpaths)
+    try:
+        result = subprocess.run(
+            ['projinfo', '--searchpaths'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().split('\n'):
+                line = line.strip()
+                if line and os.path.isdir(line):
+                    dirs.add(line)
+    except Exception:
+        pass
+
+    # 5. Common system paths
+    common_paths = [
+        '/usr/share/proj',
+        '/usr/local/share/proj',
+        '/opt/conda/share/proj',
+        '/opt/homebrew/share/proj',  # macOS Homebrew ARM
+        '/usr/local/opt/proj/share/proj',  # macOS Homebrew Intel
+    ]
+    for path in common_paths:
+        if os.path.isdir(path):
+            dirs.add(path)
+
+    return sorted(dirs)
+
+
+def get_primary_proj_data_dir() -> str:
+    """
+    Get the primary PROJ data directory where grids should be downloaded.
+
+    Priority:
+    1. PROJ_LIB environment variable (if set and writable)
+    2. First writable directory from projinfo --searchpaths
+    3. pyproj's data directory
+    4. First writable common system path
+
+    Returns
+    -------
+    str
+        Path to the primary PROJ data directory
+
+    Raises
+    ------
+    RuntimeError
+        If no writable PROJ data directory can be found
+    """
+    def is_writable(path: str) -> bool:
+        try:
+            test_file = os.path.join(path, '.write_test')
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            return True
+        except Exception:
+            return False
+
+    # 1. PROJ_LIB if set and writable
+    proj_lib = os.environ.get('PROJ_LIB', '')
+    if proj_lib and os.path.isdir(proj_lib) and is_writable(proj_lib):
+        return proj_lib
+
+    # 2. Check all discovered directories for writability
+    for d in get_all_proj_data_dirs():
+        if is_writable(d):
+            return d
+
+    # 3. Fallback to pyproj data dir (may not be writable)
+    try:
+        dd = datadir.get_data_dir()
+        if dd and os.path.isdir(dd):
+            return dd
+    except Exception:
+        pass
+
+    raise RuntimeError(
+        "Could not find a writable PROJ data directory. "
+        "Try setting the PROJ_LIB environment variable to a writable directory."
+    )
+
+
+def ensure_proj_grid(
+    grid_filename: str,
+    *,
+    download_if_missing: bool = True,
+    copy_to_all_dirs: bool = True,
+    verbose: bool = True,
+) -> str:
+    """
+    Ensure a PROJ grid file is available in the PROJ data directories.
+
+    This function checks if a grid file exists in any PROJ data directory,
+    and optionally downloads it from the PROJ CDN if missing. It can also
+    copy the grid to all PROJ directories to ensure compatibility with
+    different tools (pyproj, PDAL, GDAL, etc.).
+
+    Parameters
+    ----------
+    grid_filename : str
+        Name of the grid file (e.g., 'us_noaa_g2012bu0.tif')
+    download_if_missing : bool, default True
+        If True, download the grid from cdn.proj.org if not found locally
+    copy_to_all_dirs : bool, default True
+        If True, copy the grid to all PROJ data directories for maximum
+        compatibility (useful in environments like Google Colab where
+        pyproj and PDAL may use different directories)
+    verbose : bool, default True
+        If True, print status messages
+
+    Returns
+    -------
+    str
+        Full path to the grid file
+
+    Raises
+    ------
+    FileNotFoundError
+        If the grid is not found and download_if_missing is False
+    RuntimeError
+        If download fails
+
+    Examples
+    --------
+    >>> # Ensure GEOID12B grid is available
+    >>> path = ensure_proj_grid('us_noaa_g2012bu0.tif')
+    >>> print(path)
+    /usr/local/share/proj/us_noaa_g2012bu0.tif
+
+    >>> # Use in a transformation workflow
+    >>> ensure_proj_grid('us_noaa_g2018u0.tif')  # GEOID18
+    >>> ensure_proj_grid('us_noaa_geoid09_conus.tif')  # GEOID09
+    """
+    # Normalize filename (just the basename)
+    grid_basename = os.path.basename(grid_filename)
+
+    # Get all PROJ directories
+    all_dirs = get_all_proj_data_dirs()
+
+    if verbose:
+        print(f"Checking for grid: {grid_basename}")
+        print(f"  PROJ directories: {all_dirs}")
+
+    # Check if grid exists in any directory
+    existing_path = None
+    for d in all_dirs:
+        candidate = os.path.join(d, grid_basename)
+        if os.path.isfile(candidate):
+            existing_path = candidate
+            if verbose:
+                print(f"  Found existing grid: {existing_path}")
+            break
+
+    # If not found, optionally download
+    if existing_path is None:
+        if not download_if_missing:
+            raise FileNotFoundError(
+                f"Grid file '{grid_basename}' not found in any PROJ directory: {all_dirs}"
+            )
+
+        # Download to primary directory
+        primary_dir = get_primary_proj_data_dir()
+        dest_path = os.path.join(primary_dir, grid_basename)
+        cdn_url = f"https://cdn.proj.org/{grid_basename}"
+
+        if verbose:
+            print(f"  Downloading from {cdn_url}...")
+
+        try:
+            urllib.request.urlretrieve(cdn_url, dest_path)
+            existing_path = dest_path
+            if verbose:
+                size = os.path.getsize(dest_path)
+                print(f"  Downloaded: {size:,} bytes -> {dest_path}")
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to download grid '{grid_basename}' from {cdn_url}: {e}"
+            )
+
+    # Optionally copy to all directories for maximum compatibility
+    if copy_to_all_dirs and existing_path:
+        import shutil
+        for d in all_dirs:
+            dest = os.path.join(d, grid_basename)
+            if dest != existing_path and not os.path.isfile(dest):
+                try:
+                    shutil.copy(existing_path, dest)
+                    if verbose:
+                        print(f"  Copied to: {dest}")
+                except PermissionError:
+                    if verbose:
+                        print(f"  Skipped (permission denied): {dest}")
+                except Exception as e:
+                    if verbose:
+                        print(f"  Skipped (error: {e}): {dest}")
+
+    return existing_path
+
+
+def ensure_proj_grids_for_region(
+    region: str = 'us_noaa',
+    *,
+    verbose: bool = True,
+) -> List[str]:
+    """
+    Ensure all PROJ grids for a given region/source are available.
+
+    This is a convenience function that downloads commonly used grids
+    for a specific region or data source.
+
+    Parameters
+    ----------
+    region : str
+        Region identifier. Common values:
+        - 'us_noaa': US NOAA geoids (GEOID03, GEOID09, GEOID12B, GEOID18)
+        - 'us_nga': US NGA global geoids (EGM96, EGM2008)
+        - 'ca_nrc': Canada NRC geoids
+        - 'au_ga': Australia GA geoids
+        - 'uk_os': UK Ordnance Survey geoids
+        - 'nz_linz': New Zealand LINZ geoids
+    verbose : bool, default True
+        If True, print status messages
+
+    Returns
+    -------
+    List[str]
+        List of paths to the downloaded/verified grid files
+    """
+    # Define common grids per region
+    REGION_GRIDS = {
+        'us_noaa': [
+            'us_noaa_g2012bu0.tif',   # GEOID12B CONUS
+            'us_noaa_g2018u0.tif',    # GEOID18 CONUS
+            'us_noaa_geoid09_conus.tif',  # GEOID09 CONUS
+            'us_noaa_geoid06_conus.tif',  # GEOID06 CONUS
+            'us_noaa_geoid03_conus.tif',  # GEOID03 CONUS
+        ],
+        'us_nga': [
+            'us_nga_egm96_15.tif',    # EGM96
+            'us_nga_egm08_25.tif',    # EGM2008
+        ],
+        'ca_nrc': [
+            'ca_nrc_HT2_2010v70.tif',
+        ],
+        'au_ga': [
+            'au_ga_AUSGeoid2020_20180201.tif',
+            'au_ga_AUSGeoid09_V1.01.tif',
+        ],
+        'uk_os': [
+            'uk_os_OSGM15_GB.tif',
+        ],
+        'nz_linz': [
+            'nz_linz_nzgeoid2016.tif',
+        ],
+    }
+
+    grids_to_download = REGION_GRIDS.get(region.lower(), [])
+    if not grids_to_download:
+        if verbose:
+            print(f"Unknown region '{region}'. Known regions: {list(REGION_GRIDS.keys())}")
+        return []
+
+    if verbose:
+        print(f"Ensuring grids for region '{region}'...")
+
+    downloaded = []
+    for grid in grids_to_download:
+        try:
+            path = ensure_proj_grid(grid, verbose=verbose)
+            downloaded.append(path)
+        except Exception as e:
+            if verbose:
+                print(f"  Warning: Could not ensure {grid}: {e}")
+
+    return downloaded
 
 
 # -------- Geoid helpers ---------
@@ -485,6 +808,7 @@ def select_geoid_grid(
     *,
     choice: int | None = None,
     verbose: bool = True,
+    ensure_available: bool = True,
 ) -> Tuple[str, List[str]]:
     """
     Select a geoid grid for the given nickname/alias.
@@ -493,11 +817,29 @@ def select_geoid_grid(
       1. Local CONUS-style grid (u0 / conus)
       2. Any CONUS-style grid
       3. Other local grid
-      4. First available grid
-      
+      4. First available grid (downloads if ensure_available=True)
+
     Also handles direct filenames - if name looks like a filename (ends with
     .tif, .gtx, etc.), it will be returned directly if the file exists, or
     the alias will be extracted from the filename pattern.
+
+    Parameters
+    ----------
+    name : str
+        Geoid alias (e.g., 'geoid12b', 'geoid18', 'egm2008') or filename
+    choice : int, optional
+        Override auto-selection with a specific index from candidates
+    verbose : bool, default True
+        Print status messages
+    ensure_available : bool, default True
+        If True and the selected grid is not locally available, automatically
+        download it from cdn.proj.org. This ensures the grid is ready for use
+        by PDAL, pyproj, and other PROJ-based tools.
+
+    Returns
+    -------
+    Tuple[str, List[str]]
+        (selected_grid_path, list_of_all_candidates)
     """
     name_lower = name.lower()
     
@@ -590,5 +932,27 @@ def select_geoid_grid(
             origin = "local" if _is_local(f) else "CDN"
             mark = f"  <== selected ({reason})" if f == selected else ""
             print(f"  [{i}] {base} ({origin}){mark}")
+
+    # If the selected grid is not local and ensure_available is True, download it
+    if ensure_available and not _is_local(selected):
+        grid_basename = Path(selected).name
+        if verbose:
+            print(f"\nSelected grid '{grid_basename}' is not locally available.")
+            print("Downloading and installing to PROJ data directories...")
+        try:
+            local_path = ensure_proj_grid(
+                grid_basename,
+                download_if_missing=True,
+                copy_to_all_dirs=True,
+                verbose=verbose,
+            )
+            # Update selected to point to the local path
+            selected = local_path
+            if verbose:
+                print(f"Grid now available at: {selected}")
+        except Exception as e:
+            if verbose:
+                print(f"Warning: Could not download grid: {e}")
+                print("You may need to download it manually from https://cdn.proj.org/")
 
     return selected, candidates
