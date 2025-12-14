@@ -72,10 +72,10 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/topochange"
-Documentation = "https://github.com/yourusername/topochange#readme"
-Repository = "https://github.com/yourusername/topochange"
-Issues = "https://github.com/yourusername/topochange/issues"
+Homepage = "https://github.com/Cassandra-Brigham/topochange"
+Documentation = "https://github.com/Cassandra-Brigham/topochange#readme"
+Repository = "https://github.com/Cassandra-Brigham/topochange"
+Issues = "https://github.com/Cassandra-Brigham/topochange/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

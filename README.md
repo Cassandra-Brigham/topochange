@@ -7,7 +7,7 @@ Topographic change detection and uncertainty quantification using variogram-base
 ### From source (development)
 
 ```bash
-git clone https://github.com/yourusername/topochange.git
+git clone https://github.com/Cassandra-Brigham/topochange.git
 cd topochange
 pip install -e .
 ```
