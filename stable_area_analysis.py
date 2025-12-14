@@ -112,6 +112,10 @@ class TopoMapInteractor:
         self.derive_min_area = derive_min_area
         self.simplify_tolerance = simplify_tolerance
 
+        # Track whether user has manually defined stable areas
+        # (if True, don't auto-derive stable from unstable)
+        self._user_drew_stable = False
+
         # Compute lat/lon bounds
         with rasterio.open(self.topo_diff.filename) as ds:
             bounds = ds.bounds
@@ -191,7 +195,8 @@ class TopoMapInteractor:
             self.load_stable_polygons(stable_path, name_field=stable_name_field, assume_crs=assume_input_crs)
         if unstable_path is not None:
             self.load_unstable_polygons(unstable_path, name_field=unstable_name_field, assume_crs=assume_input_crs)
-            if self.auto_stable_from_unstable:
+            # Only auto-derive stable if user hasn't provided stable areas
+            if self.auto_stable_from_unstable and not self._user_drew_stable:
                 self.derive_stable_from_unstable(replace=True)
 
     # -------------------- Overlay helpers --------------------
@@ -359,12 +364,16 @@ class TopoMapInteractor:
         if self.current_category == 'stable':
             self.stable_geoms.append(poly_native)
             self.stable_names.append(f"Stable_{len(self.stable_geoms)}")
+            # Track that user has manually drawn stable areas
+            self._user_drew_stable = True
         else:
             self.unstable_geoms.append(poly_native)
             self.unstable_names.append(f"FOI_{len(self.unstable_geoms)}")
-            
-            # Auto-derive stable areas if enabled
-            if self.auto_stable_from_unstable:
+
+            # Auto-derive stable areas only if:
+            # 1. auto_stable_from_unstable is enabled, AND
+            # 2. User has NOT manually drawn any stable areas
+            if self.auto_stable_from_unstable and not getattr(self, '_user_drew_stable', False):
                 self.derive_stable_from_unstable(replace=True)
         
         # Update GeoJSON layers
@@ -443,7 +452,11 @@ class TopoMapInteractor:
                 self.stable_geoms.append(geom)
                 name = row[name_field] if name_field and name_field in row else f"Stable_{len(self.stable_geoms)}"
                 self.stable_names.append(str(name))
-        
+
+        # Mark that user has provided stable areas (don't auto-derive)
+        if self.stable_geoms:
+            self._user_drew_stable = True
+
         self._update_geojson_layers()
 
     def load_unstable_polygons(
