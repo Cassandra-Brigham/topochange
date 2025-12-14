@@ -72,6 +72,8 @@ data/
 *.gz
 *.tar
 *.dat
+*.json
+*.geojson
 
 # Uncomment if needed:
 # results/
