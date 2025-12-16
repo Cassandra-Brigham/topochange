@@ -39,7 +39,7 @@ from .uncertainty import RegionalUncertaintyEstimator
 
 # Stable area analysis
 from .stable_area_analysis import (
-    StableAreaSelector,
+    TopoMapInteractor,
     StableAreaRasterizer,
     StableAreaAnalyzer,
 )
@@ -63,7 +63,7 @@ __all__ = [
     "VariogramAnalysis",
     "RegionalUncertaintyEstimator",
     # Stable areas
-    "StableAreaSelector",
+    "TopoMapInteractor",
     "StableAreaRasterizer",
     "StableAreaAnalyzer",
     # CRS
