@@ -3064,4 +3064,4 @@ class RasterPair:
             save_path.parent.mkdir(parents=True, exist_ok=True)
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight", pad_inches=0)
 
-        return fig
+        
