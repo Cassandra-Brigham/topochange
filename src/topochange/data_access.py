@@ -80,12 +80,12 @@ gdal.UseExceptions()
 # Domain Class Imports (optional - graceful degradation if not available)
 # =============================================================================
 try:
-    from raster import Raster
-    from pointcloud import PointCloud
-    from rasterpair import RasterPair
-    from pointcloudpair import PointCloudPair
-    from crs_history import CRSHistory
-    from unit_utils import (
+    from .raster import Raster
+    from .pointcloud import PointCloud
+    from .rasterpair import RasterPair
+    from .pointcloudpair import PointCloudPair
+    from .crs_history import CRSHistory
+    from .unit_utils import (
         UnitInfo,
         UNKNOWN_UNIT,
         METER,
@@ -105,45 +105,19 @@ try:
     _DOMAIN_CLASSES_AVAILABLE = True
     _UNIT_UTILS_AVAILABLE = True
 except ImportError:
-    try:
-        from raster import Raster
-        from pointcloud import PointCloud
-        from rasterpair import RasterPair
-        from pointcloudpair import PointCloudPair
-        from crs_history import CRSHistory
-        from unit_utils import (
-            UnitInfo,
-            UNKNOWN_UNIT,
-            METER,
-            FOOT,
-            US_SURVEY_FOOT,
-            lookup_unit,
-            parse_unit_string,
-            parse_catalog_vertical_units,
-            get_horizontal_unit,
-            get_vertical_unit,
-            convert_length,
-            convert_to_meters,
-            get_conversion_factor,
-            format_value_with_unit,
-            describe_unit,
-        )
-        _DOMAIN_CLASSES_AVAILABLE = True
-        _UNIT_UTILS_AVAILABLE = True
-    except ImportError:
-        _DOMAIN_CLASSES_AVAILABLE = False
-        _UNIT_UTILS_AVAILABLE = False
-        Raster = None
-        PointCloud = None
-        RasterPair = None
-        PointCloudPair = None
-        CRSHistory = None
-        # Fallback definitions
-        UnitInfo = None
-        UNKNOWN_UNIT = None
-        METER = None
-        FOOT = None
-        US_SURVEY_FOOT = None
+    _DOMAIN_CLASSES_AVAILABLE = False
+    _UNIT_UTILS_AVAILABLE = False
+    Raster = None
+    PointCloud = None
+    RasterPair = None
+    PointCloudPair = None
+    CRSHistory = None
+    # Fallback definitions
+    UnitInfo = None
+    UNKNOWN_UNIT = None
+    METER = None
+    FOOT = None
+    US_SURVEY_FOOT = None
 
 
 # =============================================================================

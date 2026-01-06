@@ -45,27 +45,13 @@ try:
     )
     _UNIT_UTILS_AVAILABLE = True
 except ImportError:
-    try:
-        from raster import Raster
-        from crs_utils import _ensure_crs_obj, parse_crs_components
-        from crs_history import CRSHistory
-        from unit_utils import (
-            UnitInfo,
-            UNKNOWN_UNIT,
-            METER,
-            lookup_unit,
-            get_conversion_factor,
-            format_value_with_unit,
-        )
-        _UNIT_UTILS_AVAILABLE = True
-    except ImportError:
-        from raster import Raster
-        from crs_utils import _ensure_crs_obj, parse_crs_components
-        from crs_history import CRSHistory
-        _UNIT_UTILS_AVAILABLE = False
-        UnitInfo = None
-        UNKNOWN_UNIT = None
-        METER = None
+    from .raster import Raster
+    from .crs_utils import _ensure_crs_obj, parse_crs_components
+    from .crs_history import CRSHistory
+    _UNIT_UTILS_AVAILABLE = False
+    UnitInfo = None
+    UNKNOWN_UNIT = None
+    METER = None
 
 
 

@@ -7,7 +7,7 @@ PDAL bindings (which are built for Python 3.11).
 
 Usage:
     # Instead of: import pdal
-    from pdal_wrapper import pdal
+    from .pdal_wrapper import pdal
 
     # Then use normally:
     pipeline = pdal.Pipeline(json.dumps({...}))

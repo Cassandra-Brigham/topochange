@@ -34,15 +34,15 @@ from pyproj import CRS as _CRS
 from pyproj.crs import CompoundCRS
 
 # Handle imports
+from .pointcloud import PointCloud
+from .raster import Raster
+from .rasterpair import RasterPair
+from .crs_utils import (
+    _ensure_crs_obj,
+    is_3d_geographic_crs,
+    extract_ellipsoidal_height_as_vertical_crs,
+)
 try:
-    from .pointcloud import PointCloud
-    from .raster import Raster
-    from .rasterpair import RasterPair
-    from .crs_utils import (
-        _ensure_crs_obj,
-        is_3d_geographic_crs,
-        extract_ellipsoidal_height_as_vertical_crs,
-    )
     from .unit_utils import (
         UnitInfo,
         UNKNOWN_UNIT,
@@ -50,22 +50,12 @@ try:
         lookup_unit,
         get_conversion_factor,
     )
+    _UNIT_UTILS_AVAILABLE = True
 except ImportError:
-    from pointcloud import PointCloud
-    from raster import Raster
-    from rasterpair import RasterPair
-    from crs_utils import (
-        _ensure_crs_obj,
-        is_3d_geographic_crs,
-        extract_ellipsoidal_height_as_vertical_crs,
-    )
-    from unit_utils import (
-        UnitInfo,
-        UNKNOWN_UNIT,
-        METER,
-        lookup_unit,
-        get_conversion_factor,
-    )
+    _UNIT_UTILS_AVAILABLE = False
+    UnitInfo = None
+    UNKNOWN_UNIT = None
+    METER = None
 
 
 # =============================================================================

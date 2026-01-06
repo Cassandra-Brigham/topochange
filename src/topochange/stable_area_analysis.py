@@ -85,15 +85,7 @@ class TopoMapInteractor:
         simplify_tolerance : float or None
             Optional simplification tolerance (in raster CRS units) when deriving Stable.
         """
-        # Import Raster from project's raster module
-        # Note: This assumes the module is importable. In actual project use:
-        # from .raster import Raster
-        # For standalone use, adjust the import path accordingly
-        try:
-            from raster import Raster
-        except ImportError:
-            # Fallback for when used within a package
-            from .raster import Raster
+        from .raster import Raster
         
         # Load rasters
         self.topo_diff = Raster.from_file(str(topo_diff_path))
@@ -661,10 +653,7 @@ class TopoMapInteractor:
         vmax: Optional[float] = None,
     ):
         """Update the topographic difference raster and refresh the overlay."""
-        try:
-            from raster import Raster
-        except ImportError:
-            from .raster import Raster
+        from .raster import Raster
         
         self.topo_diff = Raster.from_file(str(topo_diff_path))
         self.refresh_overlay(

@@ -22,10 +22,7 @@ from pathlib import Path
 import geopandas as gpd
 
 # Import variogram classes from variogram module
-try:
-    from variogram import RasterDataHandler, VariogramAnalysis
-except ImportError:
-    from .variogram import RasterDataHandler, VariogramAnalysis
+from .variogram import RasterDataHandler, VariogramAnalysis
 
 
 

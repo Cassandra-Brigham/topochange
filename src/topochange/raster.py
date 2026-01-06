@@ -100,7 +100,7 @@ def parse_time_info(tags: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 dt = datetime.strptime(datetime_str, "%Y:%m:%d %H:%M:%S")
                 if "epoch" not in time_info:
-                    from time_utils import _datetime_to_decimal_year
+                    from .time_utils import _datetime_to_decimal_year
 
                     time_info["epoch"] = _datetime_to_decimal_year(dt)
                     time_info["epoch_source"] = f"parsed_{key}"
@@ -112,7 +112,7 @@ def parse_time_info(tags: Dict[str, Any]) -> Dict[str, Any]:
                     if dt.tzinfo is not None:
                         dt = dt.replace(tzinfo=None)
                     if "epoch" not in time_info:
-                        from time_utils import _datetime_to_decimal_year
+                        from .time_utils import _datetime_to_decimal_year
 
                         time_info["epoch"] = _datetime_to_decimal_year(dt)
                         time_info["epoch_source"] = f"parsed_{key}_iso"
@@ -182,7 +182,7 @@ def parse_time_info(tags: Dict[str, Any]) -> Dict[str, Any]:
             month = int(time_info.get("month", 1))
             day = int(time_info.get("day", 1))
             dt = datetime(year, month, day)
-            from time_utils import _datetime_to_decimal_year
+            from .time_utils import _datetime_to_decimal_year
 
             time_info["epoch"] = _datetime_to_decimal_year(dt)
             time_info["epoch_source"] = "constructed_from_ymd"
@@ -195,7 +195,7 @@ def parse_time_info(tags: Dict[str, Any]) -> Dict[str, Any]:
         try:
             gps_seconds = float(tags_lower[gps_key])
             if "epoch" not in time_info:
-                from time_utils import gps_seconds_to_decimal_year_utc
+                from .time_utils import gps_seconds_to_decimal_year_utc
 
                 time_info["epoch"] = gps_seconds_to_decimal_year_utc(gps_seconds)
                 time_info["epoch_source"] = "gps_time"
@@ -352,7 +352,7 @@ class Raster:
         
         if value is not None:
             # Parse and extract components
-            from crs_utils import parse_crs_components
+            from .crs_utils import parse_crs_components
             _, horiz_wkt, vert_wkt = parse_crs_components(value)
             self._original_horizontal_crs = horiz_wkt
             self._original_vertical_crs = vert_wkt
@@ -399,7 +399,7 @@ class Raster:
         """
         if self._original_horizontal_crs and self._original_vertical_crs:
             try:
-                from crs_utils import create_compound_crs
+                from .crs_utils import create_compound_crs
                 compound_obj = create_compound_crs(
                     self._original_horizontal_crs,
                     self._original_vertical_crs
@@ -432,7 +432,7 @@ class Raster:
         
         if value is not None:
             # Parse and extract components
-            from crs_utils import parse_crs_components
+            from .crs_utils import parse_crs_components
             _, horiz_wkt, vert_wkt = parse_crs_components(value)
             self._current_horizontal_crs = horiz_wkt
             self._current_vertical_crs = vert_wkt
@@ -477,7 +477,7 @@ class Raster:
         """
         if self._current_horizontal_crs and self._current_vertical_crs:
             try:
-                from crs_utils import create_compound_crs
+                from .crs_utils import create_compound_crs
                 compound_obj = create_compound_crs(
                     self._current_horizontal_crs,
                     self._current_vertical_crs
@@ -954,8 +954,8 @@ class Raster:
         # =====================================================================
         # Parse CRS into compound/horizontal/vertical components
         # =====================================================================
-        from crs_utils import parse_crs_components
-        
+        from .crs_utils import parse_crs_components
+
         compound_wkt, horizontal_wkt, vertical_wkt = parse_crs_components(crs)
         
         # Store the rasterio CRS object and parsed WKT strings
@@ -984,7 +984,7 @@ class Raster:
         
         # Determine if heights are orthometric or ellipsoidal
         if obj.original_vertical_crs is not None:
-            from crs_utils import is_orthometric
+            from .crs_utils import is_orthometric
             try:
                 obj.is_orthometric = is_orthometric(obj.original_vertical_crs)
             except Exception:
@@ -1114,9 +1114,9 @@ class Raster:
         import datetime
         from pyproj import CRS as _CRS
         from pyproj.crs import CompoundCRS
-        from crs_utils import is_orthometric
-        from geoid_utils import select_geoid_grid
-        from time_utils import _datetime_to_decimal_year
+        from .crs_utils import is_orthometric
+        from .geoid_utils import select_geoid_grid
+        from .time_utils import _datetime_to_decimal_year
 
         # -------------------------------
         # Helper: safely coerce to CRS
@@ -1347,7 +1347,7 @@ class Raster:
         # 8. Record a single CRSHistory entry summarizing all changes
         # -------------------------------
         try:
-            from crs_history import CRSHistory as _CRSHistory  # type: ignore
+            from .crs_history import CRSHistory as _CRSHistory  # type: ignore
         except Exception:
             _CRSHistory = None  # type: ignore
 
@@ -2003,7 +2003,7 @@ class Raster:
         # Apply vertical datum transformation to Z values
         if needs_vertical and src_vert_kind and dst_vert_kind and src_vert_kind != dst_vert_kind:
             # Get geoid grid
-            from geoid_utils import select_geoid_grid
+            from .geoid_utils import select_geoid_grid
             
             if src_vert_kind == "ellipsoidal" and dst_vert_kind == "orthometric":
                 # Need to subtract geoid height: h_ortho = h_ellip - N
@@ -2152,7 +2152,7 @@ class Raster:
         from pyproj import CRS as _CRS
 
         # Resolve geoid grid
-        from geoid_utils import select_geoid_grid
+        from .geoid_utils import select_geoid_grid
         try:
             geoid_grid, _ = select_geoid_grid(geoid_name, verbose=False)
         except Exception:
@@ -2295,7 +2295,7 @@ class Raster:
         from pyproj import CRS as _CRS
         from pyproj import Transformer
         from rasterio.transform import xy as transform_xy
-        from geoid_utils import select_geoid_grid
+        from .geoid_utils import select_geoid_grid
 
         source_kind = source_kind.lower()
         target_kind = target_kind.lower()
