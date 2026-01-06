@@ -850,8 +850,8 @@ class Raster:
             converted[valid_mask] = data[valid_mask] * factor
             
             # Update profile
-            profile.update(dtype='float32')
-            
+            profile.update(dtype='float32', BIGTIFF='YES')
+
             # Write converted raster
             with rasterio.open(output_path, 'w', **profile) as dst:
                 dst.write(converted, 1)
@@ -2060,6 +2060,7 @@ class Raster:
             'height': dst_height,
             'dtype': 'float32',
             'nodata': out_nodata,
+            'BIGTIFF': 'YES',
         })
 
         with rasterio.open(output_path, 'w', **dst_profile) as dst:
@@ -2419,6 +2420,7 @@ class Raster:
             profile.update(
                 {
                     "dtype": "float32",
+                    "BIGTIFF": "YES",
                 }
             )
             z_new = z_new.astype("float32")
@@ -2664,6 +2666,7 @@ class Raster:
                 "height": dst_height,
                 "dtype": "float32",
                 "nodata": out_nodata,
+                "BIGTIFF": "YES",
             }
         )
 

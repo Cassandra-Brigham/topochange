@@ -81,16 +81,17 @@ def _get_epsg_or_wkt(crs_input: Any) -> Tuple[Optional[int], Optional[str]]:
 def _crs_equivalent(crs1: Any, crs2: Any, tolerance: float = 1e-6) -> bool:
     """
     Check if two CRS are equivalent.
-    
+
     Uses EPSG comparison first, then falls back to WKT comparison.
-    
+    For horizontal CRS comparison, extracts horizontal component from compound CRS.
+
     Parameters
     ----------
     crs1, crs2 : Any
         CRS inputs to compare
     tolerance : float
         Not currently used, but reserved for coordinate tolerance checks
-        
+
     Returns
     -------
     bool
@@ -100,19 +101,32 @@ def _crs_equivalent(crs1: Any, crs2: Any, tolerance: float = 1e-6) -> bool:
         return True
     if crs1 is None or crs2 is None:
         return False
-    
+
     try:
         obj1 = _ensure_crs_obj(crs1)
         obj2 = _ensure_crs_obj(crs2)
-        
+
+        # Extract horizontal component from compound CRS if needed
+        # This allows comparing a projected CRS to a compound CRS's horizontal part
+        def get_horizontal(crs_obj):
+            if crs_obj.is_compound:
+                # Get the horizontal (projected or geographic) sub-CRS
+                for sub_crs in crs_obj.sub_crs_list:
+                    if sub_crs.is_projected or sub_crs.is_geographic:
+                        return sub_crs
+            return crs_obj
+
+        horiz1 = get_horizontal(obj1)
+        horiz2 = get_horizontal(obj2)
+
         # Try EPSG comparison first (fastest)
-        epsg1 = obj1.to_epsg()
-        epsg2 = obj2.to_epsg()
+        epsg1 = horiz1.to_epsg()
+        epsg2 = horiz2.to_epsg()
         if epsg1 is not None and epsg2 is not None:
             return epsg1 == epsg2
-        
+
         # Fall back to equals method
-        return obj1.equals(obj2)
+        return horiz1.equals(horiz2)
     except Exception:
         return str(crs1) == str(crs2)
 
@@ -1661,6 +1675,7 @@ class RasterPair:
             'dtype': 'float32',
             'nodata': np.nan,
             'count': 1,
+            'BIGTIFF': 'YES',
         })
         
         if os.path.exists(output_path) and not overwrite:
@@ -2535,6 +2550,7 @@ class RasterPair:
         diff_profile.update({
             "dtype": "float32",
             "nodata": np.nan,
+            "BIGTIFF": "YES",
         })
 
         with rasterio.open(output_path, "w", **diff_profile) as dst:
