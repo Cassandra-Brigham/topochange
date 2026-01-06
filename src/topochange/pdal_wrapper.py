@@ -30,6 +30,17 @@ from typing import Optional, List, Dict, Any
 IN_COLAB = 'google.colab' in sys.modules
 CONDA_PYTHON = '/usr/local/bin/python'
 PROJ_LIB = '/usr/local/share/proj/'
+CONDA_LIB = '/usr/local/lib'
+
+
+def _get_conda_env() -> Dict[str, str]:
+    """Get environment variables needed for conda PDAL to work."""
+    env = {**os.environ}
+    env['PROJ_LIB'] = PROJ_LIB
+    # Prepend conda lib path to ensure conda's SQLite/GDAL are used
+    existing_ld_path = os.environ.get('LD_LIBRARY_PATH', '')
+    env['LD_LIBRARY_PATH'] = f"{CONDA_LIB}:{existing_ld_path}" if existing_ld_path else CONDA_LIB
+    return env
 
 # Try to import native pdal first
 _NATIVE_PDAL_AVAILABLE = False
@@ -49,7 +60,8 @@ def _check_conda_pdal_available() -> bool:
     try:
         result = subprocess.run(
             [CONDA_PYTHON, '-c', 'import pdal; print(pdal.__version__)'],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, timeout=10,
+            env=_get_conda_env()
         )
         return result.returncode == 0
     except Exception:
@@ -162,10 +174,9 @@ result = {{
 print(json.dumps(result))
 '''
 
-        env = {**os.environ, 'PROJ_LIB': PROJ_LIB}
         result = subprocess.run(
             [CONDA_PYTHON, '-c', script],
-            capture_output=True, text=True, env=env
+            capture_output=True, text=True, env=_get_conda_env()
         )
 
         if result.returncode != 0:
@@ -208,10 +219,9 @@ result = {{"count": count}}
 print(json.dumps(result))
 '''
 
-        env = {**os.environ, 'PROJ_LIB': PROJ_LIB}
         result = subprocess.run(
             [CONDA_PYTHON, '-c', script],
-            capture_output=True, text=True, env=env
+            capture_output=True, text=True, env=_get_conda_env()
         )
 
         if result.returncode != 0:
@@ -262,7 +272,7 @@ class PdalModule:
         elif _CONDA_PDAL_AVAILABLE:
             result = subprocess.run(
                 [CONDA_PYTHON, '-c', 'import pdal; print(pdal.__version__)'],
-                capture_output=True, text=True
+                capture_output=True, text=True, env=_get_conda_env()
             )
             self._version = result.stdout.strip() if result.returncode == 0 else "unknown"
         else:
