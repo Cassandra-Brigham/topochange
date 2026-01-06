@@ -1141,7 +1141,7 @@ class PointCloud:
         - Custom output CRS
         """
 
-        from raster import Raster  # local import to avoid circulars
+        from .raster import Raster  # local import to avoid circulars
 
         # Known interpolation keywords (not enforced, kept for reference)
         valid_interpolations = {
