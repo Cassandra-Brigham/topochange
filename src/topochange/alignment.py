@@ -1035,7 +1035,7 @@ class PointCloudPairAligner:
         logger.info(f"Transformed point cloud saved to {output_path}")
         
         # Instantiate a new PointCloud from the transformed file
-        from pointcloud import PointCloud
+        from .pointcloud import PointCloud
         aligned_pc = PointCloud.from_file(str(output_path))
         
         # Update the pair object to reference the new aligned PointCloud

@@ -626,7 +626,7 @@ class PointCloud:
         # 5) Initialize CRS history object for this point cloud
         # ------------------------------------------------------------------
         try:
-            from crs_history import CRSHistory  # local import to avoid circulars
+            from .crs_history import CRSHistory  # local import to avoid circulars
 
             if getattr(self, "crs_history", None) is None:
                 self.crs_history = CRSHistory(self)

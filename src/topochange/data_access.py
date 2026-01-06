@@ -63,7 +63,7 @@ except ImportError:
 
 # Optional PDAL - use wrapper for Colab compatibility
 try:
-    from pdal_wrapper import pdal
+    from .pdal_wrapper import pdal
     _PDAL_AVAILABLE = True
 except ImportError:
     try:

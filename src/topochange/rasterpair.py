@@ -3011,7 +3011,7 @@ class RasterPair:
             diff_da = diff_da.squeeze(dim=[d for d in diff_da.dims if diff_da[d].size == 1], drop=True)
             base = pair.raster1
         else:
-            from raster import Raster
+            from .raster import Raster
             diff_r = Raster(diff_path)
             # raster data has shape (bands, y, x) or (y, x)
             diff_da = diff_r.data.squeeze()
