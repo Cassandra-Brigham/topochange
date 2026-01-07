@@ -234,6 +234,62 @@ print(json.dumps(result))
 
         return self._count
 
+    def execute_metadata_only(self) -> int:
+        """
+        Execute pipeline and return only metadata, skipping array serialization.
+
+        This is much more memory-efficient for pipelines where you only need
+        metadata (e.g., filters.stats, filters.info) and not the point arrays.
+
+        Returns:
+            Number of points processed
+        """
+        if _NATIVE_PDAL_AVAILABLE:
+            return self._execute_native()  # Native is efficient enough
+        elif _CONDA_PDAL_AVAILABLE:
+            return self._execute_metadata_only_subprocess()
+        else:
+            raise RuntimeError("PDAL is not available.")
+
+    def _execute_metadata_only_subprocess(self) -> int:
+        """Execute using subprocess, returning only metadata (no array serialization)."""
+        script = f'''
+import pdal
+import json
+
+pipeline_json = {repr(self.pipeline_json)}
+pipeline = pdal.Pipeline(pipeline_json)
+count = pipeline.execute()
+
+# Only return metadata - skip expensive array serialization
+result = {{
+    "count": count,
+    "metadata": pipeline.metadata,
+    "log": getattr(pipeline, 'log', '')
+}}
+print(json.dumps(result))
+'''
+
+        result = subprocess.run(
+            [CONDA_PYTHON, '-c', script],
+            capture_output=True, text=True, env=_get_conda_env()
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(f"PDAL pipeline failed: {result.stderr}")
+
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Failed to parse PDAL output: {e}\nOutput: {result.stdout}\nStderr: {result.stderr}")
+
+        self._count = data['count']
+        self._metadata = data['metadata']
+        self._log = data.get('log', '')
+        self._arrays = []  # No arrays returned
+
+        return self._count
+
     @property
     def arrays(self) -> List[np.ndarray]:
         """Get the point arrays from the pipeline."""

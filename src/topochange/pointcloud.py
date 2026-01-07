@@ -6,7 +6,9 @@ time metadata, and performing coordinate transformations via PDAL pipelines.
 from __future__ import annotations
 
 import datetime
+import gc
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,8 +74,6 @@ from .time_utils import (
 
 from .pipeline_builder import CRSState, ProjError, build_complete_pipeline
 from .deformation_utils import select_velocity_model
-
-import math
 
 if TYPE_CHECKING:
     from .raster import Raster
@@ -176,10 +176,16 @@ class PointCloud:
     def from_file(self) -> None:
         """
         Load point cloud from LAS/LAZ file with full metadata extraction.
+
+        Optimized for memory efficiency, especially in Google Colab:
+        - Uses metadata-only execution where possible (skips array serialization)
+        - Uses streaming mode with hexbin for boundary polygon extraction
+        - Includes garbage collection between pipeline executions
         """
 
         # ------------------------------------------------------------------
         # 1) PDAL metadata: basic CRS, units, counts, bounds, etc.
+        #    (count=0 means no points loaded - very efficient)
         # ------------------------------------------------------------------
         pipeline_meta = pdal.Pipeline(
             json.dumps(
@@ -234,113 +240,191 @@ class PointCloud:
         self.miny = las_md.get("miny")
         self.bounds = (self.minx, self.miny, self.maxx, self.maxy)
 
+        # Creation date (needed for GPS time conversion)
+        self.creation_doy = las_md.get("creation_doy")
+        self.creation_year = las_md.get("creation_year")
+
+        # Save srs_md for unit parsing (needed after cleanup)
+        _srs_md = srs_md
+
+        # Clean up Pipeline 1
+        del pipeline_meta, meta_root, md, las_md, srs_md
+        gc.collect()
+
         # ------------------------------------------------------------------
         # 2) Point cloud extent polygon (in UTM)
+        #    Uses streaming hexbin filter for memory efficiency while still
+        #    capturing the true data footprint (not just bounding box)
         # ------------------------------------------------------------------
 
         def _get_pointcloud_extent(pc: PointCloud) -> Tuple[str, Polygon, Polygon]:
-            """Wrapper around a PDAL pipeline to extract key metadata."""
-            meta_pipe = pdal.Pipeline(
-                json.dumps(
-                    {
-                        "pipeline": [
-                            {"type": "readers.las", "filename": str(pc.filename)},
-                            {"type": "filters.stats", "dimensions": "X,Y,Z"},
-                            {"type": "filters.info"},
-                        ]
-                    }
+            """
+            Extract point cloud boundary polygon using streaming hexbin filter.
+
+            This approach is memory-efficient because hexbin works incrementally
+            and only stores hex cell occupancy, not all point coordinates.
+            """
+            # Try hexbin approach first (streaming-compatible, gives true data polygon)
+            try:
+                hexbin_pipe = pdal.Pipeline(
+                    json.dumps(
+                        {
+                            "pipeline": [
+                                {"type": "readers.las", "filename": str(pc.filename)},
+                                {
+                                    "type": "filters.hexbin",
+                                    "edge_size": 10,  # 10m hex cells - balance detail vs memory
+                                    "threshold": 1,   # Include cells with at least 1 point
+                                },
+                            ]
+                        }
+                    )
                 )
-            )
-            meta_pipe.execute()
-            meta_root2 = meta_pipe.metadata
-            md2 = meta_root2.get("metadata", {})
-            stats_md = md2.get("filters.stats", {})
+                # Use metadata-only execution - we only need the boundary, not point arrays
+                if hasattr(hexbin_pipe, 'execute_metadata_only'):
+                    hexbin_pipe.execute_metadata_only()
+                else:
+                    hexbin_pipe.execute()
 
-            # Try to use PDAL's EPSG:4326 boundary if available
-            bbox = stats_md.get("bbox", {})
-            bbox_4326 = bbox.get("EPSG:4326", {})
-            boundary = bbox_4326.get("boundary", {})
-            coords_list = boundary.get("coordinates", [])
-            coords = coords_list[0] if coords_list else []
+                hexbin_md = hexbin_pipe.metadata.get("metadata", {}).get("filters.hexbin", {})
+                boundary_wkt = hexbin_md.get("boundary")
 
-            # ------------------------------------------------------------------
-            # Build poly_4326
-            # ------------------------------------------------------------------
-            if coords:
-                # Normal path: PDAL gave us an EPSG:4326 boundary
-                poly_4326 = Polygon([(float(pt[0]), float(pt[1])) for pt in coords])
-            else:
-                # Fallback path: construct a rectangle from LAS bounds in native CRS
-                # and transform it to EPSG:4326.
-                if pc.bounds is None:
-                    raise ValueError(
-                        "No EPSG:4326 bbox in PDAL metadata and pc.bounds is not set; "
-                        "cannot determine point cloud extent."
+                if boundary_wkt:
+                    # Parse WKT boundary (in native CRS)
+                    from shapely import wkt
+                    poly_native = wkt.loads(boundary_wkt)
+
+                    # Transform to EPSG:4326
+                    src_crs_wkt = (
+                        getattr(pc, "current_horizontal_crs", None)
+                        or getattr(pc, "original_horizontal_crs", None)
+                        or getattr(pc, "current_compound_crs", None)
+                        or getattr(pc, "original_compound_crs", None)
                     )
 
-                minx, miny, maxx, maxy = pc.bounds
+                    if src_crs_wkt:
+                        src_crs = CRS_.from_user_input(src_crs_wkt)
+                        dst_crs = CRS_.from_epsg(4326)
+                        tf = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
+                        poly_4326 = transform(lambda x, y, z=None: tf.transform(x, y), poly_native)
+                    else:
+                        # Assume already in 4326 if no CRS info
+                        poly_4326 = poly_native
 
-                # Determine source CRS for the bounds: prefer current_horizontal_crs,
-                # then original_horizontal_crs, then compound as a last resort.
-                src_crs_wkt = (
-                    getattr(pc, "current_horizontal_crs", None)
-                    or getattr(pc, "original_horizontal_crs", None)
-                    or getattr(pc, "current_compound_crs", None)
-                    or getattr(pc, "original_compound_crs", None)
+                    if not poly_4326.is_empty:
+                        epsg_utm = _determine_utm_epsg(poly_4326)
+                        poly_utm = _reproject_poly(poly_4326, 4326, epsg_utm)
+                        return epsg_utm, poly_utm, poly_4326
+
+            except Exception:
+                pass  # Fall through to fallback methods
+
+            # Fallback: Try filters.stats for EPSG:4326 boundary (loads all points)
+            try:
+                meta_pipe = pdal.Pipeline(
+                    json.dumps(
+                        {
+                            "pipeline": [
+                                {"type": "readers.las", "filename": str(pc.filename)},
+                                {"type": "filters.stats", "dimensions": "X,Y,Z"},
+                                {"type": "filters.info"},
+                            ]
+                        }
+                    )
+                )
+                # Use metadata-only execution to avoid array serialization
+                if hasattr(meta_pipe, 'execute_metadata_only'):
+                    meta_pipe.execute_metadata_only()
+                else:
+                    meta_pipe.execute()
+
+                meta_root2 = meta_pipe.metadata
+                md2 = meta_root2.get("metadata", {})
+                stats_md = md2.get("filters.stats", {})
+
+                # Try to use PDAL's EPSG:4326 boundary if available
+                bbox = stats_md.get("bbox", {})
+                bbox_4326 = bbox.get("EPSG:4326", {})
+                boundary = bbox_4326.get("boundary", {})
+                coords_list = boundary.get("coordinates", [])
+                coords = coords_list[0] if coords_list else []
+
+                if coords:
+                    poly_4326 = Polygon([(float(pt[0]), float(pt[1])) for pt in coords])
+                    if not poly_4326.is_empty:
+                        epsg_utm = _determine_utm_epsg(poly_4326)
+                        poly_utm = _reproject_poly(poly_4326, 4326, epsg_utm)
+                        return epsg_utm, poly_utm, poly_4326
+            except Exception:
+                pass  # Fall through to bounding box fallback
+
+            # Final fallback: construct rectangle from LAS header bounds (no point loading)
+            if pc.bounds is None:
+                raise ValueError(
+                    "No EPSG:4326 bbox in PDAL metadata and pc.bounds is not set; "
+                    "cannot determine point cloud extent."
                 )
 
-                if src_crs_wkt:
-                    src_crs = CRS_.from_user_input(src_crs_wkt)
-                else:
-                    # Last resort: assume bounds are already in EPSG:4326 so we at
-                    # least avoid crashing. This is unlikely for your workflow but
-                    # prevents hard failures.
-                    src_crs = CRS_.from_epsg(4326)
+            minx, miny, maxx, maxy = pc.bounds
 
-                dst_crs = CRS_.from_epsg(4326)
-                tf = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
+            src_crs_wkt = (
+                getattr(pc, "current_horizontal_crs", None)
+                or getattr(pc, "original_horizontal_crs", None)
+                or getattr(pc, "current_compound_crs", None)
+                or getattr(pc, "original_compound_crs", None)
+            )
 
-                xs = [minx, maxx, maxx, minx, minx]
-                ys = [miny, miny, maxy, maxy, miny]
-                lon, lat = tf.transform(xs, ys)
-                poly_4326 = Polygon(zip(lon, lat))
+            if src_crs_wkt:
+                src_crs = CRS_.from_user_input(src_crs_wkt)
+            else:
+                src_crs = CRS_.from_epsg(4326)
+
+            dst_crs = CRS_.from_epsg(4326)
+            tf = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
+
+            xs = [minx, maxx, maxx, minx, minx]
+            ys = [miny, miny, maxy, maxy, miny]
+            lon, lat = tf.transform(xs, ys)
+            poly_4326 = Polygon(zip(lon, lat))
 
             if poly_4326.is_empty:
                 raise ValueError(
                     "Failed to build EPSG:4326 extent polygon from metadata or bounds."
                 )
 
-            # Determine local UTM from the 4326 polygon and reproject to that UTM
             epsg_utm = _determine_utm_epsg(poly_4326)
             poly_utm = _reproject_poly(poly_4326, 4326, epsg_utm)
-            return epsg_utm, poly_utm, poly_4326 
+            return epsg_utm, poly_utm, poly_4326
 
         self.epsg_utm, self.poly_utm, self.poly_4326 = _get_pointcloud_extent(self)
         self.bbox_4326 = self.poly_4326.bounds  # (min_lon, min_lat, max_lon, max_lat)
+
+        # Clean up Pipeline 2
+        gc.collect()
 
         # ------------------------------------------------------------------
         # Units - Enhanced with UnitInfo objects
         # ------------------------------------------------------------------
         # Parse units from PDAL metadata (srs.units.horizontal/vertical)
-        self.horizontal_unit, self.vertical_unit = parse_pdal_units(srs_md)
-        
+        self.horizontal_unit, self.vertical_unit = parse_pdal_units(_srs_md)
+
         # If PDAL didn't provide units, try to extract from CRS
         if self.horizontal_unit.name == "unknown" and self.original_horizontal_crs:
             self.horizontal_unit = get_horizontal_unit(self.original_horizontal_crs)
-        
+
         if self.vertical_unit.name == "unknown" and self.original_vertical_crs:
             self.vertical_unit = get_vertical_unit(self.original_vertical_crs)
-        
+
         # Backward compatible string properties
         self.horizontal_units = self.horizontal_unit.display_name
         self.vertical_units = self.vertical_unit.display_name
 
-        # Creation date
-        self.creation_doy = las_md.get("creation_doy")
-        self.creation_year = las_md.get("creation_year")
+        # Clean up _srs_md
+        del _srs_md
 
         # ------------------------------------------------------------------
         # 3) GPS time stats (and conversion to GPS seconds if needed)
+        #    Uses execute_metadata_only() to avoid array serialization overhead
         # ------------------------------------------------------------------
         #
         # For original survey LAS files, we expect valid GpsTime and derive
@@ -362,7 +446,11 @@ class PointCloud:
                     }
                 )
             )
-            pipeline_gps_time.execute()
+            # Use metadata-only execution to avoid expensive array serialization
+            if hasattr(pipeline_gps_time, 'execute_metadata_only'):
+                pipeline_gps_time.execute_metadata_only()
+            else:
+                pipeline_gps_time.execute()
 
             gps_root = pipeline_gps_time.metadata
             gps_md = gps_root.get("metadata", {}).get("filters.stats", {})
@@ -585,8 +673,12 @@ class PointCloud:
             self.decimal_year_max_utc = None
             self.epoch = None
 
+        # Clean up GPS time pipeline
+        gc.collect()
+
         # ------------------------------------------------------------------
         # 4) Classification stats
+        #    Uses execute_metadata_only() to avoid array serialization overhead
         # ------------------------------------------------------------------
         pipeline_classification = pdal.Pipeline(
             json.dumps(
@@ -603,7 +695,11 @@ class PointCloud:
                 }
             )
         )
-        pipeline_classification.execute()
+        # Use metadata-only execution to avoid expensive array serialization
+        if hasattr(pipeline_classification, 'execute_metadata_only'):
+            pipeline_classification.execute_metadata_only()
+        else:
+            pipeline_classification.execute()
         class_root = pipeline_classification.metadata
         class_md = class_root.get("metadata", {}).get("filters.stats", {})
         class_stats_list = class_md.get("statistic", [])
@@ -621,6 +717,10 @@ class PointCloud:
 
         # Determine if ground points have been classified
         self.has_ground_class = 2 in self.class_values
+
+        # Clean up Classification pipeline
+        del pipeline_classification, class_root, class_md, class_stats_list, bins
+        gc.collect()
 
         # ------------------------------------------------------------------
         # 5) Initialize CRS history object for this point cloud
