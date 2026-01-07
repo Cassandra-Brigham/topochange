@@ -13,6 +13,7 @@ __pycache__/
 *.so
 .Python
 build/
+test_data/
 develop-eggs/
 dist/
 downloads/
