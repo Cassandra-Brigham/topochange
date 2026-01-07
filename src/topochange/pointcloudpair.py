@@ -167,17 +167,25 @@ def _units_equivalent(unit1: Any, unit2: Any) -> Tuple[bool, Optional[float]]:
     return False, None
 
 
-def _load_points_from_las(filename: str, max_points: Optional[int] = None) -> np.ndarray:
+def _load_points_from_las(
+    filename: str,
+    max_points: Optional[int] = None,
+    voxel_size: Optional[float] = None,
+) -> np.ndarray:
     """
     Load XYZ points from a LAS/LAZ file using PDAL.
-    
+
     Parameters
     ----------
     filename : str
         Path to LAS/LAZ file
     max_points : int, optional
-        Maximum number of points to load (for downsampling)
-        
+        Maximum number of points to load (random sampling after load).
+        For memory efficiency in Colab, prefer using voxel_size instead.
+    voxel_size : float, optional
+        Voxel grid downsampling size in meters. Applied via PDAL filters.voxelgrid
+        which is more memory efficient than loading all points then sampling.
+
     Returns
     -------
     np.ndarray
@@ -188,28 +196,30 @@ def _load_points_from_las(filename: str, max_points: Optional[int] = None) -> np
             {"type": "readers.las", "filename": str(filename)},
         ]
     }
-    
-    if max_points is not None:
-        # Add random sampling filter
+
+    # Use voxel grid downsampling if specified (more memory efficient)
+    if voxel_size is not None:
         pipeline_spec["pipeline"].append({
-            "type": "filters.sample",
-            "radius": 0,  # Use count-based sampling
+            "type": "filters.voxeldownsize",
+            "cell": voxel_size,
+            "mode": "center",  # Use voxel center
         })
-    
+
     pipe = pdal.Pipeline(json.dumps(pipeline_spec))
     pipe.execute()
-    
+
     arrays = pipe.arrays
     if not arrays or len(arrays) == 0:
         raise ValueError(f"No points loaded from {filename}")
-    
+
     arr = arrays[0]
     points = np.column_stack([arr['X'], arr['Y'], arr['Z']]).astype(np.float64)
-    
+
+    # Additional random sampling if max_points specified and still too many
     if max_points is not None and len(points) > max_points:
         indices = np.random.choice(len(points), max_points, replace=False)
         points = points[indices]
-    
+
     return points
 
 
@@ -760,12 +770,44 @@ class PointCloudPair:
         output_path: Optional[str] = None,
         overwrite: bool = True,
         verbose: bool = True,
+        initial_voxel_size: Optional[float] = None,
+        max_points: Optional[int] = 2_000_000,
     ) -> Dict[str, Any]:
         """
         Align pc1 to pc2 using ICP registration via small_gicp.
-        
+
         Point clouds are automatically centered before registration to avoid
         numerical issues with large UTM coordinates.
+
+        Parameters
+        ----------
+        method : str
+            Registration method: 'gicp', 'vgicp', 'icp', or 'plane_icp'
+        downsample_resolution : float
+            Voxel size for small_gicp preprocessing (default 0.5m)
+        max_correspondence_distance : float
+            Maximum distance for point correspondences (default 1.0m)
+        max_iterations : int
+            Maximum ICP iterations
+        transformation_epsilon : float
+            Convergence threshold
+        num_threads : int
+            Number of threads for parallel processing
+        apply_transform : bool
+            Whether to apply the transform and update internal state
+        output_path : str, optional
+            Path to save aligned point cloud
+        overwrite : bool
+            Whether to overwrite existing output file
+        verbose : bool
+            Print progress information
+        initial_voxel_size : float, optional
+            Voxel size for initial downsampling during point cloud loading.
+            If None, uses downsample_resolution * 2 for memory efficiency.
+            Set to 0 to disable initial downsampling (loads all points).
+        max_points : int, optional
+            Maximum points to load per cloud (default 2M). Applied after
+            voxel downsampling. Set to None for no limit.
         """
         if not _has_small_gicp():
             raise ImportError(
@@ -780,30 +822,59 @@ class PointCloudPair:
             print(f"Method: {method.upper()}")
             print(f"Downsample resolution: {downsample_resolution} m")
             print(f"Max correspondence distance: {max_correspondence_distance} m")
-        
+
         # Use transformed pc1 if available, otherwise original
         source_pc = self._pc1_transformed or self.pc1
         target_pc = self.pc2
-        
-        # Load points
+
+        # Determine initial voxel size for memory-efficient loading
+        # Default to 2x the downsample resolution (will be further downsampled by small_gicp)
+        if initial_voxel_size is None:
+            load_voxel_size = downsample_resolution * 2.0
+        elif initial_voxel_size == 0:
+            load_voxel_size = None  # Disable voxel downsampling, load all points
+        else:
+            load_voxel_size = initial_voxel_size
+
+        if verbose:
+            if load_voxel_size:
+                print(f"Initial voxel downsampling: {load_voxel_size} m")
+            if max_points:
+                print(f"Max points per cloud: {max_points:,}")
+
+        # Load points with optional downsampling for memory efficiency
         if verbose:
             print(f"\nLoading source points from: {Path(source_pc.filename).name}")
-        source_points = _load_points_from_las(source_pc.filename)
-        
+        source_points = _load_points_from_las(
+            source_pc.filename,
+            max_points=max_points,
+            voxel_size=load_voxel_size,
+        )
+
         if verbose:
             print(f"Loading target points from: {Path(target_pc.filename).name}")
-        target_points = _load_points_from_las(target_pc.filename)
-        
+        target_points = _load_points_from_las(
+            target_pc.filename,
+            max_points=max_points,
+            voxel_size=load_voxel_size,
+        )
+
         if verbose:
             print(f"Source points: {len(source_points):,}")
             print(f"Target points: {len(target_points):,}")
-        
+
         # =========================================================================
         # CENTER POINT CLOUDS to avoid voxel coordinate overflow
         # =========================================================================
-        # Compute centroid of combined point clouds for consistent centering
-        all_points = np.vstack([source_points, target_points])
-        centroid = np.mean(all_points, axis=0)
+        # Compute centroid WITHOUT concatenating arrays (memory efficient)
+        # Combined centroid = weighted average of individual centroids
+        n_source = len(source_points)
+        n_target = len(target_points)
+        n_total = n_source + n_target
+
+        source_centroid = np.mean(source_points, axis=0)
+        target_centroid = np.mean(target_points, axis=0)
+        centroid = (source_centroid * n_source + target_centroid * n_target) / n_total
         
         if verbose:
             print(f"\nCentering point clouds (centroid: [{centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f}])")
