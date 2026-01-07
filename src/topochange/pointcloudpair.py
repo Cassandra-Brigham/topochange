@@ -1044,8 +1044,8 @@ class PointCloudPair:
             dir1 = dir2 = Path(output_dir)
             dir1.mkdir(parents=True, exist_ok=True)
         
-        out1 = dir1 / f"{Path(pc1_source.filename).stem}_{dem_type}_{resolution}m.tif"
-        out2 = dir2 / f"{Path(self.pc2.filename).stem}_{dem_type}_{resolution}m.tif"
+        out1 = dir1 / f"{Path(pc1_source.filename).stem}_{dem_type}_{int(resolution)}m.tif"
+        out2 = dir2 / f"{Path(self.pc2.filename).stem}_{dem_type}_{int(resolution)}m.tif"
         
         if verbose:
             print(f"\nCreating DEM from pc1: {Path(pc1_source.filename).name}")
