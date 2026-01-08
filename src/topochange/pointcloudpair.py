@@ -171,6 +171,7 @@ def _load_points_from_las(
     filename: str,
     max_points: Optional[int] = None,
     voxel_size: Optional[float] = None,
+    streaming: bool = True,
 ) -> np.ndarray:
     """
     Load XYZ points from a LAS/LAZ file using PDAL.
@@ -183,37 +184,93 @@ def _load_points_from_las(
         Maximum number of points to load (random sampling after load).
         For memory efficiency in Colab, prefer using voxel_size instead.
     voxel_size : float, optional
-        Voxel grid downsampling size in meters. Applied via PDAL filters.voxelgrid
+        Voxel grid downsampling size in meters. Applied via PDAL filters.voxeldownsize
         which is more memory efficient than loading all points then sampling.
+    streaming : bool, default True
+        If True and voxel_size is set, use streaming mode to process points
+        in chunks. This prevents memory spikes for large point clouds.
 
     Returns
     -------
     np.ndarray
         Nx3 array of XYZ coordinates
     """
-    pipeline_spec = {
-        "pipeline": [
-            {"type": "readers.las", "filename": str(filename)},
-        ]
-    }
+    import tempfile
+    import os as _os
 
-    # Use voxel grid downsampling if specified (more memory efficient)
-    if voxel_size is not None:
-        pipeline_spec["pipeline"].append({
-            "type": "filters.voxeldownsize",
-            "cell": voxel_size,
-            "mode": "center",  # Use voxel center
-        })
+    # For streaming with voxel downsampling, write to temp file first
+    # This avoids loading all points into Python memory
+    if streaming and voxel_size is not None:
+        # Create temp file for downsampled output
+        with tempfile.NamedTemporaryFile(suffix='.las', delete=False) as tmp:
+            tmp_path = tmp.name
 
-    pipe = pdal.Pipeline(json.dumps(pipeline_spec))
-    pipe.execute()
+        try:
+            # Pipeline: read -> voxel downsample -> write to temp file
+            downsample_spec = {
+                "pipeline": [
+                    {"type": "readers.las", "filename": str(filename)},
+                    {
+                        "type": "filters.voxeldownsize",
+                        "cell": voxel_size,
+                        "mode": "center",
+                    },
+                    {"type": "writers.las", "filename": tmp_path},
+                ]
+            }
+            pipe = pdal.Pipeline(json.dumps(downsample_spec))
+            # Use streaming execution - processes in chunks
+            if hasattr(pipe, 'execute_streaming'):
+                pipe.execute_streaming(chunk_size=100000)
+            else:
+                pipe.execute()
 
-    arrays = pipe.arrays
-    if not arrays or len(arrays) == 0:
-        raise ValueError(f"No points loaded from {filename}")
+            # Now read the (much smaller) downsampled file
+            read_spec = {
+                "pipeline": [
+                    {"type": "readers.las", "filename": tmp_path},
+                ]
+            }
+            read_pipe = pdal.Pipeline(json.dumps(read_spec))
+            read_pipe.execute()
 
-    arr = arrays[0]
-    points = np.column_stack([arr['X'], arr['Y'], arr['Z']]).astype(np.float64)
+            arrays = read_pipe.arrays
+            if not arrays or len(arrays) == 0:
+                raise ValueError(f"No points after downsampling from {filename}")
+
+            arr = arrays[0]
+            points = np.column_stack([arr['X'], arr['Y'], arr['Z']]).astype(np.float64)
+
+        finally:
+            # Clean up temp file
+            if _os.path.exists(tmp_path):
+                _os.remove(tmp_path)
+
+    else:
+        # Standard non-streaming approach
+        pipeline_spec = {
+            "pipeline": [
+                {"type": "readers.las", "filename": str(filename)},
+            ]
+        }
+
+        # Use voxel grid downsampling if specified
+        if voxel_size is not None:
+            pipeline_spec["pipeline"].append({
+                "type": "filters.voxeldownsize",
+                "cell": voxel_size,
+                "mode": "center",
+            })
+
+        pipe = pdal.Pipeline(json.dumps(pipeline_spec))
+        pipe.execute()
+
+        arrays = pipe.arrays
+        if not arrays or len(arrays) == 0:
+            raise ValueError(f"No points loaded from {filename}")
+
+        arr = arrays[0]
+        points = np.column_stack([arr['X'], arr['Y'], arr['Z']]).astype(np.float64)
 
     # Additional random sampling if max_points specified and still too many
     if max_points is not None and len(points) > max_points:
@@ -879,20 +936,25 @@ class PointCloudPair:
         if verbose:
             print(f"\nCentering point clouds (centroid: [{centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f}])")
         
-        # Center both point clouds
-        source_centered = source_points - centroid
-        target_centered = target_points - centroid
-        
+        # Center both point clouds (in-place to save memory)
+        source_points -= centroid
+        target_points -= centroid
+
         if verbose:
-            src_range = np.ptp(source_centered, axis=0)
-            tgt_range = np.ptp(target_centered, axis=0)
+            src_range = np.ptp(source_points, axis=0)
+            tgt_range = np.ptp(target_points, axis=0)
             print(f"Source range after centering: X={src_range[0]:.1f}, Y={src_range[1]:.1f}, Z={src_range[2]:.1f}")
             print(f"Target range after centering: X={tgt_range[0]:.1f}, Y={tgt_range[1]:.1f}, Z={tgt_range[2]:.1f}")
-        
+
         # Create small_gicp point clouds from CENTERED coordinates
-        source_cloud = small_gicp.PointCloud(source_centered)
-        target_cloud = small_gicp.PointCloud(target_centered)
-        
+        source_cloud = small_gicp.PointCloud(source_points)
+        target_cloud = small_gicp.PointCloud(target_points)
+
+        # Free numpy arrays - small_gicp has its own copy now
+        del source_points, target_points
+        import gc
+        gc.collect()
+
         # Preprocess (downsampling, normal estimation, KdTree)
         if verbose:
             print(f"\nPreprocessing point clouds...")
