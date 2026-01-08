@@ -173,9 +173,28 @@ class PointCloud:
     # -------------------------------------------------------------------------
     # Metadata loading
     # -------------------------------------------------------------------------
-    def from_file(self) -> None:
+    def from_file(self, lightweight: bool = False, bbox_only: bool = True) -> None:
         """
-        Load point cloud from LAS/LAZ file with full metadata extraction.
+        Load point cloud from LAS/LAZ file with metadata extraction.
+
+        Parameters
+        ----------
+        lightweight : bool, default False
+            If True, only load essential metadata from the LAS header without
+            running additional PDAL pipelines. This is much faster and uses
+            minimal memory, but skips:
+            - GPS time statistics and epoch calculation
+            - Classification statistics
+
+            Use lightweight=True for large files in memory-constrained
+            environments like Google Colab, or when you only need basic
+            CRS and bounds information.
+
+        bbox_only : bool, default True
+            Only applies when lightweight=True.
+            - If True: Use simple bounding box for polygon (fastest, no point loading)
+            - If False: Use hexbin filter for true data footprint polygon
+              (loads points but more accurate boundary)
 
         Optimized for memory efficiency, especially in Google Colab:
         - Uses metadata-only execution where possible (skips array serialization)
@@ -252,11 +271,9 @@ class PointCloud:
         gc.collect()
 
         # ------------------------------------------------------------------
-        # 2) Point cloud extent polygon (in UTM)
-        #    Uses streaming hexbin filter for memory efficiency while still
-        #    capturing the true data footprint (not just bounding box)
+        # Helper function to extract point cloud extent polygon
+        # Defined here so both lightweight and full modes can use it
         # ------------------------------------------------------------------
-
         def _get_pointcloud_extent(pc: PointCloud) -> Tuple[str, Polygon, Polygon]:
             """
             Extract point cloud boundary polygon using streaming hexbin filter.
@@ -280,8 +297,10 @@ class PointCloud:
                         }
                     )
                 )
-                # Use metadata-only execution - we only need the boundary, not point arrays
-                if hasattr(hexbin_pipe, 'execute_metadata_only'):
+                # Use streaming execution - processes points in chunks, very memory efficient
+                if hasattr(hexbin_pipe, 'execute_streaming_metadata'):
+                    hexbin_pipe.execute_streaming_metadata(chunk_size=100000)
+                elif hasattr(hexbin_pipe, 'execute_metadata_only'):
                     hexbin_pipe.execute_metadata_only()
                 else:
                     hexbin_pipe.execute()
@@ -396,6 +415,84 @@ class PointCloud:
             poly_utm = _reproject_poly(poly_4326, 4326, epsg_utm)
             return epsg_utm, poly_utm, poly_4326
 
+        # ------------------------------------------------------------------
+        # LIGHTWEIGHT MODE: Skip expensive pipelines
+        # ------------------------------------------------------------------
+        if lightweight:
+            # Parse units from saved srs_md
+            self.horizontal_unit, self.vertical_unit = parse_pdal_units(_srs_md)
+            if self.horizontal_unit.name == "unknown" and self.original_horizontal_crs:
+                self.horizontal_unit = get_horizontal_unit(self.original_horizontal_crs)
+            if self.vertical_unit.name == "unknown" and self.original_vertical_crs:
+                self.vertical_unit = get_vertical_unit(self.original_vertical_crs)
+            self.horizontal_units = self.horizontal_unit.display_name
+            self.vertical_units = self.vertical_unit.display_name
+
+            if bbox_only:
+                # Build bounding box polygon from header bounds (no point loading)
+                src_crs_wkt = (
+                    self.original_horizontal_crs
+                    or self.original_compound_crs
+                )
+                if src_crs_wkt:
+                    src_crs = CRS_.from_user_input(src_crs_wkt)
+                else:
+                    src_crs = CRS_.from_epsg(4326)
+
+                dst_crs = CRS_.from_epsg(4326)
+                tf = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
+
+                xs = [self.minx, self.maxx, self.maxx, self.minx, self.minx]
+                ys = [self.miny, self.miny, self.maxy, self.maxy, self.miny]
+                lon, lat = tf.transform(xs, ys)
+                self.poly_4326 = Polygon(zip(lon, lat))
+                self.bbox_4326 = self.poly_4326.bounds
+
+                self.epsg_utm = _determine_utm_epsg(self.poly_4326)
+                self.poly_utm = _reproject_poly(self.poly_4326, 4326, self.epsg_utm)
+            else:
+                # Use hexbin for true data polygon (loads points but accurate)
+                self.epsg_utm, self.poly_utm, self.poly_4326 = _get_pointcloud_extent(self)
+                self.bbox_4326 = self.poly_4326.bounds
+
+            # Set GPS/epoch attributes to None (not computed in lightweight mode)
+            self.gps_time_mean_raw = None
+            self.gps_time_min_raw = None
+            self.gps_time_max_raw = None
+            self.gps_stddev_raw = None
+            self.gps_time_mean = None
+            self.gps_time_min = None
+            self.gps_time_max = None
+            self.gps_stddev = None
+            self.decimal_year_mean_utc = None
+            self.decimal_year_min_utc = None
+            self.decimal_year_max_utc = None
+            self.epoch = None
+
+            # Set classification attributes to empty (not computed in lightweight mode)
+            self.classification = {}
+            self.class_values = []
+            self.class_counts = []
+            self.has_ground_class = False
+
+            # Initialize CRS history
+            try:
+                from .crs_history import CRSHistory
+                if getattr(self, "crs_history", None) is None:
+                    self.crs_history = CRSHistory(self)
+            except Exception:
+                self.crs_history = None
+
+            del _srs_md
+            gc.collect()
+            return  # Early return for lightweight mode
+
+        # ------------------------------------------------------------------
+        # 2) Point cloud extent polygon (in UTM)
+        #    Uses streaming hexbin filter for memory efficiency while still
+        #    capturing the true data footprint (not just bounding box)
+        #    (function defined earlier in from_file for use by lightweight mode)
+        # ------------------------------------------------------------------
         self.epsg_utm, self.poly_utm, self.poly_4326 = _get_pointcloud_extent(self)
         self.bbox_4326 = self.poly_4326.bounds  # (min_lon, min_lat, max_lon, max_lat)
 
@@ -446,8 +543,10 @@ class PointCloud:
                     }
                 )
             )
-            # Use metadata-only execution to avoid expensive array serialization
-            if hasattr(pipeline_gps_time, 'execute_metadata_only'):
+            # Use streaming execution for memory efficiency with large files
+            if hasattr(pipeline_gps_time, 'execute_streaming_metadata'):
+                pipeline_gps_time.execute_streaming_metadata(chunk_size=100000)
+            elif hasattr(pipeline_gps_time, 'execute_metadata_only'):
                 pipeline_gps_time.execute_metadata_only()
             else:
                 pipeline_gps_time.execute()
@@ -695,8 +794,10 @@ class PointCloud:
                 }
             )
         )
-        # Use metadata-only execution to avoid expensive array serialization
-        if hasattr(pipeline_classification, 'execute_metadata_only'):
+        # Use streaming execution for memory efficiency with large files
+        if hasattr(pipeline_classification, 'execute_streaming_metadata'):
+            pipeline_classification.execute_streaming_metadata(chunk_size=100000)
+        elif hasattr(pipeline_classification, 'execute_metadata_only'):
             pipeline_classification.execute_metadata_only()
         else:
             pipeline_classification.execute()
