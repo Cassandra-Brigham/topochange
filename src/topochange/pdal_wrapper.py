@@ -290,6 +290,79 @@ print(json.dumps(result))
 
         return self._count
 
+    def execute_streaming_metadata(self, chunk_size: int = 100000) -> int:
+        """
+        Execute pipeline in streaming mode for memory-efficient metadata extraction.
+
+        This processes points in chunks without loading the entire point cloud
+        into memory. Useful for very large files that would otherwise cause
+        out-of-memory errors.
+
+        Note: Not all filters support streaming mode. filters.stats and
+        filters.hexbin do support streaming.
+
+        Args:
+            chunk_size: Number of points to process at a time (default 100000)
+
+        Returns:
+            Number of points processed
+        """
+        if _NATIVE_PDAL_AVAILABLE:
+            return self._execute_streaming_metadata_native(chunk_size)
+        elif _CONDA_PDAL_AVAILABLE:
+            return self._execute_streaming_metadata_subprocess(chunk_size)
+        else:
+            raise RuntimeError("PDAL is not available.")
+
+    def _execute_streaming_metadata_native(self, chunk_size: int) -> int:
+        """Execute streaming with native PDAL, extracting only metadata."""
+        pipeline = _native_pdal.Pipeline(self.pipeline_json)
+        count = pipeline.execute_streaming(chunk_size=chunk_size)
+        self._count = count
+        self._metadata = pipeline.metadata
+        self._log = getattr(pipeline, 'log', '')
+        self._arrays = []
+        return count
+
+    def _execute_streaming_metadata_subprocess(self, chunk_size: int) -> int:
+        """Execute streaming using subprocess, returning only metadata."""
+        script = f'''
+import pdal
+import json
+
+pipeline_json = {repr(self.pipeline_json)}
+pipeline = pdal.Pipeline(pipeline_json)
+count = pipeline.execute_streaming(chunk_size={chunk_size})
+
+# Only return metadata - no arrays in streaming mode anyway
+result = {{
+    "count": count,
+    "metadata": pipeline.metadata,
+    "log": getattr(pipeline, 'log', '')
+}}
+print(json.dumps(result))
+'''
+
+        result = subprocess.run(
+            [CONDA_PYTHON, '-c', script],
+            capture_output=True, text=True, env=_get_conda_env()
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(f"PDAL streaming pipeline failed: {result.stderr}")
+
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Failed to parse PDAL output: {e}\nOutput: {result.stdout}\nStderr: {result.stderr}")
+
+        self._count = data['count']
+        self._metadata = data['metadata']
+        self._log = data.get('log', '')
+        self._arrays = []
+
+        return self._count
+
     @property
     def arrays(self) -> List[np.ndarray]:
         """Get the point arrays from the pipeline."""
