@@ -956,9 +956,12 @@ class PointCloudPair:
         gc.collect()
 
         # Preprocess (downsampling, normal estimation, KdTree)
+        source_size_before = source_cloud.size()
+        target_size_before = target_cloud.size()
+
         if verbose:
             print(f"\nPreprocessing point clouds...")
-        
+
         source_cloud, source_tree = small_gicp.preprocess_points(
             source_cloud,
             downsampling_resolution=downsample_resolution,
@@ -969,10 +972,10 @@ class PointCloudPair:
             downsampling_resolution=downsample_resolution,
             num_threads=num_threads,
         )
-        
+
         if verbose:
-            print(f"Source points after downsampling: {source_cloud.size():,}")
-            print(f"Target points after downsampling: {target_cloud.size():,}")
+            print(f"Source points after downsampling: {source_cloud.size():,} (was {source_size_before:,})")
+            print(f"Target points after downsampling: {target_cloud.size():,} (was {target_size_before:,})")
         
         # Select registration type (pass as string, not enum)
         method_upper = method.upper()
@@ -989,6 +992,7 @@ class PointCloudPair:
             target_tree,
             registration_type=method_upper,
             max_correspondence_distance=max_correspondence_distance,
+            max_iterations=max_iterations,
             num_threads=num_threads,
         )
         
