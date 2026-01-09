@@ -1021,17 +1021,26 @@ class PointCloudPair:
             print(f"\nTransformation in original coordinates:")
             print(T_original)
         
-        # Compute fitness metrics using ORIGINAL coordinates
-        source_transformed = (T_original[:3, :3] @ source_points.T).T + T_original[:3, 3]
-        
+        # Compute fitness metrics using the downsampled points from small_gicp
+        # Extract points from small_gicp clouds (these are already centered and downsampled)
+        source_pts_centered = np.asarray(source_cloud.points())
+        target_pts_centered = np.asarray(target_cloud.points())
+
+        # Transform source points using centered transformation
+        source_transformed_centered = (T_centered[:3, :3] @ source_pts_centered.T).T + T_centered[:3, 3]
+
         # Use KD-tree for nearest neighbor distances
         from scipy.spatial import cKDTree
-        target_tree_scipy = cKDTree(target_points)
-        distances, _ = target_tree_scipy.query(source_transformed, k=1)
-        
+        target_tree_scipy = cKDTree(target_pts_centered)
+        distances, _ = target_tree_scipy.query(source_transformed_centered, k=1)
+
         inlier_mask = distances < max_correspondence_distance
         fitness = np.sum(inlier_mask) / len(distances)
         rmse = np.sqrt(np.mean(distances[inlier_mask] ** 2)) if np.any(inlier_mask) else float('inf')
+
+        # Clean up fitness calculation arrays
+        del source_pts_centered, target_pts_centered, source_transformed_centered
+        gc.collect()
         
         # Extract rotation and translation for reporting
         R = T_original[:3, :3]
