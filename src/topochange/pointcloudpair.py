@@ -1023,8 +1023,9 @@ class PointCloudPair:
         
         # Compute fitness metrics using the downsampled points from small_gicp
         # Extract points from small_gicp clouds (these are already centered and downsampled)
-        source_pts_centered = np.asarray(source_cloud.points())
-        target_pts_centered = np.asarray(target_cloud.points())
+        # small_gicp may return 4 columns (x,y,z,w), so take only first 3
+        source_pts_centered = np.asarray(source_cloud.points())[:, :3]
+        target_pts_centered = np.asarray(target_cloud.points())[:, :3]
 
         # Transform source points using centered transformation
         source_transformed_centered = (T_centered[:3, :3] @ source_pts_centered.T).T + T_centered[:3, 3]
