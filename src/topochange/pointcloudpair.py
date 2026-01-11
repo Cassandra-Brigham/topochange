@@ -943,8 +943,19 @@ class PointCloudPair:
         if verbose:
             src_range = np.ptp(source_points, axis=0)
             tgt_range = np.ptp(target_points, axis=0)
+            src_min = np.min(source_points, axis=0)
+            src_max = np.max(source_points, axis=0)
+            tgt_min = np.min(target_points, axis=0)
+            tgt_max = np.max(target_points, axis=0)
             print(f"Source range after centering: X={src_range[0]:.1f}, Y={src_range[1]:.1f}, Z={src_range[2]:.1f}")
             print(f"Target range after centering: X={tgt_range[0]:.1f}, Y={tgt_range[1]:.1f}, Z={tgt_range[2]:.1f}")
+            # Check overlap
+            overlap_min = np.maximum(src_min, tgt_min)
+            overlap_max = np.minimum(src_max, tgt_max)
+            overlap_size = np.maximum(overlap_max - overlap_min, 0)
+            print(f"XY overlap region: {overlap_size[0]:.1f} x {overlap_size[1]:.1f} m")
+            if overlap_size[0] <= 0 or overlap_size[1] <= 0:
+                print("WARNING: Point clouds do not overlap in XY!")
 
         # Create small_gicp point clouds from CENTERED coordinates
         source_cloud = small_gicp.PointCloud(source_points)
@@ -985,6 +996,8 @@ class PointCloudPair:
         # Run registration
         if verbose:
             print(f"\nRunning {method_upper} registration...")
+            print(f"  max_correspondence_distance: {max_correspondence_distance}")
+            print(f"  max_iterations: {max_iterations}")
 
         result = small_gicp.align(
             target_cloud,
@@ -995,6 +1008,16 @@ class PointCloudPair:
             max_iterations=max_iterations,
             num_threads=num_threads,
         )
+
+        if verbose:
+            # Debug: check result attributes
+            print(f"\nRegistration result attributes: {dir(result)}")
+            if hasattr(result, 'iterations'):
+                print(f"  Iterations performed: {result.iterations}")
+            if hasattr(result, 'converged'):
+                print(f"  Converged: {result.converged}")
+            if hasattr(result, 'error'):
+                print(f"  Final error: {result.error}")
         
         # =========================================================================
         # CONVERT TRANSFORMATION back to original coordinate system
