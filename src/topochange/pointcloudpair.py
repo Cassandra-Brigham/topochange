@@ -987,6 +987,11 @@ class PointCloudPair:
         if verbose:
             print(f"Source points after downsampling: {source_cloud.size():,} (was {source_size_before:,})")
             print(f"Target points after downsampling: {target_cloud.size():,} (was {target_size_before:,})")
+            # Verify normals were computed (required for GICP/VGICP)
+            source_normals = source_cloud.normals()
+            target_normals = target_cloud.normals()
+            print(f"Source normals shape: {source_normals.shape if source_normals is not None else 'None'}")
+            print(f"Target normals shape: {target_normals.shape if target_normals is not None else 'None'}")
         
         # Select registration type (pass as string, not enum)
         method_upper = method.upper()
@@ -999,10 +1004,14 @@ class PointCloudPair:
             print(f"  max_correspondence_distance: {max_correspondence_distance}")
             print(f"  max_iterations: {max_iterations}")
 
+        # Provide identity as explicit initial guess
+        init_T = np.eye(4)
+
         result = small_gicp.align(
             target_cloud,
             source_cloud,
             target_tree,
+            init_T_target_source=init_T,
             registration_type=method_upper,
             max_correspondence_distance=max_correspondence_distance,
             max_iterations=max_iterations,
@@ -1018,6 +1027,10 @@ class PointCloudPair:
                 print(f"  Converged: {result.converged}")
             if hasattr(result, 'error'):
                 print(f"  Final error: {result.error}")
+            if hasattr(result, 'num_inliers'):
+                print(f"  Num inliers: {result.num_inliers}")
+            if hasattr(result, 'H'):
+                print(f"  Hessian (H) shape: {np.array(result.H).shape if result.H is not None else 'None'}")
         
         # =========================================================================
         # CONVERT TRANSFORMATION back to original coordinate system
