@@ -985,10 +985,12 @@ class PointCloudPair:
             source_points,
             init_T_target_source=init_T,
             registration_type=method_upper,
+            voxel_resolution=downsample_resolution,  # For VGICP voxel grid
             downsampling_resolution=downsample_resolution,
             max_correspondence_distance=max_correspondence_distance,
             max_iterations=max_iterations,
             num_threads=num_threads,
+            verbose=verbose,  # Enable small_gicp debug output
         )
 
         # Free numpy arrays after align() has processed them
