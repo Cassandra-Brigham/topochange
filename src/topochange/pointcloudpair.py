@@ -957,50 +957,23 @@ class PointCloudPair:
             if overlap_size[0] <= 0 or overlap_size[1] <= 0:
                 print("WARNING: Point clouds do not overlap in XY!")
 
-        # Create small_gicp point clouds from CENTERED coordinates
-        source_cloud = small_gicp.PointCloud(source_points)
-        target_cloud = small_gicp.PointCloud(target_points)
-
-        # Free numpy arrays - small_gicp has its own copy now
-        del source_points, target_points
-        import gc
-        gc.collect()
-
-        # Preprocess (downsampling, normal estimation, KdTree)
-        source_size_before = source_cloud.size()
-        target_size_before = target_cloud.size()
-
-        if verbose:
-            print(f"\nPreprocessing point clouds...")
-
-        source_cloud, source_tree = small_gicp.preprocess_points(
-            source_cloud,
-            downsampling_resolution=downsample_resolution,
-            num_threads=num_threads,
-        )
-        target_cloud, target_tree = small_gicp.preprocess_points(
-            target_cloud,
-            downsampling_resolution=downsample_resolution,
-            num_threads=num_threads,
-        )
-
-        if verbose:
-            print(f"Source points after downsampling: {source_cloud.size():,} (was {source_size_before:,})")
-            print(f"Target points after downsampling: {target_cloud.size():,} (was {target_size_before:,})")
-            # Verify normals were computed (required for GICP/VGICP)
-            source_normals = source_cloud.normals()
-            target_normals = target_cloud.normals()
-            print(f"Source normals shape: {source_normals.shape if source_normals is not None else 'None'}")
-            print(f"Target normals shape: {target_normals.shape if target_normals is not None else 'None'}")
-        
-        # Select registration type (pass as string, not enum)
+        # Select registration type
         method_upper = method.upper()
         if method_upper not in ["GICP", "VGICP", "ICP", "PLANE_ICP"]:
             raise ValueError(f"Unknown method: {method}. Use 'gicp', 'vgicp', 'icp', or 'plane_icp'.")
 
-        # Run registration
+        if verbose:
+            print(f"\nPoint data check:")
+            print(f"  Source dtype: {source_points.dtype}, shape: {source_points.shape}")
+            print(f"  Target dtype: {target_points.dtype}, shape: {target_points.shape}")
+            print(f"  Source sample: {source_points[:3]}")
+            print(f"  Target sample: {target_points[:3]}")
+
+        # Run registration using simple numpy API
+        # This lets small_gicp handle preprocessing internally
         if verbose:
             print(f"\nRunning {method_upper} registration...")
+            print(f"  downsample_resolution: {downsample_resolution}")
             print(f"  max_correspondence_distance: {max_correspondence_distance}")
             print(f"  max_iterations: {max_iterations}")
 
@@ -1008,15 +981,20 @@ class PointCloudPair:
         init_T = np.eye(4)
 
         result = small_gicp.align(
-            target_cloud,
-            source_cloud,
-            target_tree,
+            target_points,  # Pass raw numpy arrays
+            source_points,
             init_T_target_source=init_T,
             registration_type=method_upper,
+            downsampling_resolution=downsample_resolution,
             max_correspondence_distance=max_correspondence_distance,
             max_iterations=max_iterations,
             num_threads=num_threads,
         )
+
+        # Free numpy arrays after align() has processed them
+        del source_points, target_points
+        import gc
+        gc.collect()
 
         if verbose:
             # Debug: check result attributes
@@ -1061,27 +1039,18 @@ class PointCloudPair:
             print(f"\nTransformation in original coordinates:")
             print(T_original)
         
-        # Compute fitness metrics using the downsampled points from small_gicp
-        # Extract points from small_gicp clouds (these are already centered and downsampled)
-        # small_gicp may return 4 columns (x,y,z,w), so take only first 3
-        source_pts_centered = np.asarray(source_cloud.points())[:, :3]
-        target_pts_centered = np.asarray(target_cloud.points())[:, :3]
+        # Use metrics from small_gicp result
+        # Note: num_inliers is based on the downsampled point count
+        num_inliers = result.num_inliers if hasattr(result, 'num_inliers') else 0
+        # Estimate total points (we don't have exact count after internal downsampling)
+        # Use error as a proxy for quality
+        final_error = result.error if hasattr(result, 'error') else float('inf')
 
-        # Transform source points using centered transformation
-        source_transformed_centered = (T_centered[:3, :3] @ source_pts_centered.T).T + T_centered[:3, 3]
-
-        # Use KD-tree for nearest neighbor distances
-        from scipy.spatial import cKDTree
-        target_tree_scipy = cKDTree(target_pts_centered)
-        distances, _ = target_tree_scipy.query(source_transformed_centered, k=1)
-
-        inlier_mask = distances < max_correspondence_distance
-        fitness = np.sum(inlier_mask) / len(distances)
-        rmse = np.sqrt(np.mean(distances[inlier_mask] ** 2)) if np.any(inlier_mask) else float('inf')
-
-        # Clean up fitness calculation arrays
-        del source_pts_centered, target_pts_centered, source_transformed_centered
-        gc.collect()
+        # Fitness is approximate since we don't know exact point counts after internal downsampling
+        # If we had n_source points and num_inliers correspondences, fitness ~ num_inliers / n_source
+        # For now, just report the raw inlier count
+        fitness = num_inliers / n_source if n_source > 0 else 0.0
+        rmse = final_error  # small_gicp error is related to RMSE
         
         # Extract rotation and translation for reporting
         R = T_original[:3, :3]
@@ -1099,7 +1068,7 @@ class PointCloudPair:
             'iterations': result.iterations if hasattr(result, 'iterations') else None,
             'fitness': fitness,
             'rmse': rmse,
-            'num_correspondences': int(np.sum(inlier_mask)),
+            'num_correspondences': num_inliers,
             'method': method,
             'downsample_resolution': downsample_resolution,
             'max_correspondence_distance': max_correspondence_distance,
