@@ -803,19 +803,84 @@ def build_complete_pipeline(
         if not crs_changed:
             return build_vertical_pipeline(src, dst)
 
-        # Vertical + horizontal: do vertical first (in source CRS), then horizontal
-        # This leverages build_vertical_pipeline which already handles projected CRS!
-        vert_dst = CRSState(
-            crs=src.crs,
-            epoch=src.epoch,
-            vertical_kind=dst.vertical_kind,
-            geoid_alias=dst.geoid_alias,
-            geoid_grid=dst.geoid_grid,
-        )
-        vert_pipeline = build_vertical_pipeline(src, vert_dst)
-        horiz_pipeline = build_horizontal_pipeline(src.crs, dst.crs)
+        # Vertical + horizontal transform needed
+        # For projected source CRS, we need to be careful about composition:
+        # Cannot simply compose build_vertical_pipeline + build_horizontal_pipeline
+        # because both would wrap their ops with inverse/forward projection steps.
+        #
+        # Strategy:
+        # 1. If source is projected: unproject → vertical transform → horiz transform
+        # 2. If source is geographic: vertical transform → horizontal transform
 
-        return _compose_pipelines(vert_pipeline, horiz_pipeline)
+        if src_is_projected:
+            # Get the geographic CRS underlying the source projection
+            src_crs_obj = CRS.from_user_input(src.crs)
+            src_geog = src_crs_obj.geodetic_crs
+            if src_geog is None:
+                raise ProjError(f"Could not determine geographic CRS for {src.crs}")
+            src_geog_str = src_geog.to_string()
+
+            # Get projection step
+            proj_step = _proj_step_from_crs(src.crs)
+
+            # Step 1: Inverse projection (projected → geographic)
+            step1_inv = f"+step +inv {proj_step}"
+
+            # Step 2: Vertical transform in geographic coordinates
+            vert_src = CRSState(
+                crs=src_geog_str,
+                epoch=src.epoch,
+                vertical_kind=src.vertical_kind,
+                geoid_alias=src.geoid_alias,
+                geoid_grid=src.geoid_grid,
+            )
+            vert_dst_temp = CRSState(
+                crs=src_geog_str,
+                epoch=src.epoch,
+                vertical_kind=dst.vertical_kind,
+                geoid_alias=dst.geoid_alias,
+                geoid_grid=dst.geoid_grid,
+            )
+            vert_steps = _build_vertical_steps(vert_src, vert_dst_temp)
+
+            # Step 3: Horizontal transform from source geographic to target CRS
+            horiz_pipeline = build_horizontal_pipeline(src_geog_str, dst.crs)
+            horiz_steps = _extract_pipeline_steps(horiz_pipeline)
+
+            # Compose all steps
+            all_steps = [step1_inv]
+            if vert_steps:
+                all_steps.append(vert_steps)
+            if horiz_steps:
+                all_steps.append(horiz_steps)
+
+            pipeline = "+proj=pipeline " + " ".join(s for s in all_steps if s)
+            return pipeline
+        else:
+            # Source is geographic - simpler case
+            # Do vertical transform first (stays in geographic), then horizontal
+            vert_dst_temp = CRSState(
+                crs=src.crs,
+                epoch=src.epoch,
+                vertical_kind=dst.vertical_kind,
+                geoid_alias=dst.geoid_alias,
+                geoid_grid=dst.geoid_grid,
+            )
+            vert_steps = _build_vertical_steps(src, vert_dst_temp)
+            horiz_pipeline = build_horizontal_pipeline(src.crs, dst.crs)
+            horiz_steps = _extract_pipeline_steps(horiz_pipeline)
+
+            all_steps = []
+            if vert_steps:
+                all_steps.append(vert_steps)
+            if horiz_steps:
+                all_steps.append(horiz_steps)
+
+            if not all_steps:
+                return "+proj=pipeline"
+
+            pipeline = "+proj=pipeline " + " ".join(all_steps)
+            return pipeline
 
     # -------------------------------------------------------------------------
     # Case C: Pure horizontal (no epoch, no vertical)
