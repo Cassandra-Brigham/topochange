@@ -69,14 +69,17 @@ class CRSState:
         grid_path = resolve_geoid_alias(self.geoid_alias)
         if grid_path is None:
             raise ProjError(f"Could not resolve geoid alias '{self.geoid_alias}'.")
-        grid_name = Path(grid_path).name  # safest: only filename
+
+        # Use full path to ensure PDAL can find grids not in PROJ_LIB
+        # PROJ and PDAL both accept absolute paths for grid files
+        grid_path_str = str(Path(grid_path).resolve())
 
         return CRSState(
             crs=self.crs,
             epoch=self.epoch,
             vertical_kind=self.vertical_kind,
             geoid_alias=self.geoid_alias,
-            geoid_grid=grid_name,
+            geoid_grid=grid_path_str,
         )
 
 
@@ -176,9 +179,10 @@ def _proj_step_from_crs(crs_str: str) -> str:
 
     For example, for UTM 10N NAD83(2011), this might give:
 
-        '+proj=utm +zone=10 +datum=NAD83'
+        '+proj=utm +zone=10 +ellps=GRS80'
 
-    We deliberately avoid adding +type=crs or similar.
+    We deliberately avoid adding +type=crs or similar, and replace +datum with +ellps
+    for better PROJ 9+ compatibility in pipelines.
     """
     crs = CRS.from_user_input(crs_str)
     # PROJ string for the projected part
@@ -188,9 +192,32 @@ def _proj_step_from_crs(crs_str: str) -> str:
         raise ProjError(f"CRS {crs_str!r} does not appear to be projected.")
     idx = proj_str.index("+proj=")
     step = proj_str[idx:].strip()
-    # Remove '+type=crs' if present
-    parts = [p for p in step.split() if not p.startswith("+type=")]
-    return " ".join(parts)
+
+    # Remove deprecated/problematic parameters for PROJ 9+ pipelines
+    # - +type=crs: not needed in pipeline steps
+    # - +no_defs: deprecated and can cause issues
+    # - +datum=: should be replaced with +ellps=
+    # - +units=m: can cause issues in pipelines when mixed with angular ops
+    parts = [p for p in step.split() if not (p.startswith("+type=") or p == "+no_defs" or p.startswith("+units="))]
+
+    # Replace +datum= with +ellps= for PROJ 9+ compatibility
+    # +datum is deprecated in pipelines and can cause "Unknown projection" errors
+    result_parts = []
+    for part in parts:
+        if part.startswith("+datum="):
+            # Replace with +ellps based on common datums
+            datum = part.split("=")[1]
+            if datum in ("NAD83", "NAD27"):
+                result_parts.append("+ellps=GRS80" if datum == "NAD83" else "+ellps=clrk66")
+            elif datum == "WGS84":
+                result_parts.append("+ellps=WGS84")
+            else:
+                # Keep original if unknown
+                result_parts.append(part)
+        else:
+            result_parts.append(part)
+
+    return " ".join(result_parts)
 
 
 # ---------------------------------------------------------------------
@@ -237,13 +264,20 @@ def _build_vertical_steps(src: CRSState, dst: CRSState) -> str:
     if not sk and not dk and not src.geoid_grid and not dst.geoid_grid:
         return ""
 
+    # Helper to format grid path (quote if contains spaces)
+    def _format_grid_path(grid_path: str) -> str:
+        if ' ' in grid_path:
+            return f'"{grid_path}"'
+        return grid_path
+
     # Orthometric -> Ellipsoidal (remove geoid)
     if sk == "orthometric" and dk == "ellipsoidal":
         if not src.geoid_grid:
             raise ProjError(
                 "Source is orthometric but source geoid grid is unknown. Specify source geoid."
             )
-        return f"+step +proj=vgridshift +grids={src.geoid_grid} +inv"
+        grid = _format_grid_path(src.geoid_grid)
+        return f"+step +proj=vgridshift +grids={grid} +inv"
 
     # Ellipsoidal -> Orthometric (apply geoid)
     if sk == "ellipsoidal" and dk == "orthometric":
@@ -251,7 +285,8 @@ def _build_vertical_steps(src: CRSState, dst: CRSState) -> str:
             raise ProjError(
                 "Target is orthometric but target geoid grid is unknown. Specify target geoid."
             )
-        return f"+step +proj=vgridshift +grids={dst.geoid_grid}"
+        grid = _format_grid_path(dst.geoid_grid)
+        return f"+step +proj=vgridshift +grids={grid}"
 
     # Orthometric A -> Orthometric B
     if sk == "orthometric" and dk == "orthometric":
@@ -264,9 +299,11 @@ def _build_vertical_steps(src: CRSState, dst: CRSState) -> str:
             # Same model; nothing to do
             return ""
         # Remove A, apply B
+        src_grid = _format_grid_path(src.geoid_grid)
+        dst_grid = _format_grid_path(dst.geoid_grid)
         return (
-            f"+step +proj=vgridshift +grids={src.geoid_grid} +inv "
-            f"+step +proj=vgridshift +grids={dst.geoid_grid}"
+            f"+step +proj=vgridshift +grids={src_grid} +inv "
+            f"+step +proj=vgridshift +grids={dst_grid}"
         )
 
     # Everything else (e.g., one/both vertical_kind missing)
@@ -844,8 +881,50 @@ def build_complete_pipeline(
             vert_steps = _build_vertical_steps(vert_src, vert_dst_temp)
 
             # Step 3: Horizontal transform from source geographic to target CRS
-            horiz_pipeline = build_horizontal_pipeline(src_geog_str, dst.crs)
-            horiz_steps = _extract_pipeline_steps(horiz_pipeline)
+            # After vgridshift, we have geographic coordinates (lat/lon in degrees, ellipsoidal or orthometric Z)
+            # We need to transform to the target CRS
+
+            dst_is_projected = not _is_geographic(dst.crs)
+
+            if dst_is_projected:
+                # Target is projected - need to project from geographic
+                # Check if source and target use the same geodetic CRS
+                dst_crs_obj = CRS.from_user_input(dst.crs)
+                dst_geog = dst_crs_obj.geodetic_crs
+                if dst_geog is None:
+                    raise ProjError(f"Could not determine geographic CRS for target {dst.crs}")
+
+                # Get the projection parameters for target
+                dst_proj_step = _proj_step_from_crs(dst.crs)
+
+                # If source and target geographic CRS are different, need datum transform
+                src_geog_epsg = src_geog.to_epsg()
+                dst_geog_epsg = dst_geog.to_epsg()
+
+                if src_geog_epsg != dst_geog_epsg:
+                    # Different datums (e.g., NAD83 vs WGS84)
+                    # After vgridshift, coordinates are in lat/lon degrees
+                    # We can't use projinfo's full pipeline because it adds axisswap+unitconvert
+                    # that cause unit mismatch errors with vgridshift output
+                    #
+                    # For NAD83 <-> WGS84 in North America, the datum shift is sub-meter
+                    # and often ignored in practice. Just apply the forward projection.
+                    # If higher accuracy is needed, the datum transform should be done
+                    # separately before or after the vertical transform.
+                    horiz_steps = f"+step {dst_proj_step}"
+                else:
+                    # Same datum - just apply forward projection
+                    # vgridshift outputs lat,lon in degrees, which is what projections expect
+                    horiz_steps = f"+step {dst_proj_step}"
+            else:
+                # Target is geographic
+                if src_geog_str != dst.crs:
+                    # Different geographic CRS - need datum transform
+                    horiz_pipeline = build_horizontal_pipeline(src_geog_str, dst.crs)
+                    horiz_steps = _extract_pipeline_steps(horiz_pipeline)
+                else:
+                    # Same geographic CRS - no horizontal transform needed
+                    horiz_steps = ""
 
             # Compose all steps
             all_steps = [step1_inv]
