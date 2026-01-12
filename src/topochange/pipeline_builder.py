@@ -71,9 +71,11 @@ class CRSState:
         if grid_path is None:
             raise ProjError(f"Could not resolve geoid alias '{self.geoid_alias}'.")
 
-        # Use full path to ensure PDAL can find grids not in PROJ_LIB
-        # PROJ and PDAL both accept absolute paths for grid files
-        grid_path_str = str(Path(grid_path).resolve())
+        # resolve_geoid_alias returns either:
+        # - Just a filename (if grid is in PROJ_LIB) - use as-is
+        # - A full absolute path (if grid is elsewhere) - use as-is
+        # Do NOT call Path().resolve() as it would resolve filenames to CWD
+        grid_path_str = grid_path
 
         return CRSState(
             crs=self.crs,
@@ -97,45 +99,91 @@ def resolve_geoid_alias(alias: str) -> Optional[str]:
     which knows about many aliases and will prefer local CONUS grids when available.
 
     If the input already looks like a filename (ends with .tif, .gtx, etc.),
-    we first check if it exists as an absolute path. If not, we search for it
-    in PROJ data directories.
+    we search for it in PROJ data directories, preferring paths without spaces
+    (which can cause issues with PDAL/GDAL).
 
     Return:
-        - Full path to grid file (string), or
+        - Grid filename (if in PROJ_LIB) or full path to grid file (string), or
         - None if the alias is unknown.
     """
     alias_str = alias.strip()
     if not alias_str:
         return None
 
-    # Check if it's already an absolute path that exists
+    # Check if it's already an absolute path that exists and has no spaces
     if os.path.isabs(alias_str) and os.path.exists(alias_str):
-        return alias_str
+        if ' ' not in alias_str:
+            return alias_str
+        # Has spaces - try to find it in a directory without spaces instead
 
-    # Check if it's already a filename (not an alias)
-    # Common geoid grid extensions: .tif, .gtx, .gtx.gz, .gvb
+    # Common geoid grid extensions
     geoid_extensions = ('.tif', '.gtx', '.gtx.gz', '.gvb', '.byn', '.grid')
     alias_low = alias_str.lower()
 
-    if any(alias_low.endswith(ext) for ext in geoid_extensions):
-        # It's a filename - search for it in PROJ data directories
-        from .geoid_utils import get_all_proj_data_dirs
-        filename = os.path.basename(alias_str)  # Extract just the filename
-        for proj_dir in get_all_proj_data_dirs():
-            candidate = os.path.join(proj_dir, filename)
-            if os.path.exists(candidate):
-                return candidate
-        # If not found in any PROJ dir, return None (will cause an error later)
-        return None
+    # Check if it's a filename (not an alias)
+    is_filename = any(alias_low.endswith(ext) for ext in geoid_extensions)
 
+    if is_filename:
+        filename = os.path.basename(alias_str)
+        return _find_grid_prefer_no_spaces(filename)
+
+    # It's an alias - use select_geoid_grid
     try:
-        # select_geoid_grid returns (selected_grid, all_candidates)
         selected, _ = select_geoid_grid(alias_low, verbose=False)
     except (ValueError, IndexError):
-        # Unknown alias or no candidates found
         return None
 
-    return selected
+    if selected is None:
+        return None
+
+    # select_geoid_grid returns a full path - check if we can use a simpler reference
+    filename = os.path.basename(selected)
+    return _find_grid_prefer_no_spaces(filename)
+
+
+def _find_grid_prefer_no_spaces(filename: str) -> Optional[str]:
+    """
+    Find a grid file in PROJ data directories, preferring paths without spaces.
+
+    PDAL/GDAL can have issues with spaces in paths even when quoted.
+    If the grid exists in PROJ_LIB (no spaces), just return the filename
+    since PROJ will find it automatically.
+    """
+    from .geoid_utils import get_all_proj_data_dirs
+
+    # First, check PROJ_LIB specifically - if grid is there, just use filename
+    proj_lib = os.environ.get('PROJ_LIB') or os.environ.get('PROJ_DATA')
+    if proj_lib and os.path.isdir(proj_lib):
+        candidate = os.path.join(proj_lib, filename)
+        if os.path.exists(candidate):
+            # Grid is in PROJ_LIB - PROJ will find it by filename alone
+            return filename
+
+    # Search all PROJ directories, preferring those without spaces
+    dirs_no_spaces = []
+    dirs_with_spaces = []
+
+    for proj_dir in get_all_proj_data_dirs():
+        if ' ' in proj_dir:
+            dirs_with_spaces.append(proj_dir)
+        else:
+            dirs_no_spaces.append(proj_dir)
+
+    # Check directories without spaces first
+    for proj_dir in dirs_no_spaces:
+        candidate = os.path.join(proj_dir, filename)
+        if os.path.exists(candidate):
+            # Return just filename if it's findable via PROJ search path
+            # or full path if we want to be explicit
+            return filename  # PROJ should find it
+
+    # Fall back to directories with spaces (will need quoting)
+    for proj_dir in dirs_with_spaces:
+        candidate = os.path.join(proj_dir, filename)
+        if os.path.exists(candidate):
+            return candidate  # Return full path, will be quoted later
+
+    return None
 
 
 # ---------------------------------------------------------------------
