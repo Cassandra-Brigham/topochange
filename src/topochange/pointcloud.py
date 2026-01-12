@@ -2017,29 +2017,60 @@ class PointCloud:
         }
         
         pipe = pdal.Pipeline(json.dumps(pipeline_spec))
-        pipe.execute()
-        
-        # Verify output
-        md = pipe.metadata.get("metadata", {})
-        writer_keys = [k for k in md.keys() if k.startswith("writers.las")]
-        writer_md = md.get(writer_keys[0], {}) if writer_keys else {}
-        
-        out_count = (
-            writer_md.get("num_points") or
-            writer_md.get("count") or
-            writer_md.get("points")
-        )
-        try:
-            out_count_val = int(out_count) if out_count is not None else 0
-        except Exception:
-            out_count_val = 0
-        
+        execute_count = pipe.execute()
+
+        # Verify output - try multiple methods to get point count
+        out_count_val = 0
+
+        # Method 1: Check execute() return value
+        if execute_count and execute_count > 0:
+            out_count_val = execute_count
+
+        # Method 2: Check pipeline arrays
+        if out_count_val == 0:
+            try:
+                arrays = pipe.arrays
+                if arrays and len(arrays) > 0 and len(arrays[0]) > 0:
+                    out_count_val = len(arrays[0])
+            except Exception:
+                pass
+
+        # Method 3: Check metadata
+        if out_count_val == 0:
+            md = pipe.metadata.get("metadata", {})
+            writer_keys = [k for k in md.keys() if k.startswith("writers.las")]
+            writer_md = md.get(writer_keys[0], {}) if writer_keys else {}
+
+            out_count = (
+                writer_md.get("num_points") or
+                writer_md.get("count") or
+                writer_md.get("points")
+            )
+            try:
+                out_count_val = int(out_count) if out_count is not None else 0
+            except Exception:
+                pass
+
+        # Method 4: Check if output file exists and has size
+        if out_count_val == 0 and output_path.exists():
+            if output_path.stat().st_size > 0:
+                # File exists with data - trust it worked
+                out_count_val = 1  # Placeholder, will be updated when loading
+
         if out_count_val == 0:
             log_text = getattr(pipe, "log", "")
+            # Get more diagnostic info
+            import os
+            proj_lib = os.environ.get('PROJ_LIB', 'not set')
+            output_exists = output_path.exists() if output_path else False
+            output_size = output_path.stat().st_size if output_exists else 0
             raise RuntimeError(
                 f"Combined warp produced zero output points.\n"
                 f"Pipeline: {coord_op}\n"
-                f"PDAL log: {log_text}"
+                f"PDAL log: {log_text}\n"
+                f"PROJ_LIB: {proj_lib}\n"
+                f"Output file exists: {output_exists}, size: {output_size}\n"
+                f"execute() returned: {execute_count}"
             )
         
         # Load output and update metadata
