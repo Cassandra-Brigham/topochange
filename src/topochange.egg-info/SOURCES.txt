@@ -4,6 +4,7 @@ pyproject.toml
 requirements.txt
 src/topochange/__init__.py
 src/topochange/alignment.py
+src/topochange/composite_variogram.py
 src/topochange/crs_history.py
 src/topochange/crs_utils.py
 src/topochange/data_access.py
@@ -20,6 +21,7 @@ src/topochange/time_utils.py
 src/topochange/uncertainty.py
 src/topochange/unit_utils.py
 src/topochange/variogram.py
+src/topochange/variogram_models.py
 src/topochange/velocity_model_converters.py
 src/topochange/velocity_model_registry.py
 src/topochange.egg-info/PKG-INFO
@@ -28,3 +30,8 @@ src/topochange.egg-info/dependency_links.txt
 src/topochange.egg-info/requires.txt
 src/topochange.egg-info/top_level.txt
 src/topochange/data/velocity_models_registry.yaml
+tests/test_alignment.py
+tests/test_dem_creation.py
+tests/test_option1_integration.py
+tests/test_pointcloud_metadata.py
+tests/test_pointcloud_transformation.py
