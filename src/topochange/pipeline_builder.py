@@ -10,6 +10,7 @@ Only builds PROJ pipeline strings. Execution is handled by PDAL, pyproj, etc.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,26 +95,38 @@ def resolve_geoid_alias(alias: str) -> Optional[str]:
 
     This now delegates to the geoid selection logic in geoid_utils.select_geoid_grid,
     which knows about many aliases and will prefer local CONUS grids when available.
-    
+
     If the input already looks like a filename (ends with .tif, .gtx, etc.),
-    it is returned as-is without attempting to resolve it as an alias.
+    we first check if it exists as an absolute path. If not, we search for it
+    in PROJ data directories.
 
     Return:
-        - Full path or filename of grid (string), or
+        - Full path to grid file (string), or
         - None if the alias is unknown.
     """
     alias_str = alias.strip()
     if not alias_str:
         return None
-    
+
+    # Check if it's already an absolute path that exists
+    if os.path.isabs(alias_str) and os.path.exists(alias_str):
+        return alias_str
+
     # Check if it's already a filename (not an alias)
     # Common geoid grid extensions: .tif, .gtx, .gtx.gz, .gvb
     geoid_extensions = ('.tif', '.gtx', '.gtx.gz', '.gvb', '.byn', '.grid')
     alias_low = alias_str.lower()
-    
+
     if any(alias_low.endswith(ext) for ext in geoid_extensions):
-        # Already a filename, return as-is (use original case for the filename)
-        return alias_str
+        # It's a filename - search for it in PROJ data directories
+        from .geoid_utils import get_all_proj_data_dirs
+        filename = os.path.basename(alias_str)  # Extract just the filename
+        for proj_dir in get_all_proj_data_dirs():
+            candidate = os.path.join(proj_dir, filename)
+            if os.path.exists(candidate):
+                return candidate
+        # If not found in any PROJ dir, return None (will cause an error later)
+        return None
 
     try:
         # select_geoid_grid returns (selected_grid, all_candidates)
