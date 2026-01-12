@@ -4,10 +4,10 @@ Version: 0.1.0
 Summary: Topographic change detection and uncertainty quantification using variogram-based methods
 Author: Cassandra Brigham
 License: MIT
-Project-URL: Homepage, https://github.com/yourusername/topochange
-Project-URL: Documentation, https://github.com/yourusername/topochange#readme
-Project-URL: Repository, https://github.com/yourusername/topochange
-Project-URL: Issues, https://github.com/yourusername/topochange/issues
+Project-URL: Homepage, https://github.com/Cassandra-Brigham/topochange
+Project-URL: Documentation, https://github.com/Cassandra-Brigham/topochange#readme
+Project-URL: Repository, https://github.com/Cassandra-Brigham/topochange
+Project-URL: Issues, https://github.com/Cassandra-Brigham/topochange/issues
 Keywords: topography,DEM,uncertainty,variogram,geospatial,raster,point-cloud,change-detection
 Classifier: Development Status :: 3 - Alpha
 Classifier: Intended Audience :: Science/Research
@@ -57,7 +57,7 @@ Topographic change detection and uncertainty quantification using variogram-base
 ### From source (development)
 
 ```bash
-git clone https://github.com/yourusername/topochange.git
+git clone https://github.com/Cassandra-Brigham/topochange.git
 cd topochange
 pip install -e .
 ```
