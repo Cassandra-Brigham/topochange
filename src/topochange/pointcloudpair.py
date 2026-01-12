@@ -969,8 +969,7 @@ class PointCloudPair:
             print(f"  Source sample: {source_points[:3]}")
             print(f"  Target sample: {target_points[:3]}")
 
-        # Run registration using simple numpy API
-        # This lets small_gicp handle preprocessing internally
+        # Run registration
         if verbose:
             print(f"\nRunning {method_upper} registration...")
             print(f"  downsample_resolution: {downsample_resolution}")
@@ -980,23 +979,77 @@ class PointCloudPair:
         # Provide identity as explicit initial guess
         init_T = np.eye(4)
 
-        result = small_gicp.align(
-            target_points,  # Pass raw numpy arrays
-            source_points,
-            init_T_target_source=init_T,
-            registration_type=method_upper,
-            voxel_resolution=downsample_resolution,  # For VGICP voxel grid
-            downsampling_resolution=downsample_resolution,
-            max_correspondence_distance=max_correspondence_distance,
-            max_iterations=max_iterations,
-            num_threads=num_threads,
-            verbose=verbose,  # Enable small_gicp debug output
-        )
+        # IMPORTANT: The raw numpy array API in small_gicp only supports ICP, PLANE_ICP, and GICP.
+        # For VGICP, we must use preprocess_points() first to estimate covariances, then align.
+        # For GICP and PLANE_ICP, we also need preprocessing for normals/covariances.
+        # Only plain ICP works directly with raw arrays without preprocessing.
 
-        # Free numpy arrays after align() has processed them
-        del source_points, target_points
-        import gc
-        gc.collect()
+        if method_upper in ["VGICP", "GICP", "PLANE_ICP"]:
+            # Preprocess point clouds: downsampling, normal/covariance estimation, KdTree
+            if verbose:
+                print(f"  Preprocessing point clouds (downsampling + covariance estimation)...")
+
+            target_cloud, target_tree = small_gicp.preprocess_points(
+                target_points,
+                downsampling_resolution=downsample_resolution,
+                num_threads=num_threads,
+            )
+            source_cloud, source_tree = small_gicp.preprocess_points(
+                source_points,
+                downsampling_resolution=downsample_resolution,
+                num_threads=num_threads,
+            )
+
+            if verbose:
+                print(f"  After preprocessing: {source_cloud.size()} source, {target_cloud.size()} target points")
+
+            # Free raw numpy arrays now that we have preprocessed clouds
+            del source_points, target_points
+            import gc
+            gc.collect()
+
+            # When using preprocessed PointCloud objects with covariances, use GICP.
+            # PLANE_ICP uses only normals, GICP uses full covariance matrices.
+            # VGICP is essentially GICP with preprocessing - the "V" refers to voxelization
+            # which we've already handled via downsampling in preprocess_points().
+            reg_type = "GICP" if method_upper in ["VGICP", "GICP"] else "PLANE_ICP"
+
+            result = small_gicp.align(
+                target_cloud,
+                source_cloud,
+                target_tree,
+                init_T_target_source=init_T,
+                registration_type=reg_type,
+                max_correspondence_distance=max_correspondence_distance,
+                max_iterations=max_iterations,
+                num_threads=num_threads,
+                verbose=verbose,
+            )
+
+            # Clean up preprocessed clouds
+            del target_cloud, target_tree, source_cloud, source_tree
+            gc.collect()
+        else:
+            # Plain ICP can use raw numpy arrays with the simple API
+            # Note: The raw numpy API actually supports ICP, PLANE_ICP, and GICP,
+            # but for consistency and to ensure proper covariance estimation,
+            # we use preprocessing for GICP/PLANE_ICP above.
+            result = small_gicp.align(
+                target_points,
+                source_points,
+                init_T_target_source=init_T,
+                registration_type="ICP",
+                downsampling_resolution=downsample_resolution,
+                max_correspondence_distance=max_correspondence_distance,
+                max_iterations=max_iterations,
+                num_threads=num_threads,
+                verbose=verbose,
+            )
+
+            # Free numpy arrays after align() has processed them
+            del source_points, target_points
+            import gc
+            gc.collect()
 
         if verbose:
             # Debug: check result attributes
