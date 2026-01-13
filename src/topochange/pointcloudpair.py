@@ -884,6 +884,11 @@ class PointCloudPair:
 
         if verbose:
             print(f"\n--- Cropping to Overlap Area (Area A) ---", file=sys.stderr)
+            print(f"PC1 poly_4326 bounds: {pc1_poly_4326.bounds}", file=sys.stderr)
+            print(f"PC2 poly_4326 bounds: {pc2_poly_4326.bounds}", file=sys.stderr)
+            print(f"Common CRS: {common_crs.to_epsg() or common_crs.name}", file=sys.stderr)
+            print(f"PC1 native CRS: {pc1_native_crs_wkt[:80] if pc1_native_crs_wkt else 'None'}...", file=sys.stderr)
+            print(f"PC2 native CRS: {pc2_native_crs_wkt[:80] if pc2_native_crs_wkt else 'None'}...", file=sys.stderr)
             print(f"Overlap area: {overlap_area:,.0f} m²", file=sys.stderr)
             print(f"Overlap fraction pc1: {pc1_overlap_frac:.1%}", file=sys.stderr)
             print(f"Overlap fraction pc2: {pc2_overlap_frac:.1%}", file=sys.stderr)
@@ -923,8 +928,10 @@ class PointCloudPair:
         if verbose:
             print(f"PC1 bounds: ({pc1_source.minx:.2f}, {pc1_source.miny:.2f}) to ({pc1_source.maxx:.2f}, {pc1_source.maxy:.2f})", file=sys.stderr)
             print(f"PC1 clip polygon bounds: {overlap_poly_pc1.bounds}", file=sys.stderr)
+            print(f"PC1 CRS match common? {pc1_native_crs.equals(common_crs) if pc1_native_crs_wkt else 'N/A'}", file=sys.stderr)
             print(f"PC2 bounds: ({self.pc2.minx:.2f}, {self.pc2.miny:.2f}) to ({self.pc2.maxx:.2f}, {self.pc2.maxy:.2f})", file=sys.stderr)
             print(f"PC2 clip polygon bounds: {overlap_poly_pc2.bounds}", file=sys.stderr)
+            print(f"PC2 CRS match common? {pc2_native_crs.equals(common_crs) if pc2_native_crs_wkt else 'N/A'}", file=sys.stderr)
             print(f"Cropping pc1 to: {out_path1.name}", file=sys.stderr)
 
         pc1_cropped = pc1_source.clip_to_polygon(
