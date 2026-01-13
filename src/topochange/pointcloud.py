@@ -1310,6 +1310,105 @@ class PointCloud:
             self.vertical_units = self.vertical_unit.display_name
 
     # -------------------------------------------------------------------------
+    # Clipping / Cropping
+    # -------------------------------------------------------------------------
+    def clip_to_polygon(
+        self,
+        polygon: Union["Polygon", str],
+        output_path: Optional[Union[str, Path]] = None,
+        overwrite: bool = True,
+    ) -> "PointCloud":
+        """
+        Clip point cloud to a polygon boundary.
+
+        Uses PDAL filters.crop to extract points within the polygon.
+
+        Parameters
+        ----------
+        polygon : shapely.geometry.Polygon or str
+            Polygon to clip to. Can be a shapely Polygon object or a WKT string.
+        output_path : str or Path, optional
+            Output file path. If None, generates path based on input filename.
+        overwrite : bool, default True
+            Whether to overwrite existing output file.
+
+        Returns
+        -------
+        PointCloud
+            New PointCloud containing only points within the polygon.
+
+        Examples
+        --------
+        >>> from shapely.geometry import box
+        >>> bbox = box(500000, 4000000, 501000, 4001000)
+        >>> clipped = pc.clip_to_polygon(bbox)
+        """
+        from shapely.geometry import Polygon as ShapelyPolygon
+
+        # Convert polygon to WKT if needed
+        if isinstance(polygon, str):
+            polygon_wkt = polygon
+        elif hasattr(polygon, 'wkt'):
+            polygon_wkt = polygon.wkt
+        else:
+            raise TypeError(
+                f"polygon must be a shapely Polygon or WKT string, got {type(polygon)}"
+            )
+
+        # Generate output path if not provided
+        src_path = Path(self.filename)
+        if output_path is None:
+            output_path = src_path.with_name(src_path.stem + "_clipped" + src_path.suffix)
+        else:
+            output_path = Path(output_path)
+
+        if output_path.exists() and not overwrite:
+            raise FileExistsError(f"Output file exists and overwrite=False: {output_path}")
+
+        # Build PDAL pipeline
+        pipeline_spec = {
+            "pipeline": [
+                {
+                    "type": "readers.las",
+                    "filename": str(self.filename),
+                },
+                {
+                    "type": "filters.crop",
+                    "polygon": polygon_wkt,
+                },
+                {
+                    "type": "writers.las",
+                    "filename": str(output_path),
+                },
+            ]
+        }
+
+        pipe = pdal.Pipeline(json.dumps(pipeline_spec))
+        count = pipe.execute()
+
+        if count == 0:
+            import warnings
+            warnings.warn(
+                f"No points found within the clip polygon. Output file may be empty."
+            )
+
+        # Create new PointCloud from output
+        clipped_pc = PointCloud(str(output_path))
+        clipped_pc.from_file(lightweight=True)
+
+        # Copy metadata from source
+        clipped_pc.current_compound_crs = self.current_compound_crs
+        clipped_pc.current_horizontal_crs = self.current_horizontal_crs
+        clipped_pc.current_vertical_crs = self.current_vertical_crs
+        clipped_pc.geoid_model = getattr(self, 'geoid_model', None)
+        clipped_pc.epoch = getattr(self, 'epoch', None)
+        clipped_pc.is_orthometric = getattr(self, 'is_orthometric', None)
+        clipped_pc.horizontal_unit = self.horizontal_unit
+        clipped_pc.vertical_unit = self.vertical_unit
+
+        return clipped_pc
+
+    # -------------------------------------------------------------------------
     # DEM creation
     # -------------------------------------------------------------------------
     def create_dem(
