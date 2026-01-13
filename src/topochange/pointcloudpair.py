@@ -1810,15 +1810,17 @@ class PointCloudPair:
         output_dir: Optional[str] = None,
         overwrite: bool = True,
         verbose: bool = True,
+        classifications_pc1: Optional[Union[str, List[int], Set[int]]] = "auto",
+        classifications_pc2: Optional[Union[str, List[int], Set[int]]] = "auto",
         **dem_kwargs,
     ) -> Tuple[Raster, Raster]:
         """
         Create DEMs from both point clouds.
-        
+
         Parameters
         ----------
         dem_type : str, {"dtm", "dsm"}
-            Type of DEM to create
+            Type of DEM to create. Used when classifications are "auto".
         resolution : float
             Output resolution in map units (typically meters)
         interpolation : str
@@ -1831,24 +1833,33 @@ class PointCloudPair:
             Overwrite existing output files
         verbose : bool
             Print progress messages
+        classifications_pc1 : str, list, or set, default "auto"
+            Classification filter for pc1 (compare cloud):
+            - "auto": Use dem_type to determine (ground for DTM, first returns for DSM)
+            - list/set of ints: Specific classification codes (e.g., [2] for ground)
+            - None: No classification filtering (use all points)
+        classifications_pc2 : str, list, or set, default "auto"
+            Classification filter for pc2 (reference cloud). Same options as pc1.
         **dem_kwargs
             Additional arguments passed to PointCloud.create_dem()
-            
+
         Returns
         -------
         tuple[Raster, Raster]
             (dem1, dem2) - DEMs created from pc1 and pc2
         """
+        import sys
+
         if verbose:
-            print(f"\n{'=' * 60}")
-            print(f"Creating {dem_type.upper()} pair")
-            print(f"{'=' * 60}")
-            print(f"Resolution: {resolution} m")
-            print(f"Interpolation: {interpolation}")
-        
+            print(f"\n{'=' * 60}", file=sys.stderr)
+            print(f"Creating {dem_type.upper()} pair", file=sys.stderr)
+            print(f"{'=' * 60}", file=sys.stderr)
+            print(f"Resolution: {resolution} m", file=sys.stderr)
+            print(f"Interpolation: {interpolation}", file=sys.stderr)
+
         # Select source for pc1
         pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
-        
+
         # Determine output paths
         if output_dir is None:
             dir1 = Path(pc1_source.filename).parent
@@ -1856,41 +1867,56 @@ class PointCloudPair:
         else:
             dir1 = dir2 = Path(output_dir)
             dir1.mkdir(parents=True, exist_ok=True)
-        
+
         out1 = dir1 / f"{Path(pc1_source.filename).stem}_{dem_type}_{int(resolution)}m.tif"
         out2 = dir2 / f"{Path(self.pc2.filename).stem}_{dem_type}_{int(resolution)}m.tif"
-        
+
+        # Prepare classification filters
+        # If "auto", pass dem_type and let create_dem handle it
+        # Otherwise pass the explicit classification list
+        dem1_kwargs = dict(dem_kwargs)
+        dem2_kwargs = dict(dem_kwargs)
+
+        if classifications_pc1 != "auto":
+            dem1_kwargs["classification_filter"] = classifications_pc1
+        if classifications_pc2 != "auto":
+            dem2_kwargs["classification_filter"] = classifications_pc2
+
         if verbose:
-            print(f"\nCreating DEM from pc1: {Path(pc1_source.filename).name}")
-        
+            cls1_str = classifications_pc1 if classifications_pc1 != "auto" else f"auto ({dem_type})"
+            cls2_str = classifications_pc2 if classifications_pc2 != "auto" else f"auto ({dem_type})"
+            print(f"PC1 classifications: {cls1_str}", file=sys.stderr)
+            print(f"PC2 classifications: {cls2_str}", file=sys.stderr)
+            print(f"\nCreating DEM from pc1: {Path(pc1_source.filename).name}", file=sys.stderr)
+
         dem1 = pc1_source.create_dem(
             output_path=str(out1),
             dem_type=dem_type,
             resolution=resolution,
             interpolation=interpolation,
-            **dem_kwargs,
+            **dem1_kwargs,
         )
-        
+
         if verbose:
-            print(f"Creating DEM from pc2: {Path(self.pc2.filename).name}")
-        
+            print(f"Creating DEM from pc2: {Path(self.pc2.filename).name}", file=sys.stderr)
+
         dem2 = self.pc2.create_dem(
             output_path=str(out2),
             dem_type=dem_type,
             resolution=resolution,
             interpolation=interpolation,
-            **dem_kwargs,
+            **dem2_kwargs,
         )
         
         # Copy epoch and CRS info to DEMs
         dem1.epoch = getattr(pc1_source, 'epoch', None)
         dem2.epoch = getattr(self.pc2, 'epoch', None)
-        
+
         if verbose:
-            print(f"\nDEM1: {out1}")
-            print(f"DEM2: {out2}")
-            print(f"{'=' * 60}\n")
-        
+            print(f"\nDEM1: {out1}", file=sys.stderr)
+            print(f"DEM2: {out2}", file=sys.stderr)
+            print(f"{'=' * 60}\n", file=sys.stderr)
+
         return dem1, dem2
     
     def create_dtm_pair(self, **kwargs) -> Tuple[Raster, Raster]:
@@ -2120,7 +2146,151 @@ class PointCloudPair:
     def compute_dsm_difference(self, **kwargs) -> Dict[str, Any]:
         """Compute DSM-based difference. Convenience wrapper."""
         return self.compute_2d_difference(dem_type="dsm", **kwargs)
-    
+
+    def compute_mixed_2d_difference(
+        self,
+        dem_type_pc1: str = "dtm",
+        dem_type_pc2: str = "dsm",
+        resolution: float = 1.0,
+        interpolation: str = "idw",
+        classifications_pc1: Optional[Union[str, List[int], Set[int]]] = "auto",
+        classifications_pc2: Optional[Union[str, List[int], Set[int]]] = "auto",
+        transform_first: bool = True,
+        use_transformed: bool = True,
+        output_dir: Optional[str] = None,
+        overwrite: bool = True,
+        verbose: bool = True,
+        **dem_kwargs,
+    ) -> Dict[str, Any]:
+        """
+        Compute 2D difference with different DEM types for each cloud.
+
+        This method allows mixing DTM and DSM between the compare and reference
+        clouds. Useful for scenarios like:
+        - DTM from newer survey vs DSM from older survey (vegetation change)
+        - DSM from drone vs DTM from lidar (canopy height estimation)
+
+        Parameters
+        ----------
+        dem_type_pc1 : str, {"dtm", "dsm"}, default "dtm"
+            DEM type for pc1 (compare cloud). Only used when classifications_pc1="auto".
+        dem_type_pc2 : str, {"dtm", "dsm"}, default "dsm"
+            DEM type for pc2 (reference cloud). Only used when classifications_pc2="auto".
+        resolution : float
+            DEM resolution in map units
+        interpolation : str
+            DEM interpolation method
+        classifications_pc1 : str, list, or set, default "auto"
+            Classification filter for pc1. "auto" uses dem_type_pc1.
+        classifications_pc2 : str, list, or set, default "auto"
+            Classification filter for pc2. "auto" uses dem_type_pc2.
+        transform_first : bool
+            Transform compare DEM to match reference before differencing
+        use_transformed : bool
+            Use transformed pc1 for DEM creation
+        output_dir : str, optional
+            Directory for output files
+        overwrite : bool
+            Overwrite existing files
+        verbose : bool
+            Print progress messages
+        **dem_kwargs
+            Additional arguments for DEM creation
+
+        Returns
+        -------
+        dict
+            Results from RasterPair.compute_difference() plus metadata
+        """
+        import sys
+
+        if verbose:
+            print(f"\n{'=' * 60}", file=sys.stderr)
+            print("Computing Mixed 2D (DEM-based) Difference", file=sys.stderr)
+            print(f"{'=' * 60}", file=sys.stderr)
+            print(f"PC1 DEM type: {dem_type_pc1.upper()}", file=sys.stderr)
+            print(f"PC2 DEM type: {dem_type_pc2.upper()}", file=sys.stderr)
+
+        # Select source for pc1
+        pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
+
+        # Determine output paths
+        if output_dir is None:
+            dir1 = Path(pc1_source.filename).parent
+            dir2 = Path(self.pc2.filename).parent
+        else:
+            dir1 = dir2 = Path(output_dir)
+            dir1.mkdir(parents=True, exist_ok=True)
+
+        out1 = dir1 / f"{Path(pc1_source.filename).stem}_{dem_type_pc1}_{int(resolution)}m.tif"
+        out2 = dir2 / f"{Path(self.pc2.filename).stem}_{dem_type_pc2}_{int(resolution)}m.tif"
+
+        # Prepare classification filters
+        dem1_kwargs = dict(dem_kwargs)
+        dem2_kwargs = dict(dem_kwargs)
+
+        if classifications_pc1 != "auto":
+            dem1_kwargs["classification_filter"] = classifications_pc1
+        if classifications_pc2 != "auto":
+            dem2_kwargs["classification_filter"] = classifications_pc2
+
+        # Create DEM from pc1
+        if verbose:
+            print(f"\nCreating {dem_type_pc1.upper()} from pc1: {Path(pc1_source.filename).name}",
+                  file=sys.stderr)
+
+        dem1 = pc1_source.create_dem(
+            output_path=str(out1),
+            dem_type=dem_type_pc1,
+            resolution=resolution,
+            interpolation=interpolation,
+            **dem1_kwargs,
+        )
+
+        # Create DEM from pc2
+        if verbose:
+            print(f"Creating {dem_type_pc2.upper()} from pc2: {Path(self.pc2.filename).name}",
+                  file=sys.stderr)
+
+        dem2 = self.pc2.create_dem(
+            output_path=str(out2),
+            dem_type=dem_type_pc2,
+            resolution=resolution,
+            interpolation=interpolation,
+            **dem2_kwargs,
+        )
+
+        # Copy epoch info
+        dem1.epoch = getattr(pc1_source, 'epoch', None)
+        dem2.epoch = getattr(self.pc2, 'epoch', None)
+
+        # Create RasterPair (dem1 = compare, dem2 = reference)
+        raster_pair = RasterPair(dem1, dem2)
+
+        if verbose:
+            print("\nRasterPair comparison:", file=sys.stderr)
+            raster_pair.print_summary()
+
+        # Compute difference using RasterPair
+        result = raster_pair.compute_difference(
+            transform_first=transform_first,
+            interpolation_method="bilinear",
+            clip_to_overlap=True,
+            overwrite=overwrite,
+            verbose=verbose,
+        )
+
+        # Add point cloud context to result
+        result['dem_type_pc1'] = dem_type_pc1
+        result['dem_type_pc2'] = dem_type_pc2
+        result['dem_resolution'] = resolution
+        result['dem_interpolation'] = interpolation
+        result['pc1_file'] = self.pc1.filename
+        result['pc2_file'] = self.pc2.filename
+        result['mixed_difference'] = True
+
+        return result
+
     # =========================================================================
     # Full Pipeline Methods
     # =========================================================================
@@ -2279,3 +2449,329 @@ class PointCloudPair:
         self._transformation_history = []
         self._pc1_transformed = None
         self._alignment_result = None
+
+    def process_point_cloud_pair(
+        self,
+        # CRS/Transformation options
+        warp_to_reference: bool = True,
+        skip_epoch: bool = False,
+        skip_vertical: bool = False,
+        # Cropping options
+        crop_to_overlap: bool = True,
+        alignment_buffer: float = 10.0,
+        # Alignment options
+        align_icp: bool = True,
+        icp_method: str = "vgicp",
+        auto_downsample: bool = True,
+        target_points: int = 2_000_000,
+        max_correspondence_distance: float = 1.0,
+        compute_quality: bool = True,
+        # DEM options
+        dem_type: str = "dtm",
+        dem_type_pc1: Optional[str] = None,
+        dem_type_pc2: Optional[str] = None,
+        resolution: float = 1.0,
+        interpolation: str = "idw",
+        classifications_pc1: Optional[Union[str, List[int], Set[int]]] = "auto",
+        classifications_pc2: Optional[Union[str, List[int], Set[int]]] = "auto",
+        # Output options
+        output_dir: Optional[str] = None,
+        overwrite: bool = True,
+        verbose: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Comprehensive point cloud processing workflow.
+
+        This method executes a full point cloud comparison workflow:
+        1. Compare metadata between clouds (CRS, epoch, geoid, units)
+        2. Warp compare cloud CRS to match reference
+        3. Crop both clouds to overlap area (Area A)
+        4. Crop compare cloud with buffer for alignment (Area B)
+        5. ICP alignment using Area B (compare) vs Area A (reference)
+        6. Compute alignment quality metrics
+        7. Create DEMs (DTM/DSM with optional custom classifications)
+        8. Compute 2D difference via RasterPair
+
+        Parameters
+        ----------
+        warp_to_reference : bool, default True
+            Transform pc1 to match pc2's CRS/datum/epoch.
+        skip_epoch : bool, default False
+            Skip epoch transformation even if epochs differ.
+        skip_vertical : bool, default False
+            Skip vertical datum transformation.
+        crop_to_overlap : bool, default True
+            Crop clouds to overlap area before alignment/differencing.
+        alignment_buffer : float, default 10.0
+            Buffer distance (meters) for Area B around overlap polygon.
+        align_icp : bool, default True
+            Perform ICP alignment for fine registration.
+        icp_method : str, default "vgicp"
+            ICP method: "vgicp", "gicp", "icp", or "plane_icp".
+        auto_downsample : bool, default True
+            Automatically calculate optimal voxel size for alignment.
+        target_points : int, default 2_000_000
+            Target point count for auto-downsampling.
+        max_correspondence_distance : float, default 1.0
+            Maximum distance for ICP correspondences (meters).
+        compute_quality : bool, default True
+            Compute detailed alignment quality metrics after ICP.
+        dem_type : str, default "dtm"
+            Default DEM type for both clouds. Overridden by dem_type_pc1/pc2.
+        dem_type_pc1 : str, optional
+            DEM type for pc1. If None, uses dem_type.
+        dem_type_pc2 : str, optional
+            DEM type for pc2. If None, uses dem_type.
+        resolution : float, default 1.0
+            DEM resolution in meters.
+        interpolation : str, default "idw"
+            DEM interpolation method.
+        classifications_pc1 : str, list, or set, default "auto"
+            Classification filter for pc1 DEM creation.
+        classifications_pc2 : str, list, or set, default "auto"
+            Classification filter for pc2 DEM creation.
+        output_dir : str, optional
+            Directory for all output files. If None, uses input directories.
+        overwrite : bool, default True
+            Overwrite existing output files.
+        verbose : bool, default True
+            Print progress messages.
+
+        Returns
+        -------
+        dict
+            Comprehensive results including:
+            - comparison: Initial metadata comparison
+            - transformation_history: List of CRS transformations applied
+            - overlap_info: Overlap polygon and area statistics
+            - alignment_result: ICP alignment results (if performed)
+            - alignment_quality: Detailed quality metrics (if computed)
+            - dem1, dem2: Created Raster objects
+            - difference_result: 2D differencing results with statistics
+        """
+        import sys
+
+        if verbose:
+            print(f"\n{'#' * 70}", file=sys.stderr)
+            print("# Point Cloud Pair Processing Workflow", file=sys.stderr)
+            print(f"{'#' * 70}", file=sys.stderr)
+            print(f"Compare:   {Path(self.pc1.filename).name}", file=sys.stderr)
+            print(f"Reference: {Path(self.pc2.filename).name}", file=sys.stderr)
+
+        results: Dict[str, Any] = {
+            'comparison': None,
+            'transformation_history': [],
+            'overlap_info': None,
+            'alignment_result': None,
+            'alignment_quality': None,
+            'dem1': None,
+            'dem2': None,
+            'difference_result': None,
+        }
+
+        # =====================================================================
+        # Step 1: Compare metadata
+        # =====================================================================
+        if verbose:
+            print(f"\n[Step 1/7] Comparing metadata...", file=sys.stderr)
+
+        results['comparison'] = self.check_all_match()
+
+        if verbose:
+            self.print_comparison()
+
+        # =====================================================================
+        # Step 2: Warp CRS to match reference
+        # =====================================================================
+        if warp_to_reference and results['comparison']['transformations_needed']:
+            if verbose:
+                print(f"\n[Step 2/7] Warping compare cloud to reference frame...",
+                      file=sys.stderr)
+
+            self.transform_compare_to_match_reference(
+                skip_epoch=skip_epoch,
+                skip_vertical=skip_vertical,
+                overwrite=overwrite,
+                verbose=verbose,
+            )
+            results['transformation_history'] = self._transformation_history.copy()
+        else:
+            if verbose:
+                print(f"\n[Step 2/7] CRS transformation - Skipped", file=sys.stderr)
+                if not results['comparison']['transformations_needed']:
+                    print("  (Point clouds already in same reference frame)",
+                          file=sys.stderr)
+
+        # =====================================================================
+        # Step 3: Compute overlap and crop
+        # =====================================================================
+        if verbose:
+            print(f"\n[Step 3/7] Computing overlap area...", file=sys.stderr)
+
+        results['overlap_info'] = self.compute_overlap_polygon(use_transformed=True)
+
+        if not results['overlap_info']['has_overlap']:
+            raise ValueError("Point clouds do not overlap. Cannot proceed with workflow.")
+
+        if verbose:
+            oi = results['overlap_info']
+            print(f"  Overlap area: {oi['overlap_area']:,.0f} m²", file=sys.stderr)
+            print(f"  PC1 coverage: {oi['overlap_fraction_pc1']:.1%}", file=sys.stderr)
+            print(f"  PC2 coverage: {oi['overlap_fraction_pc2']:.1%}", file=sys.stderr)
+
+        # =====================================================================
+        # Step 4: ICP Alignment
+        # =====================================================================
+        if align_icp:
+            if verbose:
+                print(f"\n[Step 4/7] ICP alignment ({icp_method.upper()})...",
+                      file=sys.stderr)
+
+            if not _has_small_gicp():
+                if verbose:
+                    print("  WARNING: small_gicp not installed, skipping alignment",
+                          file=sys.stderr)
+            else:
+                alignment = self.align_point_clouds(
+                    method=icp_method,
+                    auto_downsample=auto_downsample,
+                    target_points=target_points,
+                    max_correspondence_distance=max_correspondence_distance,
+                    alignment_buffer=alignment_buffer,
+                    use_cropped_clouds=crop_to_overlap,
+                    apply_transform=True,
+                    overwrite=overwrite,
+                    verbose=verbose,
+                )
+                results['alignment_result'] = alignment
+
+                # Step 5: Compute alignment quality
+                if compute_quality:
+                    if verbose:
+                        print(f"\n[Step 5/7] Computing alignment quality...",
+                              file=sys.stderr)
+
+                    results['alignment_quality'] = self.compute_alignment_quality(
+                        max_distance=max_correspondence_distance,
+                        verbose=verbose,
+                    )
+                else:
+                    if verbose:
+                        print(f"\n[Step 5/7] Alignment quality - Skipped", file=sys.stderr)
+        else:
+            if verbose:
+                print(f"\n[Step 4/7] ICP alignment - Skipped", file=sys.stderr)
+                print(f"\n[Step 5/7] Alignment quality - Skipped", file=sys.stderr)
+
+        # =====================================================================
+        # Step 6: Create DEMs
+        # =====================================================================
+        if verbose:
+            print(f"\n[Step 6/7] Creating DEMs...", file=sys.stderr)
+
+        # Determine DEM types
+        dt_pc1 = dem_type_pc1 if dem_type_pc1 is not None else dem_type
+        dt_pc2 = dem_type_pc2 if dem_type_pc2 is not None else dem_type
+        is_mixed = (dt_pc1 != dt_pc2)
+
+        if is_mixed:
+            # Use mixed method (different DEM types)
+            if verbose:
+                print(f"  Mixed mode: PC1={dt_pc1.upper()}, PC2={dt_pc2.upper()}",
+                      file=sys.stderr)
+        else:
+            if verbose:
+                print(f"  DEM type: {dt_pc1.upper()}", file=sys.stderr)
+
+        dem1, dem2 = self.create_dem_pair(
+            dem_type=dt_pc1,  # For pc1
+            resolution=resolution,
+            interpolation=interpolation,
+            use_transformed=True,
+            output_dir=output_dir,
+            overwrite=overwrite,
+            verbose=verbose,
+            classifications_pc1=classifications_pc1,
+            classifications_pc2=classifications_pc2,
+        )
+
+        # If mixed, recreate dem2 with different type
+        if is_mixed:
+            if verbose:
+                print(f"  Recreating PC2 DEM as {dt_pc2.upper()}...", file=sys.stderr)
+
+            if output_dir is None:
+                dir2 = Path(self.pc2.filename).parent
+            else:
+                dir2 = Path(output_dir)
+
+            out2 = dir2 / f"{Path(self.pc2.filename).stem}_{dt_pc2}_{int(resolution)}m.tif"
+
+            dem2_kwargs = {}
+            if classifications_pc2 != "auto":
+                dem2_kwargs["classification_filter"] = classifications_pc2
+
+            dem2 = self.pc2.create_dem(
+                output_path=str(out2),
+                dem_type=dt_pc2,
+                resolution=resolution,
+                interpolation=interpolation,
+                **dem2_kwargs,
+            )
+            dem2.epoch = getattr(self.pc2, 'epoch', None)
+
+        results['dem1'] = dem1
+        results['dem2'] = dem2
+
+        # =====================================================================
+        # Step 7: Compute 2D difference
+        # =====================================================================
+        if verbose:
+            print(f"\n[Step 7/7] Computing 2D difference...", file=sys.stderr)
+
+        raster_pair = RasterPair(dem1, dem2)
+        diff_result = raster_pair.compute_difference(
+            transform_first=True,
+            interpolation_method="bilinear",
+            clip_to_overlap=True,
+            overwrite=overwrite,
+            verbose=verbose,
+        )
+
+        # Add metadata
+        diff_result['dem_type_pc1'] = dt_pc1
+        diff_result['dem_type_pc2'] = dt_pc2
+        diff_result['dem_resolution'] = resolution
+        diff_result['pc1_file'] = self.pc1.filename
+        diff_result['pc2_file'] = self.pc2.filename
+
+        results['difference_result'] = diff_result
+
+        # =====================================================================
+        # Summary
+        # =====================================================================
+        if verbose:
+            print(f"\n{'#' * 70}", file=sys.stderr)
+            print("# Workflow Complete", file=sys.stderr)
+            print(f"{'#' * 70}", file=sys.stderr)
+
+            stats = diff_result.get('stats', {})
+            print(f"\nDifference Statistics:", file=sys.stderr)
+            print(f"  Mean:   {stats.get('mean', np.nan):.4f} m", file=sys.stderr)
+            print(f"  Std:    {stats.get('std', np.nan):.4f} m", file=sys.stderr)
+            print(f"  Median: {stats.get('median', np.nan):.4f} m", file=sys.stderr)
+            print(f"  NMAD:   {stats.get('nmad', np.nan):.4f} m", file=sys.stderr)
+
+            if results['alignment_quality']:
+                aq = results['alignment_quality']
+                print(f"\nAlignment Quality:", file=sys.stderr)
+                print(f"  RMSE:   {aq['rmse']:.4f} m", file=sys.stderr)
+                print(f"  Inlier: {aq['inlier_ratio']:.1%}", file=sys.stderr)
+
+            diff_raster = diff_result.get('difference_raster')
+            if diff_raster:
+                print(f"\nOutput: {diff_raster.filename}", file=sys.stderr)
+
+            print(f"{'#' * 70}\n", file=sys.stderr)
+
+        return results
