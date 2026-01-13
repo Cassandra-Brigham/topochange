@@ -793,11 +793,18 @@ class PointCloudPair:
         self,
         output_dir: Optional[str] = None,
         use_transformed: bool = True,
+        target_crs: Optional[Any] = None,
         overwrite: bool = True,
         verbose: bool = True,
     ) -> Tuple[PointCloud, PointCloud]:
         """
         Crop both point clouds to their overlap area (Area A).
+
+        The workflow:
+        1. Get outline polygons from each point cloud (stored in WGS84 as poly_4326)
+        2. Transform both polygons to a common CRS (pc2's CRS or target_crs)
+        3. Compute intersection in that common CRS
+        4. Transform intersection polygon to each point cloud's native CRS for clipping
 
         Parameters
         ----------
@@ -805,6 +812,8 @@ class PointCloudPair:
             Output directory for cropped files. If None, uses same directory as inputs.
         use_transformed : bool, default True
             If True and pc1 has been transformed, use the transformed version.
+        target_crs : CRS, optional
+            Target CRS for computing intersection. If None, uses pc2's CRS.
         overwrite : bool, default True
             Whether to overwrite existing output files.
         verbose : bool, default True
@@ -819,49 +828,86 @@ class PointCloudPair:
         from pyproj import CRS as CRS_, Transformer
         from shapely.ops import transform as shapely_transform
 
-        overlap_result = self.compute_overlap_polygon(use_transformed=use_transformed)
-
-        if not overlap_result['has_overlap']:
-            raise ValueError("Point clouds do not overlap. Cannot crop to overlap area.")
-
-        overlap_poly_utm = overlap_result['overlap_polygon']
-        epsg_utm = getattr(self.pc2, 'epsg_utm', None)
-
-        if verbose:
-            print(f"\n--- Cropping to Overlap Area (Area A) ---", file=sys.stderr)
-            print(f"Overlap area: {overlap_result['overlap_area']:,.0f} m²", file=sys.stderr)
-            print(f"Overlap fraction pc1: {overlap_result['overlap_fraction_pc1']:.1%}", file=sys.stderr)
-            print(f"Overlap fraction pc2: {overlap_result['overlap_fraction_pc2']:.1%}", file=sys.stderr)
-
         # Select pc1 source
         pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
 
-        # Helper to reproject polygon from UTM to point cloud's native CRS
-        def reproject_polygon_to_pc_crs(poly_utm, pc):
-            """Reproject polygon from UTM to point cloud's native CRS."""
-            pc_crs_wkt = (
-                getattr(pc, 'current_horizontal_crs', None) or
-                getattr(pc, 'original_horizontal_crs', None) or
-                getattr(pc, 'current_compound_crs', None) or
-                getattr(pc, 'original_compound_crs', None)
-            )
-            if pc_crs_wkt is None:
-                # No CRS info, assume polygon is already in correct CRS
-                return poly_utm
+        # Get outline polygons in WGS84 (set during from_file())
+        pc1_poly_4326 = getattr(pc1_source, 'poly_4326', None)
+        pc2_poly_4326 = getattr(self.pc2, 'poly_4326', None)
 
-            pc_crs = CRS_.from_user_input(pc_crs_wkt)
-            utm_crs = CRS_.from_epsg(epsg_utm) if epsg_utm else None
+        if pc1_poly_4326 is None or pc2_poly_4326 is None:
+            raise ValueError("Point cloud outline polygons not available. Ensure from_file() was called.")
 
-            if utm_crs is None:
-                return poly_utm
+        # Get native CRS for each point cloud (for clipping)
+        pc1_native_crs_wkt = (
+            getattr(pc1_source, 'current_horizontal_crs', None) or
+            getattr(pc1_source, 'original_horizontal_crs', None) or
+            getattr(pc1_source, 'current_compound_crs', None) or
+            getattr(pc1_source, 'original_compound_crs', None)
+        )
+        pc2_native_crs_wkt = (
+            getattr(self.pc2, 'current_horizontal_crs', None) or
+            getattr(self.pc2, 'original_horizontal_crs', None) or
+            getattr(self.pc2, 'current_compound_crs', None) or
+            getattr(self.pc2, 'original_compound_crs', None)
+        )
 
-            # Check if CRS are the same (no reprojection needed)
-            if pc_crs.equals(utm_crs):
-                return poly_utm
+        # Determine target CRS for intersection computation
+        if target_crs is not None:
+            common_crs = CRS_.from_user_input(target_crs)
+        elif pc2_native_crs_wkt:
+            common_crs = CRS_.from_user_input(pc2_native_crs_wkt)
+        else:
+            # Fallback to WGS84
+            common_crs = CRS_.from_epsg(4326)
 
-            # Reproject polygon from UTM to point cloud CRS
-            transformer = Transformer.from_crs(utm_crs, pc_crs, always_xy=True)
-            return shapely_transform(transformer.transform, poly_utm)
+        wgs84 = CRS_.from_epsg(4326)
+
+        # Transform both polygons from WGS84 to common CRS
+        if not common_crs.equals(wgs84):
+            transformer_to_common = Transformer.from_crs(wgs84, common_crs, always_xy=True)
+            pc1_poly_common = shapely_transform(transformer_to_common.transform, pc1_poly_4326)
+            pc2_poly_common = shapely_transform(transformer_to_common.transform, pc2_poly_4326)
+        else:
+            pc1_poly_common = pc1_poly_4326
+            pc2_poly_common = pc2_poly_4326
+
+        # Compute intersection in common CRS
+        overlap_poly_common = pc1_poly_common.intersection(pc2_poly_common)
+
+        if overlap_poly_common.is_empty:
+            raise ValueError("Point clouds do not overlap. Cannot crop to overlap area.")
+
+        overlap_area = overlap_poly_common.area
+        pc1_overlap_frac = overlap_area / pc1_poly_common.area if pc1_poly_common.area > 0 else 0
+        pc2_overlap_frac = overlap_area / pc2_poly_common.area if pc2_poly_common.area > 0 else 0
+
+        if verbose:
+            print(f"\n--- Cropping to Overlap Area (Area A) ---", file=sys.stderr)
+            print(f"Overlap area: {overlap_area:,.0f} m²", file=sys.stderr)
+            print(f"Overlap fraction pc1: {pc1_overlap_frac:.1%}", file=sys.stderr)
+            print(f"Overlap fraction pc2: {pc2_overlap_frac:.1%}", file=sys.stderr)
+
+        # Transform overlap polygon to each point cloud's native CRS for clipping
+        if pc1_native_crs_wkt:
+            pc1_native_crs = CRS_.from_user_input(pc1_native_crs_wkt)
+            if not pc1_native_crs.equals(common_crs):
+                transformer_to_pc1 = Transformer.from_crs(common_crs, pc1_native_crs, always_xy=True)
+                overlap_poly_pc1 = shapely_transform(transformer_to_pc1.transform, overlap_poly_common)
+            else:
+                overlap_poly_pc1 = overlap_poly_common
+        else:
+            overlap_poly_pc1 = overlap_poly_common
+
+        if pc2_native_crs_wkt:
+            pc2_native_crs = CRS_.from_user_input(pc2_native_crs_wkt)
+            if not pc2_native_crs.equals(common_crs):
+                transformer_to_pc2 = Transformer.from_crs(common_crs, pc2_native_crs, always_xy=True)
+                overlap_poly_pc2 = shapely_transform(transformer_to_pc2.transform, overlap_poly_common)
+            else:
+                overlap_poly_pc2 = overlap_poly_common
+        else:
+            overlap_poly_pc2 = overlap_poly_common
 
         # Determine output paths
         if output_dir is None:
@@ -874,29 +920,12 @@ class PointCloudPair:
         out_path1 = out_dir1 / (Path(pc1_source.filename).stem + "_areaA" + Path(pc1_source.filename).suffix)
         out_path2 = out_dir2 / (Path(self.pc2.filename).stem + "_areaA" + Path(self.pc2.filename).suffix)
 
-        # Reproject overlap polygon to each point cloud's native CRS
-        overlap_poly_pc1 = reproject_polygon_to_pc_crs(overlap_poly_utm, pc1_source)
-        overlap_poly_pc2 = reproject_polygon_to_pc_crs(overlap_poly_utm, self.pc2)
-
         if verbose:
-            # Debug: show polygon and point cloud bounds with CRS info
-            pc1_crs = (
-                getattr(pc1_source, 'current_horizontal_crs', None) or
-                getattr(pc1_source, 'original_horizontal_crs', None)
-            )
-            pc2_crs = (
-                getattr(self.pc2, 'current_horizontal_crs', None) or
-                getattr(self.pc2, 'original_horizontal_crs', None)
-            )
-            print(f"\nDebug - UTM EPSG: {epsg_utm}", file=sys.stderr)
-            print(f"Debug - Overlap polygon (UTM) bounds: {overlap_poly_utm.bounds}", file=sys.stderr)
-            print(f"\nDebug - PC1 CRS: {pc1_crs}", file=sys.stderr)
-            print(f"Debug - PC1 bounds: ({pc1_source.minx:.2f}, {pc1_source.miny:.2f}) to ({pc1_source.maxx:.2f}, {pc1_source.maxy:.2f})", file=sys.stderr)
-            print(f"Debug - PC1 clip polygon bounds: {overlap_poly_pc1.bounds}", file=sys.stderr)
-            print(f"\nDebug - PC2 CRS: {pc2_crs}", file=sys.stderr)
-            print(f"Debug - PC2 bounds: ({self.pc2.minx:.2f}, {self.pc2.miny:.2f}) to ({self.pc2.maxx:.2f}, {self.pc2.maxy:.2f})", file=sys.stderr)
-            print(f"Debug - PC2 clip polygon bounds: {overlap_poly_pc2.bounds}", file=sys.stderr)
-            print(f"\nCropping pc1 to: {out_path1.name}", file=sys.stderr)
+            print(f"PC1 bounds: ({pc1_source.minx:.2f}, {pc1_source.miny:.2f}) to ({pc1_source.maxx:.2f}, {pc1_source.maxy:.2f})", file=sys.stderr)
+            print(f"PC1 clip polygon bounds: {overlap_poly_pc1.bounds}", file=sys.stderr)
+            print(f"PC2 bounds: ({self.pc2.minx:.2f}, {self.pc2.miny:.2f}) to ({self.pc2.maxx:.2f}, {self.pc2.maxy:.2f})", file=sys.stderr)
+            print(f"PC2 clip polygon bounds: {overlap_poly_pc2.bounds}", file=sys.stderr)
+            print(f"Cropping pc1 to: {out_path1.name}", file=sys.stderr)
 
         pc1_cropped = pc1_source.clip_to_polygon(
             polygon=overlap_poly_pc1,
