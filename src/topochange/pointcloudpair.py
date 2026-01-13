@@ -879,7 +879,24 @@ class PointCloudPair:
         overlap_poly_pc2 = reproject_polygon_to_pc_crs(overlap_poly_utm, self.pc2)
 
         if verbose:
-            print(f"Cropping pc1 to: {out_path1.name}", file=sys.stderr)
+            # Debug: show polygon and point cloud bounds with CRS info
+            pc1_crs = (
+                getattr(pc1_source, 'current_horizontal_crs', None) or
+                getattr(pc1_source, 'original_horizontal_crs', None)
+            )
+            pc2_crs = (
+                getattr(self.pc2, 'current_horizontal_crs', None) or
+                getattr(self.pc2, 'original_horizontal_crs', None)
+            )
+            print(f"\nDebug - UTM EPSG: {epsg_utm}", file=sys.stderr)
+            print(f"Debug - Overlap polygon (UTM) bounds: {overlap_poly_utm.bounds}", file=sys.stderr)
+            print(f"\nDebug - PC1 CRS: {pc1_crs}", file=sys.stderr)
+            print(f"Debug - PC1 bounds: ({pc1_source.minx:.2f}, {pc1_source.miny:.2f}) to ({pc1_source.maxx:.2f}, {pc1_source.maxy:.2f})", file=sys.stderr)
+            print(f"Debug - PC1 clip polygon bounds: {overlap_poly_pc1.bounds}", file=sys.stderr)
+            print(f"\nDebug - PC2 CRS: {pc2_crs}", file=sys.stderr)
+            print(f"Debug - PC2 bounds: ({self.pc2.minx:.2f}, {self.pc2.miny:.2f}) to ({self.pc2.maxx:.2f}, {self.pc2.maxy:.2f})", file=sys.stderr)
+            print(f"Debug - PC2 clip polygon bounds: {overlap_poly_pc2.bounds}", file=sys.stderr)
+            print(f"\nCropping pc1 to: {out_path1.name}", file=sys.stderr)
 
         pc1_cropped = pc1_source.clip_to_polygon(
             polygon=overlap_poly_pc1,
