@@ -616,11 +616,337 @@ class PointCloudPair:
 
         print("")
 
-    
+    # =========================================================================
+    # Overlap and Cropping Methods
+    # =========================================================================
+
+    def get_bounding_polygons(
+        self,
+        use_transformed: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Get bounding polygons for both point clouds.
+
+        Parameters
+        ----------
+        use_transformed : bool, default True
+            If True and pc1 has been transformed, use the transformed version.
+
+        Returns
+        -------
+        dict
+            {
+                'pc1_polygon': shapely.Polygon (in UTM),
+                'pc2_polygon': shapely.Polygon (in UTM),
+                'pc1_polygon_4326': shapely.Polygon (in WGS84),
+                'pc2_polygon_4326': shapely.Polygon (in WGS84),
+                'pc1_bounds': tuple (minx, miny, maxx, maxy),
+                'pc2_bounds': tuple (minx, miny, maxx, maxy),
+                'epsg_utm': str,
+            }
+        """
+        # Select pc1 source
+        pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
+
+        # Get polygons from point clouds (set during from_file())
+        pc1_poly_utm = getattr(pc1_source, 'poly_utm', None)
+        pc2_poly_utm = getattr(self.pc2, 'poly_utm', None)
+        pc1_poly_4326 = getattr(pc1_source, 'poly_4326', None)
+        pc2_poly_4326 = getattr(self.pc2, 'poly_4326', None)
+        epsg_utm = getattr(self.pc2, 'epsg_utm', None)
+
+        return {
+            'pc1_polygon': pc1_poly_utm,
+            'pc2_polygon': pc2_poly_utm,
+            'pc1_polygon_4326': pc1_poly_4326,
+            'pc2_polygon_4326': pc2_poly_4326,
+            'pc1_bounds': pc1_poly_utm.bounds if pc1_poly_utm else None,
+            'pc2_bounds': pc2_poly_utm.bounds if pc2_poly_utm else None,
+            'epsg_utm': epsg_utm,
+        }
+
+    def compute_overlap_polygon(
+        self,
+        use_transformed: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Compute the intersection polygon of pc1 and pc2 bounding areas (Area A).
+
+        Both point clouds should be in the same CRS for meaningful results.
+        Uses the UTM polygons computed during from_file().
+
+        Parameters
+        ----------
+        use_transformed : bool, default True
+            If True and pc1 has been transformed, use the transformed version.
+
+        Returns
+        -------
+        dict
+            {
+                'overlap_polygon': shapely.Polygon or None,
+                'overlap_bounds': tuple (minx, miny, maxx, maxy) or None,
+                'overlap_area': float,
+                'pc1_area': float,
+                'pc2_area': float,
+                'overlap_fraction_pc1': float,
+                'overlap_fraction_pc2': float,
+                'has_overlap': bool,
+            }
+        """
+        polys = self.get_bounding_polygons(use_transformed=use_transformed)
+        pc1_poly = polys['pc1_polygon']
+        pc2_poly = polys['pc2_polygon']
+
+        if pc1_poly is None or pc2_poly is None:
+            return {
+                'overlap_polygon': None,
+                'overlap_bounds': None,
+                'overlap_area': 0.0,
+                'pc1_area': pc1_poly.area if pc1_poly else 0.0,
+                'pc2_area': pc2_poly.area if pc2_poly else 0.0,
+                'overlap_fraction_pc1': 0.0,
+                'overlap_fraction_pc2': 0.0,
+                'has_overlap': False,
+            }
+
+        overlap = pc1_poly.intersection(pc2_poly)
+
+        if overlap.is_empty:
+            return {
+                'overlap_polygon': None,
+                'overlap_bounds': None,
+                'overlap_area': 0.0,
+                'pc1_area': pc1_poly.area,
+                'pc2_area': pc2_poly.area,
+                'overlap_fraction_pc1': 0.0,
+                'overlap_fraction_pc2': 0.0,
+                'has_overlap': False,
+            }
+
+        return {
+            'overlap_polygon': overlap,
+            'overlap_bounds': overlap.bounds,
+            'overlap_area': overlap.area,
+            'pc1_area': pc1_poly.area,
+            'pc2_area': pc2_poly.area,
+            'overlap_fraction_pc1': overlap.area / pc1_poly.area if pc1_poly.area > 0 else 0,
+            'overlap_fraction_pc2': overlap.area / pc2_poly.area if pc2_poly.area > 0 else 0,
+            'has_overlap': True,
+        }
+
+    def compute_buffered_overlap_polygon(
+        self,
+        buffer_distance: float = 10.0,
+        use_transformed: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Compute overlap polygon with buffer for alignment preparation (Area B).
+
+        Area B = overlap polygon + buffer. This is used for the compare cloud
+        during alignment to provide context beyond the strict overlap area.
+
+        Parameters
+        ----------
+        buffer_distance : float, default 10.0
+            Buffer distance in map units (typically meters).
+        use_transformed : bool, default True
+            If True and pc1 has been transformed, use the transformed version.
+
+        Returns
+        -------
+        dict
+            {
+                'buffered_polygon': shapely.Polygon,
+                'buffered_bounds': tuple,
+                'buffered_area': float,
+                'overlap_polygon': shapely.Polygon,
+                'overlap_area': float,
+                'buffer_distance': float,
+            }
+        """
+        overlap_result = self.compute_overlap_polygon(use_transformed=use_transformed)
+
+        if not overlap_result['has_overlap']:
+            return {
+                'buffered_polygon': None,
+                'buffered_bounds': None,
+                'buffered_area': 0.0,
+                'overlap_polygon': None,
+                'overlap_area': 0.0,
+                'buffer_distance': buffer_distance,
+            }
+
+        overlap_poly = overlap_result['overlap_polygon']
+        buffered_poly = overlap_poly.buffer(buffer_distance)
+
+        return {
+            'buffered_polygon': buffered_poly,
+            'buffered_bounds': buffered_poly.bounds,
+            'buffered_area': buffered_poly.area,
+            'overlap_polygon': overlap_poly,
+            'overlap_area': overlap_result['overlap_area'],
+            'buffer_distance': buffer_distance,
+        }
+
+    def crop_to_overlap(
+        self,
+        output_dir: Optional[str] = None,
+        use_transformed: bool = True,
+        overwrite: bool = True,
+        verbose: bool = True,
+    ) -> Tuple[PointCloud, PointCloud]:
+        """
+        Crop both point clouds to their overlap area (Area A).
+
+        Parameters
+        ----------
+        output_dir : str, optional
+            Output directory for cropped files. If None, uses same directory as inputs.
+        use_transformed : bool, default True
+            If True and pc1 has been transformed, use the transformed version.
+        overwrite : bool, default True
+            Whether to overwrite existing output files.
+        verbose : bool, default True
+            Print progress messages.
+
+        Returns
+        -------
+        tuple[PointCloud, PointCloud]
+            (pc1_cropped, pc2_cropped) - Both cropped to Area A.
+        """
+        import sys
+
+        overlap_result = self.compute_overlap_polygon(use_transformed=use_transformed)
+
+        if not overlap_result['has_overlap']:
+            raise ValueError("Point clouds do not overlap. Cannot crop to overlap area.")
+
+        overlap_poly = overlap_result['overlap_polygon']
+
+        if verbose:
+            print(f"\n--- Cropping to Overlap Area (Area A) ---", file=sys.stderr)
+            print(f"Overlap area: {overlap_result['overlap_area']:,.0f} m²", file=sys.stderr)
+            print(f"Overlap fraction pc1: {overlap_result['overlap_fraction_pc1']:.1%}", file=sys.stderr)
+            print(f"Overlap fraction pc2: {overlap_result['overlap_fraction_pc2']:.1%}", file=sys.stderr)
+
+        # Select pc1 source
+        pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
+
+        # Determine output paths
+        if output_dir is None:
+            out_dir1 = Path(pc1_source.filename).parent
+            out_dir2 = Path(self.pc2.filename).parent
+        else:
+            out_dir1 = out_dir2 = Path(output_dir)
+            out_dir1.mkdir(parents=True, exist_ok=True)
+
+        out_path1 = out_dir1 / (Path(pc1_source.filename).stem + "_areaA" + Path(pc1_source.filename).suffix)
+        out_path2 = out_dir2 / (Path(self.pc2.filename).stem + "_areaA" + Path(self.pc2.filename).suffix)
+
+        if verbose:
+            print(f"Cropping pc1 to: {out_path1.name}", file=sys.stderr)
+
+        pc1_cropped = pc1_source.clip_to_polygon(
+            polygon=overlap_poly,
+            output_path=out_path1,
+            overwrite=overwrite,
+        )
+
+        if verbose:
+            print(f"Cropping pc2 to: {out_path2.name}", file=sys.stderr)
+
+        pc2_cropped = self.pc2.clip_to_polygon(
+            polygon=overlap_poly,
+            output_path=out_path2,
+            overwrite=overwrite,
+        )
+
+        if verbose:
+            print(f"Cropping complete.", file=sys.stderr)
+
+        return pc1_cropped, pc2_cropped
+
+    def crop_compare_with_buffer(
+        self,
+        buffer_distance: float = 10.0,
+        output_dir: Optional[str] = None,
+        use_transformed: bool = True,
+        overwrite: bool = True,
+        verbose: bool = True,
+    ) -> PointCloud:
+        """
+        Crop compare point cloud (pc1) to overlap area plus buffer (Area B).
+
+        Area B is used for the compare cloud during alignment to provide
+        spatial context beyond the strict overlap region.
+
+        Parameters
+        ----------
+        buffer_distance : float, default 10.0
+            Buffer distance around overlap area in map units (typically meters).
+        output_dir : str, optional
+            Output directory for cropped file. If None, uses same directory as input.
+        use_transformed : bool, default True
+            If True and pc1 has been transformed, use the transformed version.
+        overwrite : bool, default True
+            Whether to overwrite existing output file.
+        verbose : bool, default True
+            Print progress messages.
+
+        Returns
+        -------
+        PointCloud
+            pc1 cropped to Area B (overlap + buffer).
+        """
+        import sys
+
+        buffered_result = self.compute_buffered_overlap_polygon(
+            buffer_distance=buffer_distance,
+            use_transformed=use_transformed,
+        )
+
+        if buffered_result['buffered_polygon'] is None:
+            raise ValueError("Point clouds do not overlap. Cannot create buffered crop.")
+
+        buffered_poly = buffered_result['buffered_polygon']
+
+        if verbose:
+            print(f"\n--- Cropping Compare Cloud with Buffer (Area B) ---", file=sys.stderr)
+            print(f"Buffer distance: {buffer_distance} m", file=sys.stderr)
+            print(f"Overlap area: {buffered_result['overlap_area']:,.0f} m²", file=sys.stderr)
+            print(f"Buffered area: {buffered_result['buffered_area']:,.0f} m²", file=sys.stderr)
+
+        # Select pc1 source
+        pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
+
+        # Determine output path
+        if output_dir is None:
+            out_dir = Path(pc1_source.filename).parent
+        else:
+            out_dir = Path(output_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+        out_path = out_dir / (Path(pc1_source.filename).stem + "_areaB" + Path(pc1_source.filename).suffix)
+
+        if verbose:
+            print(f"Cropping pc1 to: {out_path.name}", file=sys.stderr)
+
+        pc1_buffered = pc1_source.clip_to_polygon(
+            polygon=buffered_poly,
+            output_path=out_path,
+            overwrite=overwrite,
+        )
+
+        if verbose:
+            print(f"Cropping complete.", file=sys.stderr)
+
+        return pc1_buffered
+
     # =========================================================================
     # Transformation Methods
     # =========================================================================
-    
+
     def transform_compare_to_match_reference(
         self,
         skip_epoch: bool = False,
