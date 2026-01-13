@@ -816,13 +816,16 @@ class PointCloudPair:
             (pc1_cropped, pc2_cropped) - Both cropped to Area A.
         """
         import sys
+        from pyproj import CRS as CRS_, Transformer
+        from shapely.ops import transform as shapely_transform
 
         overlap_result = self.compute_overlap_polygon(use_transformed=use_transformed)
 
         if not overlap_result['has_overlap']:
             raise ValueError("Point clouds do not overlap. Cannot crop to overlap area.")
 
-        overlap_poly = overlap_result['overlap_polygon']
+        overlap_poly_utm = overlap_result['overlap_polygon']
+        epsg_utm = getattr(self.pc2, 'epsg_utm', None)
 
         if verbose:
             print(f"\n--- Cropping to Overlap Area (Area A) ---", file=sys.stderr)
@@ -832,6 +835,33 @@ class PointCloudPair:
 
         # Select pc1 source
         pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
+
+        # Helper to reproject polygon from UTM to point cloud's native CRS
+        def reproject_polygon_to_pc_crs(poly_utm, pc):
+            """Reproject polygon from UTM to point cloud's native CRS."""
+            pc_crs_wkt = (
+                getattr(pc, 'current_horizontal_crs', None) or
+                getattr(pc, 'original_horizontal_crs', None) or
+                getattr(pc, 'current_compound_crs', None) or
+                getattr(pc, 'original_compound_crs', None)
+            )
+            if pc_crs_wkt is None:
+                # No CRS info, assume polygon is already in correct CRS
+                return poly_utm
+
+            pc_crs = CRS_.from_user_input(pc_crs_wkt)
+            utm_crs = CRS_.from_epsg(epsg_utm) if epsg_utm else None
+
+            if utm_crs is None:
+                return poly_utm
+
+            # Check if CRS are the same (no reprojection needed)
+            if pc_crs.equals(utm_crs):
+                return poly_utm
+
+            # Reproject polygon from UTM to point cloud CRS
+            transformer = Transformer.from_crs(utm_crs, pc_crs, always_xy=True)
+            return shapely_transform(transformer.transform, poly_utm)
 
         # Determine output paths
         if output_dir is None:
@@ -844,11 +874,15 @@ class PointCloudPair:
         out_path1 = out_dir1 / (Path(pc1_source.filename).stem + "_areaA" + Path(pc1_source.filename).suffix)
         out_path2 = out_dir2 / (Path(self.pc2.filename).stem + "_areaA" + Path(self.pc2.filename).suffix)
 
+        # Reproject overlap polygon to each point cloud's native CRS
+        overlap_poly_pc1 = reproject_polygon_to_pc_crs(overlap_poly_utm, pc1_source)
+        overlap_poly_pc2 = reproject_polygon_to_pc_crs(overlap_poly_utm, self.pc2)
+
         if verbose:
             print(f"Cropping pc1 to: {out_path1.name}", file=sys.stderr)
 
         pc1_cropped = pc1_source.clip_to_polygon(
-            polygon=overlap_poly,
+            polygon=overlap_poly_pc1,
             output_path=out_path1,
             overwrite=overwrite,
         )
@@ -857,7 +891,7 @@ class PointCloudPair:
             print(f"Cropping pc2 to: {out_path2.name}", file=sys.stderr)
 
         pc2_cropped = self.pc2.clip_to_polygon(
-            polygon=overlap_poly,
+            polygon=overlap_poly_pc2,
             output_path=out_path2,
             overwrite=overwrite,
         )
@@ -900,6 +934,8 @@ class PointCloudPair:
             pc1 cropped to Area B (overlap + buffer).
         """
         import sys
+        from pyproj import CRS as CRS_, Transformer
+        from shapely.ops import transform as shapely_transform
 
         buffered_result = self.compute_buffered_overlap_polygon(
             buffer_distance=buffer_distance,
@@ -909,7 +945,8 @@ class PointCloudPair:
         if buffered_result['buffered_polygon'] is None:
             raise ValueError("Point clouds do not overlap. Cannot create buffered crop.")
 
-        buffered_poly = buffered_result['buffered_polygon']
+        buffered_poly_utm = buffered_result['buffered_polygon']
+        epsg_utm = getattr(self.pc2, 'epsg_utm', None)
 
         if verbose:
             print(f"\n--- Cropping Compare Cloud with Buffer (Area B) ---", file=sys.stderr)
@@ -919,6 +956,22 @@ class PointCloudPair:
 
         # Select pc1 source
         pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
+
+        # Reproject polygon from UTM to point cloud's native CRS
+        pc_crs_wkt = (
+            getattr(pc1_source, 'current_horizontal_crs', None) or
+            getattr(pc1_source, 'original_horizontal_crs', None) or
+            getattr(pc1_source, 'current_compound_crs', None) or
+            getattr(pc1_source, 'original_compound_crs', None)
+        )
+
+        buffered_poly = buffered_poly_utm  # Default to UTM polygon
+        if pc_crs_wkt and epsg_utm:
+            pc_crs = CRS_.from_user_input(pc_crs_wkt)
+            utm_crs = CRS_.from_epsg(epsg_utm)
+            if not pc_crs.equals(utm_crs):
+                transformer = Transformer.from_crs(utm_crs, pc_crs, always_xy=True)
+                buffered_poly = shapely_transform(transformer.transform, buffered_poly_utm)
 
         # Determine output path
         if output_dir is None:
