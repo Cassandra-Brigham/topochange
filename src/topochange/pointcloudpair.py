@@ -350,12 +350,16 @@ class PointCloudPair:
     # Internal state
     _transformation_history: List[Dict[str, Any]] = field(default_factory=list)
     _pc1_transformed: Optional[PointCloud] = field(default=None, repr=False)
+    _pc1_cropped: Optional[PointCloud] = field(default=None, repr=False)
+    _pc2_cropped: Optional[PointCloud] = field(default=None, repr=False)
     _alignment_result: Optional[Dict[str, Any]] = field(default=None, repr=False)
-    
+
     def __post_init__(self):
         """Initialize internal state."""
         self._transformation_history = []
         self._pc1_transformed = None
+        self._pc1_cropped = None
+        self._pc2_cropped = None
         self._alignment_result = None
     
     # =========================================================================
@@ -794,17 +798,19 @@ class PointCloudPair:
         output_dir: Optional[str] = None,
         use_transformed: bool = True,
         target_crs: Optional[Any] = None,
+        interior_buffer: Optional[float] = None,
         overwrite: bool = True,
         verbose: bool = True,
     ) -> Tuple[PointCloud, PointCloud]:
         """
-        Crop both point clouds to their overlap area (Area A).
+        Crop both point clouds to their overlap area.
 
         The workflow:
         1. Get outline polygons from each point cloud (stored in WGS84 as poly_4326)
         2. Transform both polygons to a common CRS (pc2's CRS or target_crs)
         3. Compute intersection in that common CRS
-        4. Transform intersection polygon to each point cloud's native CRS for clipping
+        4. Optionally apply interior buffer to compare cloud's clip polygon
+        5. Transform clip polygons to each point cloud's native CRS for clipping
 
         Parameters
         ----------
@@ -814,6 +820,11 @@ class PointCloudPair:
             If True and pc1 has been transformed, use the transformed version.
         target_crs : CRS, optional
             Target CRS for computing intersection. If None, uses pc2's CRS.
+        interior_buffer : float, optional
+            If provided, shrinks the compare cloud's clip polygon inward by this
+            distance (in meters). This ensures the compare cloud is smaller on all
+            sides than the reference, which is useful for alignment. The reference
+            cloud still uses the full intersection polygon.
         overwrite : bool, default True
             Whether to overwrite existing output files.
         verbose : bool, default True
@@ -822,7 +833,8 @@ class PointCloudPair:
         Returns
         -------
         tuple[PointCloud, PointCloud]
-            (pc1_cropped, pc2_cropped) - Both cropped to Area A.
+            (pc1_cropped, pc2_cropped) - pc1 cropped to intersection (minus interior
+            buffer if specified), pc2 cropped to full intersection.
         """
         import sys
         from pyproj import CRS as CRS_, Transformer
@@ -882,37 +894,58 @@ class PointCloudPair:
         pc1_overlap_frac = overlap_area / pc1_poly_common.area if pc1_poly_common.area > 0 else 0
         pc2_overlap_frac = overlap_area / pc2_poly_common.area if pc2_poly_common.area > 0 else 0
 
+        # Apply interior buffer to compare cloud's clip polygon if requested
+        # This shrinks the compare polygon inward so it's smaller than reference on all sides
+        if interior_buffer is not None and interior_buffer > 0:
+            # Negative buffer shrinks the polygon inward
+            pc1_clip_poly_common = overlap_poly_common.buffer(-interior_buffer)
+            if pc1_clip_poly_common.is_empty:
+                raise ValueError(
+                    f"Interior buffer of {interior_buffer}m resulted in empty polygon. "
+                    "Try a smaller buffer value."
+                )
+            pc1_buffered_area = pc1_clip_poly_common.area
+        else:
+            pc1_clip_poly_common = overlap_poly_common
+            pc1_buffered_area = None
+
+        # Reference cloud always uses full intersection polygon
+        pc2_clip_poly_common = overlap_poly_common
+
         if verbose:
-            print(f"\n--- Cropping to Overlap Area (Area A) ---", file=sys.stderr)
+            print(f"\n--- Cropping to Overlap Area ---", file=sys.stderr)
             print(f"PC1 poly_4326 bounds: {pc1_poly_4326.bounds}", file=sys.stderr)
             print(f"PC2 poly_4326 bounds: {pc2_poly_4326.bounds}", file=sys.stderr)
             print(f"Common CRS: {common_crs.to_epsg() or common_crs.name}", file=sys.stderr)
             print(f"PC1 native CRS: {pc1_native_crs_wkt[:80] if pc1_native_crs_wkt else 'None'}...", file=sys.stderr)
             print(f"PC2 native CRS: {pc2_native_crs_wkt[:80] if pc2_native_crs_wkt else 'None'}...", file=sys.stderr)
-            print(f"Overlap area: {overlap_area:,.0f} m²", file=sys.stderr)
+            print(f"Intersection area: {overlap_area:,.0f} m²", file=sys.stderr)
             print(f"Overlap fraction pc1: {pc1_overlap_frac:.1%}", file=sys.stderr)
             print(f"Overlap fraction pc2: {pc2_overlap_frac:.1%}", file=sys.stderr)
+            if interior_buffer is not None and interior_buffer > 0:
+                print(f"Interior buffer for compare: {interior_buffer} m", file=sys.stderr)
+                print(f"Compare clip area (after buffer): {pc1_buffered_area:,.0f} m²", file=sys.stderr)
 
-        # Transform overlap polygon to each point cloud's native CRS for clipping
+        # Transform clip polygons to each point cloud's native CRS for clipping
         if pc1_native_crs_wkt:
             pc1_native_crs = CRS_.from_user_input(pc1_native_crs_wkt)
             if not pc1_native_crs.equals(common_crs):
                 transformer_to_pc1 = Transformer.from_crs(common_crs, pc1_native_crs, always_xy=True)
-                overlap_poly_pc1 = shapely_transform(transformer_to_pc1.transform, overlap_poly_common)
+                clip_poly_pc1 = shapely_transform(transformer_to_pc1.transform, pc1_clip_poly_common)
             else:
-                overlap_poly_pc1 = overlap_poly_common
+                clip_poly_pc1 = pc1_clip_poly_common
         else:
-            overlap_poly_pc1 = overlap_poly_common
+            clip_poly_pc1 = pc1_clip_poly_common
 
         if pc2_native_crs_wkt:
             pc2_native_crs = CRS_.from_user_input(pc2_native_crs_wkt)
             if not pc2_native_crs.equals(common_crs):
                 transformer_to_pc2 = Transformer.from_crs(common_crs, pc2_native_crs, always_xy=True)
-                overlap_poly_pc2 = shapely_transform(transformer_to_pc2.transform, overlap_poly_common)
+                clip_poly_pc2 = shapely_transform(transformer_to_pc2.transform, pc2_clip_poly_common)
             else:
-                overlap_poly_pc2 = overlap_poly_common
+                clip_poly_pc2 = pc2_clip_poly_common
         else:
-            overlap_poly_pc2 = overlap_poly_common
+            clip_poly_pc2 = pc2_clip_poly_common
 
         # Determine output paths
         if output_dir is None:
@@ -922,20 +955,27 @@ class PointCloudPair:
             out_dir1 = out_dir2 = Path(output_dir)
             out_dir1.mkdir(parents=True, exist_ok=True)
 
-        out_path1 = out_dir1 / (Path(pc1_source.filename).stem + "_areaA" + Path(pc1_source.filename).suffix)
-        out_path2 = out_dir2 / (Path(self.pc2.filename).stem + "_areaA" + Path(self.pc2.filename).suffix)
+        # Use different suffix if interior buffer applied
+        if interior_buffer is not None and interior_buffer > 0:
+            pc1_suffix = "_intersection_buffered"
+        else:
+            pc1_suffix = "_intersection"
+        pc2_suffix = "_intersection"
+
+        out_path1 = out_dir1 / (Path(pc1_source.filename).stem + pc1_suffix + Path(pc1_source.filename).suffix)
+        out_path2 = out_dir2 / (Path(self.pc2.filename).stem + pc2_suffix + Path(self.pc2.filename).suffix)
 
         if verbose:
             print(f"PC1 bounds: ({pc1_source.minx:.2f}, {pc1_source.miny:.2f}) to ({pc1_source.maxx:.2f}, {pc1_source.maxy:.2f})", file=sys.stderr)
-            print(f"PC1 clip polygon bounds: {overlap_poly_pc1.bounds}", file=sys.stderr)
+            print(f"PC1 clip polygon bounds: {clip_poly_pc1.bounds}", file=sys.stderr)
             print(f"PC1 CRS match common? {pc1_native_crs.equals(common_crs) if pc1_native_crs_wkt else 'N/A'}", file=sys.stderr)
             print(f"PC2 bounds: ({self.pc2.minx:.2f}, {self.pc2.miny:.2f}) to ({self.pc2.maxx:.2f}, {self.pc2.maxy:.2f})", file=sys.stderr)
-            print(f"PC2 clip polygon bounds: {overlap_poly_pc2.bounds}", file=sys.stderr)
+            print(f"PC2 clip polygon bounds: {clip_poly_pc2.bounds}", file=sys.stderr)
             print(f"PC2 CRS match common? {pc2_native_crs.equals(common_crs) if pc2_native_crs_wkt else 'N/A'}", file=sys.stderr)
             print(f"Cropping pc1 to: {out_path1.name}", file=sys.stderr)
 
         pc1_cropped = pc1_source.clip_to_polygon(
-            polygon=overlap_poly_pc1,
+            polygon=clip_poly_pc1,
             output_path=out_path1,
             overwrite=overwrite,
         )
@@ -944,13 +984,17 @@ class PointCloudPair:
             print(f"Cropping pc2 to: {out_path2.name}", file=sys.stderr)
 
         pc2_cropped = self.pc2.clip_to_polygon(
-            polygon=overlap_poly_pc2,
+            polygon=clip_poly_pc2,
             output_path=out_path2,
             overwrite=overwrite,
         )
 
         if verbose:
             print(f"Cropping complete.", file=sys.stderr)
+
+        # Store cropped clouds internally for use by alignment
+        self._pc1_cropped = pc1_cropped
+        self._pc2_cropped = pc2_cropped
 
         return pc1_cropped, pc2_cropped
 
@@ -1340,9 +1384,14 @@ class PointCloudPair:
         # =========================================================================
         # Determine source and target point clouds
         # =========================================================================
-        # Use custom clouds if provided, otherwise use cropped or default clouds
+        # Priority: custom clouds > stored cropped clouds > use_cropped_clouds > default
         if source_cloud is not None:
             source_pc = source_cloud
+        elif self._pc1_cropped is not None:
+            # Use previously cropped cloud (from crop_to_overlap with interior_buffer)
+            source_pc = self._pc1_cropped
+            if verbose:
+                print(f"Using stored cropped compare cloud: {source_pc.filename}", file=sys.stderr)
         elif use_cropped_clouds:
             # Crop compare cloud to Area B (overlap + buffer)
             if verbose:
@@ -1359,6 +1408,11 @@ class PointCloudPair:
 
         if target_cloud is not None:
             target_pc = target_cloud
+        elif self._pc2_cropped is not None:
+            # Use previously cropped cloud (from crop_to_overlap)
+            target_pc = self._pc2_cropped
+            if verbose:
+                print(f"Using stored cropped reference cloud: {target_pc.filename}", file=sys.stderr)
         elif use_cropped_clouds:
             # Crop reference cloud to Area A (overlap only)
             if verbose:
