@@ -1930,28 +1930,43 @@ class PointCloudPair:
     # =========================================================================
     # 3D Differencing Methods
     # =========================================================================
-    
+
     def compute_3d_difference(
         self,
         max_distance: float = 1.0,
         use_transformed: bool = True,
+        max_points: Optional[int] = 5_000_000,
+        voxel_size: Optional[float] = None,
+        output_dir: Optional[str] = None,
+        overwrite: bool = True,
         verbose: bool = True,
     ) -> Dict[str, Any]:
         """
         Compute point-to-point 3D differences between point clouds.
-        
-        For each point in pc1, finds the nearest point in pc2 and computes
-        the signed vertical (Z) difference.
-        
+
+        Both clouds are automatically cropped to their overlap area (Area A)
+        before computing differences. For each point in pc1, finds the nearest
+        point in pc2 and computes the signed vertical (Z) difference.
+
         Parameters
         ----------
-        max_distance : float
-            Maximum 3D distance for valid correspondences (meters)
-        use_transformed : bool
-            If True, use the transformed/aligned pc1
-        verbose : bool
-            Print progress messages
-            
+        max_distance : float, default 1.0
+            Maximum 3D distance for valid correspondences (meters).
+            Points farther than this are considered outliers.
+        use_transformed : bool, default True
+            If True, use the transformed/aligned pc1.
+        max_points : int, optional, default 5_000_000
+            Maximum points to load per cloud. Set to None for no limit.
+        voxel_size : float, optional
+            Voxel size for downsampling during loading. If None, no
+            voxel downsampling is applied (only max_points limit).
+        output_dir : str, optional
+            Directory for cropped cloud outputs. If None, uses input directories.
+        overwrite : bool, default True
+            Overwrite existing cropped files.
+        verbose : bool, default True
+            Print progress messages.
+
         Returns
         -------
         dict
@@ -1959,92 +1974,142 @@ class PointCloudPair:
             - differences: array of Z differences for each pc1 point
             - distances_3d: 3D distances to nearest pc2 point
             - valid_mask: boolean mask for points within max_distance
-            - statistics: dict with mean, std, median, etc.
+            - statistics: dict with mean, std, median, nmad, percentiles, etc.
+            - pc1_cropped: PointCloud cropped to Area A
+            - pc2_cropped: PointCloud cropped to Area A
         """
-        if verbose:
-            print(f"\n{'=' * 60}")
-            print("Computing 3D Point Cloud Difference")
-            print(f"{'=' * 60}")
-        
-        # Select source for pc1
-        pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
-        
-        # Load points
-        if verbose:
-            print(f"Loading points...")
-        
-        points1 = _load_points_from_las(pc1_source.filename)
-        points2 = _load_points_from_las(self.pc2.filename)
-        
-        if verbose:
-            print(f"PC1 points: {len(points1):,}")
-            print(f"PC2 points: {len(points2):,}")
-        
-        # Build KD-tree on pc2 (reference)
+        import sys
         from scipy.spatial import cKDTree
-        
+
         if verbose:
-            print(f"Building KD-tree...")
-        
+            print(f"\n{'=' * 60}", file=sys.stderr)
+            print("Computing 3D Point Cloud Difference", file=sys.stderr)
+            print(f"{'=' * 60}", file=sys.stderr)
+
+        # =====================================================================
+        # Step 1: Crop both clouds to overlap area (Area A)
+        # =====================================================================
+        if verbose:
+            print(f"\nCropping clouds to overlap area (Area A)...", file=sys.stderr)
+
+        pc1_cropped, pc2_cropped = self.crop_to_overlap(
+            output_dir=output_dir,
+            use_transformed=use_transformed,
+            overwrite=overwrite,
+            verbose=verbose,
+        )
+
+        # =====================================================================
+        # Step 2: Load points from cropped clouds
+        # =====================================================================
+        if verbose:
+            print(f"\nLoading points from cropped clouds...", file=sys.stderr)
+            if voxel_size:
+                print(f"  Voxel downsampling: {voxel_size} m", file=sys.stderr)
+            if max_points:
+                print(f"  Max points per cloud: {max_points:,}", file=sys.stderr)
+
+        points1 = _load_points_from_las(
+            pc1_cropped.filename,
+            max_points=max_points,
+            voxel_size=voxel_size,
+        )
+        points2 = _load_points_from_las(
+            pc2_cropped.filename,
+            max_points=max_points,
+            voxel_size=voxel_size,
+        )
+
+        if verbose:
+            print(f"  PC1 (compare): {len(points1):,} points", file=sys.stderr)
+            print(f"  PC2 (reference): {len(points2):,} points", file=sys.stderr)
+
+        # =====================================================================
+        # Step 3: Build KD-tree and find correspondences
+        # =====================================================================
+        if verbose:
+            print(f"\nBuilding KD-tree on reference cloud...", file=sys.stderr)
+
         tree2 = cKDTree(points2)
-        
-        # Find nearest neighbors
+
         if verbose:
-            print(f"Finding correspondences...")
-        
-        distances_3d, indices = tree2.query(points1, k=1)
-        
-        # Compute Z differences (pc2 - pc1, positive = gain)
+            print(f"Finding nearest neighbors...", file=sys.stderr)
+
+        distances_3d, indices = tree2.query(points1, k=1, workers=-1)
+
+        # =====================================================================
+        # Step 4: Compute Z differences (pc2 - pc1, positive = gain)
+        # =====================================================================
         z1 = points1[:, 2]
         z2_nearest = points2[indices, 2]
         z_differences = z2_nearest - z1
-        
+
         # Apply distance filter
         valid_mask = distances_3d <= max_distance
         valid_differences = z_differences[valid_mask]
-        
-        # Compute statistics
+
+        # =====================================================================
+        # Step 5: Compute statistics
+        # =====================================================================
         if len(valid_differences) > 0:
+            median_val = float(np.median(valid_differences))
             statistics = {
                 'count': len(valid_differences),
+                'total_count': len(z_differences),
                 'mean': float(np.mean(valid_differences)),
                 'std': float(np.std(valid_differences)),
-                'median': float(np.median(valid_differences)),
+                'median': median_val,
                 'min': float(np.min(valid_differences)),
                 'max': float(np.max(valid_differences)),
+                'q05': float(np.percentile(valid_differences, 5)),
                 'q25': float(np.percentile(valid_differences, 25)),
                 'q75': float(np.percentile(valid_differences, 75)),
+                'q95': float(np.percentile(valid_differences, 95)),
                 'iqr': float(np.percentile(valid_differences, 75) - np.percentile(valid_differences, 25)),
-                'nmad': float(1.4826 * np.median(np.abs(valid_differences - np.median(valid_differences)))),
+                'nmad': float(1.4826 * np.median(np.abs(valid_differences - median_val))),
                 'valid_ratio': float(np.sum(valid_mask) / len(valid_mask)),
             }
         else:
             statistics = {
                 'count': 0,
+                'total_count': len(z_differences),
                 'mean': np.nan,
                 'std': np.nan,
                 'median': np.nan,
                 'min': np.nan,
                 'max': np.nan,
+                'q05': np.nan,
+                'q25': np.nan,
+                'q75': np.nan,
+                'q95': np.nan,
+                'iqr': np.nan,
+                'nmad': np.nan,
                 'valid_ratio': 0.0,
             }
-        
+
         if verbose:
-            print(f"\n3D Difference Statistics:")
-            print(f"  Valid points: {statistics['count']:,} ({statistics['valid_ratio']:.1%})")
-            print(f"  Mean: {statistics['mean']:.4f} m")
-            print(f"  Std: {statistics['std']:.4f} m")
-            print(f"  Median: {statistics['median']:.4f} m")
-            print(f"  NMAD: {statistics.get('nmad', np.nan):.4f} m")
-            print(f"  Range: [{statistics['min']:.4f}, {statistics['max']:.4f}] m")
-            print(f"{'=' * 60}\n")
-        
+            print(f"\n3D Difference Statistics:", file=sys.stderr)
+            print(f"  Valid points: {statistics['count']:,} / {statistics['total_count']:,} "
+                  f"({statistics['valid_ratio']:.1%})", file=sys.stderr)
+            print(f"  Mean:   {statistics['mean']:.4f} m", file=sys.stderr)
+            print(f"  Std:    {statistics['std']:.4f} m", file=sys.stderr)
+            print(f"  Median: {statistics['median']:.4f} m", file=sys.stderr)
+            print(f"  NMAD:   {statistics['nmad']:.4f} m", file=sys.stderr)
+            print(f"  IQR:    {statistics['iqr']:.4f} m", file=sys.stderr)
+            print(f"  Range:  [{statistics['min']:.4f}, {statistics['max']:.4f}] m",
+                  file=sys.stderr)
+            print(f"  5-95%:  [{statistics['q05']:.4f}, {statistics['q95']:.4f}] m",
+                  file=sys.stderr)
+            print(f"{'=' * 60}\n", file=sys.stderr)
+
         return {
             'differences': z_differences,
             'distances_3d': distances_3d,
             'valid_mask': valid_mask,
             'statistics': statistics,
             'max_distance': max_distance,
+            'pc1_cropped': pc1_cropped,
+            'pc2_cropped': pc2_cropped,
         }
     
     # =========================================================================
