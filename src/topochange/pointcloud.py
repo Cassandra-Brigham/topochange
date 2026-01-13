@@ -10,6 +10,8 @@ import gc
 import json
 import math
 import os
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
@@ -640,111 +642,130 @@ class PointCloud:
                             days=creation_doy - 1
                         )
                         start_date_str = start_date.strftime("%Y-%m-%d")
-                        filename_converted = (
-                            os.path.splitext(self.filename)[0]
-                            + "_gws_to_gt"
-                            + os.path.splitext(self.filename)[1]
-                        )
-                        pipeline_gps_convert = pdal.Pipeline(
-                            json.dumps(
-                                {
-                                    "pipeline": [
-                                        self.filename,
-                                        {
-                                            "type": "filters.sort",
-                                            "dimension": "GpsTime",
-                                            "order": "ASC",
-                                        },
-                                        {
-                                            "type": "filters.gpstimeconvert",
-                                            "conversion": "gws2gt",
-                                            "start_date": start_date_str,
-                                        },
-                                        filename_converted,
-                                    ]
-                                }
-                            )
-                        )
-                        pipeline_gps_convert.execute()
 
-                        pipeline_gps_converted = pdal.Pipeline(
-                            json.dumps(
-                                {
-                                    "pipeline": [
-                                        filename_converted,
-                                        {
-                                            "type": "filters.stats",
-                                            "dimensions": "GpsTime",
-                                        },
-                                    ]
-                                }
-                            )
-                        )
-                        pipeline_gps_converted.execute()
-                        gps_root2 = pipeline_gps_converted.metadata
-                        gps_md2 = gps_root2.get("metadata", {}).get("filters.stats", {})
-                        stats_list2 = gps_md2.get("statistic", [])
-                        if not stats_list2:
-                            raise ValueError("No GPS time statistics found. Check GpsTime dimension.")
-                        gps_stats2 = stats_list2[0]
+                        # Convert GPS time in-place: write to temp file, then replace original
+                        file_ext = os.path.splitext(self.filename)[1]
+                        with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp:
+                            temp_filename = tmp.name
 
-                        self.gps_time_mean = float(gps_stats2.get("average"))
-                        self.gps_time_min = float(gps_stats2.get("minimum"))
-                        self.gps_time_max = float(gps_stats2.get("maximum"))
-                        self.gps_stddev = float(gps_stats2.get("stddev"))
+                        try:
+                            pipeline_gps_convert = pdal.Pipeline(
+                                json.dumps(
+                                    {
+                                        "pipeline": [
+                                            self.filename,
+                                            {
+                                                "type": "filters.sort",
+                                                "dimension": "GpsTime",
+                                                "order": "ASC",
+                                            },
+                                            {
+                                                "type": "filters.gpstimeconvert",
+                                                "conversion": "gws2gt",
+                                                "start_date": start_date_str,
+                                            },
+                                            temp_filename,
+                                        ]
+                                    }
+                                )
+                            )
+                            pipeline_gps_convert.execute()
+
+                            # Replace original file with converted file
+                            shutil.move(temp_filename, self.filename)
+
+                            # Get stats from the updated file
+                            pipeline_gps_converted = pdal.Pipeline(
+                                json.dumps(
+                                    {
+                                        "pipeline": [
+                                            self.filename,
+                                            {
+                                                "type": "filters.stats",
+                                                "dimensions": "GpsTime",
+                                            },
+                                        ]
+                                    }
+                                )
+                            )
+                            pipeline_gps_converted.execute()
+                            gps_root2 = pipeline_gps_converted.metadata
+                            gps_md2 = gps_root2.get("metadata", {}).get("filters.stats", {})
+                            stats_list2 = gps_md2.get("statistic", [])
+                            if not stats_list2:
+                                raise ValueError("No GPS time statistics found. Check GpsTime dimension.")
+                            gps_stats2 = stats_list2[0]
+
+                            self.gps_time_mean = float(gps_stats2.get("average"))
+                            self.gps_time_min = float(gps_stats2.get("minimum"))
+                            self.gps_time_max = float(gps_stats2.get("maximum"))
+                            self.gps_stddev = float(gps_stats2.get("stddev"))
+                        finally:
+                            # Clean up temp file if it still exists
+                            if os.path.exists(temp_filename):
+                                os.remove(temp_filename)
 
                     elif gps_time_type == "gst":
-                        filename_converted = (
-                            os.path.splitext(self.filename)[0]
-                            + "_gst_to_gt"
-                            + os.path.splitext(self.filename)[1]
-                        )
-                        pipeline_gps_convert = pdal.Pipeline(
-                            json.dumps(
-                                {
-                                    "pipeline": [
-                                        self.filename,
-                                        {
-                                            "type": "filters.sort",
-                                            "dimension": "GpsTime",
-                                            "order": "ASC",
-                                        },
-                                        {
-                                            "type": "filters.gpstimeconvert",
-                                            "conversion": "gst2gt",
-                                        },
-                                        filename_converted,
-                                    ]
-                                }
-                            )
-                        )
-                        pipeline_gps_convert.execute()
+                        # Convert GPS time in-place: write to temp file, then replace original
+                        file_ext = os.path.splitext(self.filename)[1]
+                        with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp:
+                            temp_filename = tmp.name
 
-                        pipeline_gps_converted = pdal.Pipeline(
-                            json.dumps(
-                                {
-                                    "pipeline": [
-                                        filename_converted,
-                                        {
-                                            "type": "filters.stats",
-                                            "dimensions": "GpsTime",
-                                        },
-                                    ]
-                                }
+                        try:
+                            pipeline_gps_convert = pdal.Pipeline(
+                                json.dumps(
+                                    {
+                                        "pipeline": [
+                                            self.filename,
+                                            {
+                                                "type": "filters.sort",
+                                                "dimension": "GpsTime",
+                                                "order": "ASC",
+                                            },
+                                            {
+                                                "type": "filters.gpstimeconvert",
+                                                "conversion": "gst2gt",
+                                            },
+                                            temp_filename,
+                                        ]
+                                    }
+                                )
                             )
-                        )
-                        pipeline_gps_converted.execute()
-                        gps_root2 = pipeline_gps_converted.metadata
-                        gps_md2 = gps_root2.get("metadata", {}).get("filters.stats", {})
-                        stats_list2 = gps_md2.get("statistic", [])
-                        if not stats_list2:
-                            raise ValueError("No GPS time statistics found. Check GpsTime dimension.")
-                        gps_stats2 = stats_list2[0]
+                            pipeline_gps_convert.execute()
 
-                        self.gps_time_mean = float(gps_stats2.get("average"))
-                        self.gps_time_min = float(gps_stats2.get("minimum"))
-                        self.gps_time_max = float(gps_stats2.get("maximum"))
-                        self.gps_stddev = float(gps_stats2.get("stddev"))
+                            # Replace original file with converted file
+                            shutil.move(temp_filename, self.filename)
+
+                            # Get stats from the updated file
+                            pipeline_gps_converted = pdal.Pipeline(
+                                json.dumps(
+                                    {
+                                        "pipeline": [
+                                            self.filename,
+                                            {
+                                                "type": "filters.stats",
+                                                "dimensions": "GpsTime",
+                                            },
+                                        ]
+                                    }
+                                )
+                            )
+                            pipeline_gps_converted.execute()
+                            gps_root2 = pipeline_gps_converted.metadata
+                            gps_md2 = gps_root2.get("metadata", {}).get("filters.stats", {})
+                            stats_list2 = gps_md2.get("statistic", [])
+                            if not stats_list2:
+                                raise ValueError("No GPS time statistics found. Check GpsTime dimension.")
+                            gps_stats2 = stats_list2[0]
+
+                            self.gps_time_mean = float(gps_stats2.get("average"))
+                            self.gps_time_min = float(gps_stats2.get("minimum"))
+                            self.gps_time_max = float(gps_stats2.get("maximum"))
+                            self.gps_stddev = float(gps_stats2.get("stddev"))
+                        finally:
+                            # Clean up temp file if it still exists
+                            if os.path.exists(temp_filename):
+                                os.remove(temp_filename)
 
                     else:  # gps_time_type == "gt"
                         self.gps_time_mean = float(self.gps_time_mean_raw)
