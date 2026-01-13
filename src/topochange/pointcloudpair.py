@@ -1143,8 +1143,8 @@ class PointCloudPair:
     
     def align_point_clouds(
         self,
-        method: str = "gicp",
-        downsample_resolution: float = 0.5,
+        method: str = "vgicp",
+        downsample_resolution: Optional[float] = None,
         max_correspondence_distance: float = 1.0,
         max_iterations: int = 50,
         transformation_epsilon: float = 1e-6,
@@ -1155,6 +1155,12 @@ class PointCloudPair:
         verbose: bool = True,
         initial_voxel_size: Optional[float] = None,
         max_points: Optional[int] = 2_000_000,
+        auto_downsample: bool = True,
+        target_points: int = 2_000_000,
+        source_cloud: Optional[PointCloud] = None,
+        target_cloud: Optional[PointCloud] = None,
+        alignment_buffer: float = 10.0,
+        use_cropped_clouds: bool = False,
     ) -> Dict[str, Any]:
         """
         Align pc1 to pc2 using ICP registration via small_gicp.
@@ -1165,9 +1171,11 @@ class PointCloudPair:
         Parameters
         ----------
         method : str
-            Registration method: 'gicp', 'vgicp', 'icp', or 'plane_icp'
-        downsample_resolution : float
-            Voxel size for small_gicp preprocessing (default 0.5m)
+            Registration method: 'gicp', 'vgicp', 'icp', or 'plane_icp'.
+            Default is 'vgicp' for best accuracy.
+        downsample_resolution : float, optional
+            Voxel size for small_gicp preprocessing. If None and auto_downsample
+            is True, automatically calculated based on point density.
         max_correspondence_distance : float
             Maximum distance for point correspondences (default 1.0m)
         max_iterations : int
@@ -1191,27 +1199,138 @@ class PointCloudPair:
         max_points : int, optional
             Maximum points to load per cloud (default 2M). Applied after
             voxel downsampling. Set to None for no limit.
+        auto_downsample : bool, default True
+            If True and downsample_resolution is None, automatically calculate
+            optimal voxel size to achieve approximately target_points points.
+        target_points : int, default 2_000_000
+            Target number of points for auto-downsampling. Uses minimum
+            downsampling needed to stay below this threshold.
+        source_cloud : PointCloud, optional
+            Custom source (compare) point cloud to use for alignment.
+            If None, uses pc1 (or transformed pc1 if available).
+        target_cloud : PointCloud, optional
+            Custom target (reference) point cloud to use for alignment.
+            If None, uses pc2.
+        alignment_buffer : float, default 10.0
+            Buffer distance (meters) for Area B when use_cropped_clouds=True.
+        use_cropped_clouds : bool, default False
+            If True, automatically crop clouds before alignment:
+            - Compare cloud (pc1) cropped to Area B (overlap + buffer)
+            - Reference cloud (pc2) cropped to Area A (overlap only)
         """
         if not _has_small_gicp():
             raise ImportError(
                 "small_gicp is required for point cloud alignment. "
                 "Install with: pip install small_gicp"
             )
-        
-        import small_gicp
-        
-        if verbose:
-            print(f"\n--- Point Cloud Alignment (small_gicp) ---")
-            print(f"Method: {method.upper()}")
-            print(f"Downsample resolution: {downsample_resolution} m")
-            print(f"Max correspondence distance: {max_correspondence_distance} m")
 
-        # Use transformed pc1 if available, otherwise original
-        source_pc = self._pc1_transformed or self.pc1
-        target_pc = self.pc2
+        import small_gicp
+        import sys
+
+        if verbose:
+            print(f"\n--- Point Cloud Alignment (small_gicp) ---", file=sys.stderr)
+            print(f"Method: {method.upper()}", file=sys.stderr)
+
+        # =========================================================================
+        # Determine source and target point clouds
+        # =========================================================================
+        # Use custom clouds if provided, otherwise use cropped or default clouds
+        if source_cloud is not None:
+            source_pc = source_cloud
+        elif use_cropped_clouds:
+            # Crop compare cloud to Area B (overlap + buffer)
+            if verbose:
+                print(f"Cropping compare cloud to Area B (buffer={alignment_buffer}m)...",
+                      file=sys.stderr)
+            source_pc = self.crop_compare_with_buffer(
+                buffer_distance=alignment_buffer,
+                use_transformed=True,
+                verbose=False,
+            )
+        else:
+            # Use transformed pc1 if available, otherwise original
+            source_pc = self._pc1_transformed or self.pc1
+
+        if target_cloud is not None:
+            target_pc = target_cloud
+        elif use_cropped_clouds:
+            # Crop reference cloud to Area A (overlap only)
+            if verbose:
+                print(f"Cropping reference cloud to Area A...", file=sys.stderr)
+            _, target_pc = self.crop_to_overlap(
+                use_transformed=True,
+                verbose=False,
+            )
+        else:
+            target_pc = self.pc2
+
+        # =========================================================================
+        # Auto-downsampling: calculate optimal voxel size
+        # =========================================================================
+        if downsample_resolution is None:
+            if auto_downsample:
+                # Get point counts from metadata
+                source_count = getattr(source_pc, 'point_count', None)
+                target_count = getattr(target_pc, 'point_count', None)
+
+                if source_count is None or target_count is None:
+                    # Estimate from file if not available
+                    if verbose:
+                        print("Estimating point counts...", file=sys.stderr)
+                    import laspy
+                    if source_count is None:
+                        with laspy.open(source_pc.filename) as f:
+                            source_count = f.header.point_count
+                    if target_count is None:
+                        with laspy.open(target_pc.filename) as f:
+                            target_count = f.header.point_count
+
+                total_points = source_count + target_count
+
+                if total_points > target_points:
+                    # Calculate voxel size needed to achieve target point count
+                    # Approximate: points_after = points_before * (orig_density / new_density)
+                    # For uniform distribution: new_density ~ 1/voxel_size^2 (2D) or ^3 (3D)
+                    # Use conservative 2D estimate since lidar is mostly planar
+                    reduction_factor = total_points / target_points
+
+                    # Get area from overlap polygon for density estimation
+                    overlap_info = self.compute_overlap_polygon(use_transformed=True)
+                    if overlap_info['has_overlap']:
+                        area = overlap_info['overlap_area']
+                        # Current point density (points per m²)
+                        current_density = total_points / area if area > 0 else 1.0
+                        # Target density
+                        target_density = target_points / area if area > 0 else 1.0
+                        # Voxel size ~ sqrt(1/target_density)
+                        downsample_resolution = max(0.1, np.sqrt(1.0 / target_density))
+                    else:
+                        # Fallback: simple scaling based on reduction factor
+                        downsample_resolution = max(0.1, 0.5 * np.sqrt(reduction_factor))
+
+                    if verbose:
+                        print(f"Auto-downsample: {total_points:,} points -> "
+                              f"target {target_points:,}", file=sys.stderr)
+                        print(f"Calculated voxel size: {downsample_resolution:.2f} m",
+                              file=sys.stderr)
+                else:
+                    # No downsampling needed
+                    downsample_resolution = 0.25  # Minimal for preprocessing
+                    if verbose:
+                        print(f"Point count ({total_points:,}) below target "
+                              f"({target_points:,}), minimal downsampling",
+                              file=sys.stderr)
+            else:
+                # Default if auto_downsample is False and no resolution provided
+                downsample_resolution = 0.5
+
+        if verbose:
+            print(f"Downsample resolution: {downsample_resolution} m", file=sys.stderr)
+            print(f"Max correspondence distance: {max_correspondence_distance} m",
+                  file=sys.stderr)
 
         # Determine initial voxel size for memory-efficient loading
-        # Default to 2x the downsample resolution (will be further downsampled by small_gicp)
+        # Default to 2x the downsample resolution (will be further downsampled)
         if initial_voxel_size is None:
             load_voxel_size = downsample_resolution * 2.0
         elif initial_voxel_size == 0:
@@ -1221,13 +1340,14 @@ class PointCloudPair:
 
         if verbose:
             if load_voxel_size:
-                print(f"Initial voxel downsampling: {load_voxel_size} m")
+                print(f"Initial voxel downsampling: {load_voxel_size} m", file=sys.stderr)
             if max_points:
-                print(f"Max points per cloud: {max_points:,}")
+                print(f"Max points per cloud: {max_points:,}", file=sys.stderr)
 
         # Load points with optional downsampling for memory efficiency
         if verbose:
-            print(f"\nLoading source points from: {Path(source_pc.filename).name}")
+            print(f"\nLoading source points from: {Path(source_pc.filename).name}",
+                  file=sys.stderr)
         source_points = _load_points_from_las(
             source_pc.filename,
             max_points=max_points,
@@ -1235,16 +1355,17 @@ class PointCloudPair:
         )
 
         if verbose:
-            print(f"Loading target points from: {Path(target_pc.filename).name}")
-        target_points = _load_points_from_las(
+            print(f"Loading target points from: {Path(target_pc.filename).name}",
+                  file=sys.stderr)
+        target_points_arr = _load_points_from_las(
             target_pc.filename,
             max_points=max_points,
             voxel_size=load_voxel_size,
         )
 
         if verbose:
-            print(f"Source points: {len(source_points):,}")
-            print(f"Target points: {len(target_points):,}")
+            print(f"Source points: {len(source_points):,}", file=sys.stderr)
+            print(f"Target points: {len(target_points_arr):,}", file=sys.stderr)
 
         # =========================================================================
         # CENTER POINT CLOUDS to avoid voxel coordinate overflow
@@ -1252,97 +1373,111 @@ class PointCloudPair:
         # Compute centroid WITHOUT concatenating arrays (memory efficient)
         # Combined centroid = weighted average of individual centroids
         n_source = len(source_points)
-        n_target = len(target_points)
+        n_target = len(target_points_arr)
         n_total = n_source + n_target
 
         source_centroid = np.mean(source_points, axis=0)
-        target_centroid = np.mean(target_points, axis=0)
+        target_centroid = np.mean(target_points_arr, axis=0)
         centroid = (source_centroid * n_source + target_centroid * n_target) / n_total
-        
+
         if verbose:
-            print(f"\nCentering point clouds (centroid: [{centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f}])")
-        
+            print(f"\nCentering point clouds (centroid: "
+                  f"[{centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f}])",
+                  file=sys.stderr)
+
         # Center both point clouds (in-place to save memory)
         source_points -= centroid
-        target_points -= centroid
+        target_points_arr -= centroid
 
         if verbose:
             src_range = np.ptp(source_points, axis=0)
-            tgt_range = np.ptp(target_points, axis=0)
+            tgt_range = np.ptp(target_points_arr, axis=0)
             src_min = np.min(source_points, axis=0)
             src_max = np.max(source_points, axis=0)
-            tgt_min = np.min(target_points, axis=0)
-            tgt_max = np.max(target_points, axis=0)
-            print(f"Source range after centering: X={src_range[0]:.1f}, Y={src_range[1]:.1f}, Z={src_range[2]:.1f}")
-            print(f"Target range after centering: X={tgt_range[0]:.1f}, Y={tgt_range[1]:.1f}, Z={tgt_range[2]:.1f}")
+            tgt_min = np.min(target_points_arr, axis=0)
+            tgt_max = np.max(target_points_arr, axis=0)
+            print(f"Source range after centering: "
+                  f"X={src_range[0]:.1f}, Y={src_range[1]:.1f}, Z={src_range[2]:.1f}",
+                  file=sys.stderr)
+            print(f"Target range after centering: "
+                  f"X={tgt_range[0]:.1f}, Y={tgt_range[1]:.1f}, Z={tgt_range[2]:.1f}",
+                  file=sys.stderr)
             # Check overlap
             overlap_min = np.maximum(src_min, tgt_min)
             overlap_max = np.minimum(src_max, tgt_max)
             overlap_size = np.maximum(overlap_max - overlap_min, 0)
-            print(f"XY overlap region: {overlap_size[0]:.1f} x {overlap_size[1]:.1f} m")
+            print(f"XY overlap region: {overlap_size[0]:.1f} x {overlap_size[1]:.1f} m",
+                  file=sys.stderr)
             if overlap_size[0] <= 0 or overlap_size[1] <= 0:
-                print("WARNING: Point clouds do not overlap in XY!")
+                print("WARNING: Point clouds do not overlap in XY!", file=sys.stderr)
 
         # Select registration type
         method_upper = method.upper()
         if method_upper not in ["GICP", "VGICP", "ICP", "PLANE_ICP"]:
-            raise ValueError(f"Unknown method: {method}. Use 'gicp', 'vgicp', 'icp', or 'plane_icp'.")
+            raise ValueError(
+                f"Unknown method: {method}. Use 'gicp', 'vgicp', 'icp', or 'plane_icp'."
+            )
 
         if verbose:
-            print(f"\nPoint data check:")
-            print(f"  Source dtype: {source_points.dtype}, shape: {source_points.shape}")
-            print(f"  Target dtype: {target_points.dtype}, shape: {target_points.shape}")
-            print(f"  Source sample: {source_points[:3]}")
-            print(f"  Target sample: {target_points[:3]}")
+            print(f"\nPoint data check:", file=sys.stderr)
+            print(f"  Source dtype: {source_points.dtype}, shape: {source_points.shape}",
+                  file=sys.stderr)
+            print(f"  Target dtype: {target_points_arr.dtype}, "
+                  f"shape: {target_points_arr.shape}", file=sys.stderr)
+            print(f"  Source sample: {source_points[:3]}", file=sys.stderr)
+            print(f"  Target sample: {target_points_arr[:3]}", file=sys.stderr)
 
         # Run registration
         if verbose:
-            print(f"\nRunning {method_upper} registration...")
-            print(f"  downsample_resolution: {downsample_resolution}")
-            print(f"  max_correspondence_distance: {max_correspondence_distance}")
-            print(f"  max_iterations: {max_iterations}")
+            print(f"\nRunning {method_upper} registration...", file=sys.stderr)
+            print(f"  downsample_resolution: {downsample_resolution}", file=sys.stderr)
+            print(f"  max_correspondence_distance: {max_correspondence_distance}",
+                  file=sys.stderr)
+            print(f"  max_iterations: {max_iterations}", file=sys.stderr)
 
         # Provide identity as explicit initial guess
         init_T = np.eye(4)
 
-        # IMPORTANT: The raw numpy array API in small_gicp only supports ICP, PLANE_ICP, and GICP.
-        # For VGICP, we must use preprocess_points() first to estimate covariances, then align.
-        # For GICP and PLANE_ICP, we also need preprocessing for normals/covariances.
-        # Only plain ICP works directly with raw arrays without preprocessing.
+        # IMPORTANT: The raw numpy array API in small_gicp only supports ICP, PLANE_ICP,
+        # and GICP. For VGICP, we must use preprocess_points() first to estimate
+        # covariances, then align. For GICP and PLANE_ICP, we also need preprocessing
+        # for normals/covariances. Only plain ICP works directly with raw arrays.
 
         if method_upper in ["VGICP", "GICP", "PLANE_ICP"]:
             # Preprocess point clouds: downsampling, normal/covariance estimation, KdTree
             if verbose:
-                print(f"  Preprocessing point clouds (downsampling + covariance estimation)...")
+                print("  Preprocessing point clouds (downsampling + covariance)...",
+                      file=sys.stderr)
 
-            target_cloud, target_tree = small_gicp.preprocess_points(
-                target_points,
+            target_cloud_gicp, target_tree = small_gicp.preprocess_points(
+                target_points_arr,
                 downsampling_resolution=downsample_resolution,
                 num_threads=num_threads,
             )
-            source_cloud, source_tree = small_gicp.preprocess_points(
+            source_cloud_gicp, source_tree = small_gicp.preprocess_points(
                 source_points,
                 downsampling_resolution=downsample_resolution,
                 num_threads=num_threads,
             )
 
             if verbose:
-                print(f"  After preprocessing: {source_cloud.size()} source, {target_cloud.size()} target points")
+                print(f"  After preprocessing: {source_cloud_gicp.size()} source, "
+                      f"{target_cloud_gicp.size()} target points", file=sys.stderr)
 
             # Free raw numpy arrays now that we have preprocessed clouds
-            del source_points, target_points
+            del source_points, target_points_arr
             import gc
             gc.collect()
 
             # When using preprocessed PointCloud objects with covariances, use GICP.
             # PLANE_ICP uses only normals, GICP uses full covariance matrices.
-            # VGICP is essentially GICP with preprocessing - the "V" refers to voxelization
-            # which we've already handled via downsampling in preprocess_points().
+            # VGICP is essentially GICP with preprocessing - the "V" refers to
+            # voxelization which we've already handled via preprocess_points().
             reg_type = "GICP" if method_upper in ["VGICP", "GICP"] else "PLANE_ICP"
 
             result = small_gicp.align(
-                target_cloud,
-                source_cloud,
+                target_cloud_gicp,
+                source_cloud_gicp,
                 target_tree,
                 init_T_target_source=init_T,
                 registration_type=reg_type,
@@ -1353,7 +1488,7 @@ class PointCloudPair:
             )
 
             # Clean up preprocessed clouds
-            del target_cloud, target_tree, source_cloud, source_tree
+            del target_cloud_gicp, target_tree, source_cloud_gicp, source_tree
             gc.collect()
         else:
             # Plain ICP can use raw numpy arrays with the simple API
@@ -1361,7 +1496,7 @@ class PointCloudPair:
             # but for consistency and to ensure proper covariance estimation,
             # we use preprocessing for GICP/PLANE_ICP above.
             result = small_gicp.align(
-                target_points,
+                target_points_arr,
                 source_points,
                 init_T_target_source=init_T,
                 registration_type="ICP",
@@ -1373,23 +1508,25 @@ class PointCloudPair:
             )
 
             # Free numpy arrays after align() has processed them
-            del source_points, target_points
+            del source_points, target_points_arr
             import gc
             gc.collect()
 
         if verbose:
             # Debug: check result attributes
-            print(f"\nRegistration result attributes: {dir(result)}")
+            print(f"\nRegistration result attributes: {dir(result)}", file=sys.stderr)
             if hasattr(result, 'iterations'):
-                print(f"  Iterations performed: {result.iterations}")
+                print(f"  Iterations performed: {result.iterations}", file=sys.stderr)
             if hasattr(result, 'converged'):
-                print(f"  Converged: {result.converged}")
+                print(f"  Converged: {result.converged}", file=sys.stderr)
             if hasattr(result, 'error'):
-                print(f"  Final error: {result.error}")
+                print(f"  Final error: {result.error}", file=sys.stderr)
             if hasattr(result, 'num_inliers'):
-                print(f"  Num inliers: {result.num_inliers}")
+                print(f"  Num inliers: {result.num_inliers}", file=sys.stderr)
             if hasattr(result, 'H'):
-                print(f"  Hessian (H) shape: {np.array(result.H).shape if result.H is not None else 'None'}")
+                print(f"  Hessian (H) shape: "
+                      f"{np.array(result.H).shape if result.H is not None else 'None'}",
+                      file=sys.stderr)
         
         # =========================================================================
         # CONVERT TRANSFORMATION back to original coordinate system
@@ -1415,10 +1552,10 @@ class PointCloudPair:
         T_original = T_from_origin @ T_centered @ T_to_origin
         
         if verbose:
-            print(f"\nTransformation in centered coordinates:")
-            print(T_centered)
-            print(f"\nTransformation in original coordinates:")
-            print(T_original)
+            print(f"\nTransformation in centered coordinates:", file=sys.stderr)
+            print(T_centered, file=sys.stderr)
+            print(f"\nTransformation in original coordinates:", file=sys.stderr)
+            print(T_original, file=sys.stderr)
         
         # Use metrics from small_gicp result
         # Note: num_inliers is based on the downsampled point count
@@ -1458,25 +1595,30 @@ class PointCloudPair:
         }
         
         if verbose:
-            print(f"\nAlignment Results:")
-            print(f"  Converged: {alignment_result['converged']}")
-            print(f"  Fitness (inlier ratio): {fitness:.4f}")
-            print(f"  RMSE: {rmse:.4f} m")
-            print(f"  Inlier correspondences: {alignment_result['num_correspondences']:,}")
-            print(f"  Translation: [{t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f}] m")
-            print(f"  Rotation: {rotation_angle_deg:.4f}°")
-        
+            print(f"\nAlignment Results:", file=sys.stderr)
+            print(f"  Converged: {alignment_result['converged']}", file=sys.stderr)
+            print(f"  Fitness (inlier ratio): {fitness:.4f}", file=sys.stderr)
+            print(f"  RMSE: {rmse:.4f} m", file=sys.stderr)
+            print(f"  Inlier correspondences: {alignment_result['num_correspondences']:,}",
+                  file=sys.stderr)
+            print(f"  Translation: [{t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f}] m", file=sys.stderr)
+            print(f"  Rotation: {rotation_angle_deg:.4f}°", file=sys.stderr)
+
         # Apply transformation if requested
         if apply_transform:
             if output_path is None:
                 src_path = Path(source_pc.filename)
-                output_path = str(src_path.with_name(src_path.stem + "_aligned" + src_path.suffix))
-            
+                output_path = str(
+                    src_path.with_name(src_path.stem + "_aligned" + src_path.suffix)
+                )
+
             if os.path.exists(output_path) and not overwrite:
-                raise FileExistsError(f"Output file exists and overwrite=False: {output_path}")
-            
+                raise FileExistsError(
+                    f"Output file exists and overwrite=False: {output_path}"
+                )
+
             if verbose:
-                print(f"\nApplying transformation to: {output_path}")
+                print(f"\nApplying transformation to: {output_path}", file=sys.stderr)
             
             _save_transformed_las(source_pc.filename, output_path, T_original)
             
@@ -1510,13 +1652,151 @@ class PointCloudPair:
             })
         
         self._alignment_result = alignment_result
-        
+
         if verbose:
-            print(f"\n{'=' * 60}\n")
-        
+            print(f"\n{'=' * 60}\n", file=sys.stderr)
+
         return alignment_result
 
-    
+    def compute_alignment_quality(
+        self,
+        max_distance: float = 1.0,
+        sample_size: Optional[int] = 100000,
+        verbose: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Compute detailed goodness-of-fit metrics after alignment.
+
+        Compares the aligned compare cloud against the reference cloud to
+        assess alignment quality through various statistical measures.
+
+        Parameters
+        ----------
+        max_distance : float, default 1.0
+            Maximum distance (meters) to consider for correspondences.
+            Points farther than this are considered outliers.
+        sample_size : int, optional, default 100000
+            Number of points to sample for quality assessment.
+            Set to None to use all points (slower for large clouds).
+        verbose : bool, default True
+            Print quality metrics.
+
+        Returns
+        -------
+        dict
+            {
+                'rmse': float - Root mean square error of distances,
+                'mae': float - Mean absolute error,
+                'median_distance': float - Median point-to-point distance,
+                'std_distance': float - Standard deviation of distances,
+                'nmad': float - Normalized median absolute deviation,
+                'inlier_ratio': float - Fraction of points within max_distance,
+                'inlier_count': int - Number of inlier correspondences,
+                'total_count': int - Total points compared,
+                'percentiles': dict - Distance percentiles (5, 25, 50, 75, 95),
+                'max_observed': float - Maximum observed distance,
+            }
+
+        Raises
+        ------
+        ValueError
+            If alignment has not been performed yet.
+        """
+        import sys
+        from scipy.spatial import cKDTree
+
+        if self._pc1_transformed is None and self._alignment_result is None:
+            raise ValueError(
+                "Alignment has not been performed. Call align_point_clouds() first."
+            )
+
+        if verbose:
+            print(f"\n--- Computing Alignment Quality ---", file=sys.stderr)
+
+        # Get the aligned source and target clouds
+        aligned_pc = self._pc1_transformed or self.pc1
+        target_pc = self.pc2
+
+        # Load points (with optional sampling for speed)
+        if verbose:
+            print(f"Loading points for quality assessment...", file=sys.stderr)
+
+        source_pts = _load_points_from_las(
+            aligned_pc.filename,
+            max_points=sample_size,
+            voxel_size=None,
+        )
+        target_pts = _load_points_from_las(
+            target_pc.filename,
+            max_points=sample_size * 2 if sample_size else None,  # More target for matching
+            voxel_size=None,
+        )
+
+        if verbose:
+            print(f"  Aligned cloud: {len(source_pts):,} points", file=sys.stderr)
+            print(f"  Reference cloud: {len(target_pts):,} points", file=sys.stderr)
+
+        # Build KD-tree on target (reference) cloud
+        if verbose:
+            print(f"Building KD-tree...", file=sys.stderr)
+        tree = cKDTree(target_pts)
+
+        # Query nearest neighbors
+        if verbose:
+            print(f"Computing nearest neighbor distances...", file=sys.stderr)
+        distances, _ = tree.query(source_pts, k=1, workers=-1)
+
+        # Compute statistics
+        inlier_mask = distances <= max_distance
+        inlier_distances = distances[inlier_mask]
+        inlier_count = int(np.sum(inlier_mask))
+        total_count = len(distances)
+        inlier_ratio = inlier_count / total_count if total_count > 0 else 0.0
+
+        # Core metrics (on inliers only for meaningful statistics)
+        if inlier_count > 0:
+            rmse = float(np.sqrt(np.mean(inlier_distances ** 2)))
+            mae = float(np.mean(inlier_distances))
+            median_dist = float(np.median(inlier_distances))
+            std_dist = float(np.std(inlier_distances))
+            nmad = float(1.4826 * np.median(np.abs(inlier_distances - median_dist)))
+            percentiles = np.percentile(inlier_distances, [5, 25, 50, 75, 95])
+        else:
+            rmse = mae = median_dist = std_dist = nmad = float('nan')
+            percentiles = [float('nan')] * 5
+
+        quality_result = {
+            'rmse': rmse,
+            'mae': mae,
+            'median_distance': median_dist,
+            'std_distance': std_dist,
+            'nmad': nmad,
+            'inlier_ratio': inlier_ratio,
+            'inlier_count': inlier_count,
+            'total_count': total_count,
+            'percentiles': {
+                'p5': float(percentiles[0]),
+                'p25': float(percentiles[1]),
+                'p50': float(percentiles[2]),
+                'p75': float(percentiles[3]),
+                'p95': float(percentiles[4]),
+            },
+            'max_observed': float(np.max(distances)),
+            'max_distance_threshold': max_distance,
+        }
+
+        if verbose:
+            print(f"\nAlignment Quality Metrics:", file=sys.stderr)
+            print(f"  RMSE: {rmse:.4f} m", file=sys.stderr)
+            print(f"  MAE: {mae:.4f} m", file=sys.stderr)
+            print(f"  Median distance: {median_dist:.4f} m", file=sys.stderr)
+            print(f"  NMAD: {nmad:.4f} m", file=sys.stderr)
+            print(f"  Inlier ratio: {inlier_ratio:.1%} "
+                  f"({inlier_count:,}/{total_count:,})", file=sys.stderr)
+            print(f"  95th percentile: {percentiles[4]:.4f} m", file=sys.stderr)
+
+        return quality_result
+
     # =========================================================================
     # DEM Creation Methods
     # =========================================================================
