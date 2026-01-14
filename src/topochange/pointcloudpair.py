@@ -1813,10 +1813,13 @@ class PointCloudPair:
             
             alignment_result['aligned_pc'] = aligned_pc
             alignment_result['output_file'] = output_path
-            
+
             # Update internal state
+            # Update _pc1_cropped so iterative alignment passes use the aligned cloud
+            if self._pc1_cropped is not None:
+                self._pc1_cropped = aligned_pc
             self._pc1_transformed = aligned_pc
-            
+
             self._transformation_history.append({
                 'step': 'icp_alignment',
                 'method': method,
