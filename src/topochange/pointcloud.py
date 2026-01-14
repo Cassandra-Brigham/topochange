@@ -1740,6 +1740,26 @@ class PointCloud:
             },
         )
 
+        # Inherit units from source point cloud
+        if hasattr(self, 'vertical_unit') and self.vertical_unit is not None:
+            dem.current_vertical_unit = self.vertical_unit
+            dem.original_vertical_unit = self.vertical_unit
+            if hasattr(self, 'vertical_units') and self.vertical_units:
+                dem.current_vertical_units = self.vertical_units
+                dem.original_vertical_units = self.vertical_units
+            else:
+                dem.current_vertical_units = self.vertical_unit.display_name
+                dem.original_vertical_units = self.vertical_unit.display_name
+        if hasattr(self, 'horizontal_unit') and self.horizontal_unit is not None:
+            dem.current_horizontal_unit = self.horizontal_unit
+            dem.original_horizontal_unit = self.horizontal_unit
+            if hasattr(self, 'horizontal_units') and self.horizontal_units:
+                dem.current_horizontal_units = self.horizontal_units
+                dem.original_horizontal_units = self.horizontal_units
+            else:
+                dem.current_horizontal_units = self.horizontal_unit.display_name
+                dem.original_horizontal_units = self.horizontal_unit.display_name
+
         return dem
 
     # -------------------------------------------------------------------------
