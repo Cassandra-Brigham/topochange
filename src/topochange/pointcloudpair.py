@@ -1801,7 +1801,7 @@ class PointCloudPair:
             # Load aligned point cloud
             aligned_pc = PointCloud(output_path)
             aligned_pc.from_file()
-            
+
             # Copy metadata from source
             aligned_pc.add_metadata(
                 compound_CRS=source_pc.current_compound_crs or source_pc.original_compound_crs,
@@ -1810,6 +1810,12 @@ class PointCloudPair:
                 geoid_model=source_pc.geoid_model,
                 epoch=source_pc.epoch,
             )
+
+            # Copy unit information from source
+            aligned_pc.horizontal_unit = source_pc.horizontal_unit
+            aligned_pc.vertical_unit = source_pc.vertical_unit
+            aligned_pc.horizontal_units = source_pc.horizontal_units
+            aligned_pc.vertical_units = source_pc.vertical_units
             
             alignment_result['aligned_pc'] = aligned_pc
             alignment_result['output_file'] = output_path
