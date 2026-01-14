@@ -284,10 +284,11 @@ def _save_transformed_las(
     source_filename: str,
     output_filename: str,
     transformation_matrix: np.ndarray,
+    centroid: np.ndarray = None,
 ) -> None:
     """
     Apply a 4x4 transformation matrix to a LAS file and save.
-    
+
     Parameters
     ----------
     source_filename : str
@@ -296,25 +297,51 @@ def _save_transformed_las(
         Output LAS/LAZ file
     transformation_matrix : np.ndarray
         4x4 homogeneous transformation matrix
+    centroid : np.ndarray, optional
+        If provided, the transformation is applied in centered coordinates:
+        1. Translate points to origin (subtract centroid)
+        2. Apply transformation matrix
+        3. Translate back (add centroid)
+        This is required when the transformation was computed on centered data.
     """
-    # Extract rotation and translation from 4x4 matrix
-    R = transformation_matrix[:3, :3]
-    t = transformation_matrix[:3, 3]
-    
     # Build PDAL transformation matrix string (row-major, 16 values)
     matrix_str = " ".join(str(x) for x in transformation_matrix.flatten())
-    
-    pipeline_spec = {
-        "pipeline": [
-            {"type": "readers.las", "filename": str(source_filename)},
-            {
-                "type": "filters.transformation",
-                "matrix": matrix_str,
-            },
-            {"type": "writers.las", "filename": str(output_filename)},
-        ]
-    }
-    
+
+    pipeline_steps = [
+        {"type": "readers.las", "filename": str(source_filename)},
+    ]
+
+    if centroid is not None:
+        # Step 1: Translate to origin (subtract centroid)
+        T_to_origin = f"1 0 0 {-centroid[0]} 0 1 0 {-centroid[1]} 0 0 1 {-centroid[2]} 0 0 0 1"
+        pipeline_steps.append({
+            "type": "filters.transformation",
+            "matrix": T_to_origin,
+        })
+
+        # Step 2: Apply the ICP transformation
+        pipeline_steps.append({
+            "type": "filters.transformation",
+            "matrix": matrix_str,
+        })
+
+        # Step 3: Translate back (add centroid)
+        T_from_origin = f"1 0 0 {centroid[0]} 0 1 0 {centroid[1]} 0 0 1 {centroid[2]} 0 0 0 1"
+        pipeline_steps.append({
+            "type": "filters.transformation",
+            "matrix": T_from_origin,
+        })
+    else:
+        # Direct transformation (no centering)
+        pipeline_steps.append({
+            "type": "filters.transformation",
+            "matrix": matrix_str,
+        })
+
+    pipeline_steps.append({"type": "writers.las", "filename": str(output_filename)})
+
+    pipeline_spec = {"pipeline": pipeline_steps}
+
     pipe = pdal.Pipeline(json.dumps(pipeline_spec))
     pipe.execute()
 
@@ -1728,7 +1755,8 @@ class PointCloudPair:
         # If we had n_source points and num_inliers correspondences, fitness ~ num_inliers / n_source
         # For now, just report the raw inlier count
         fitness = num_inliers / n_source if n_source > 0 else 0.0
-        rmse = final_error  # small_gicp error is related to RMSE
+        # small_gicp error is the sum of squared errors, convert to RMSE
+        rmse = np.sqrt(final_error / num_inliers) if num_inliers > 0 else float('inf')
         
         # Extract rotation and translation for reporting
         R = T_original[:3, :3]
@@ -1779,8 +1807,13 @@ class PointCloudPair:
 
             if verbose:
                 print(f"\nApplying transformation to: {output_path}", file=sys.stderr)
-            
-            _save_transformed_las(source_pc.filename, output_path, T_original)
+
+            # Use T_centered with centroid for correct transformation application
+            # The transformation was computed on centered data, so we must:
+            # 1. Center the points (subtract centroid)
+            # 2. Apply T_centered
+            # 3. Uncenter (add centroid back)
+            _save_transformed_las(source_pc.filename, output_path, T_centered, centroid)
             
             # Load aligned point cloud
             aligned_pc = PointCloud(output_path)
