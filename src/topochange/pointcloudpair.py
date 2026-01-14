@@ -1714,36 +1714,19 @@ class PointCloudPair:
                 print(f"  Hessian (H) shape: "
                       f"{np.array(result.H).shape if result.H is not None else 'None'}",
                       file=sys.stderr)
-        
+
         # =========================================================================
-        # CONVERT TRANSFORMATION back to original coordinate system
+        # Extract transformation result
         # =========================================================================
-        # The transformation T_centered is computed in centered coordinates.
-        # To apply it to original coordinates:
-        #   p_aligned = T_centered @ (p_original - centroid) + centroid
-        #   p_aligned = T_centered @ p_original - T_centered @ centroid + centroid
-        #
-        # In matrix form, the transformation in original coordinates is:
-        #   T_original = Translate(centroid) @ T_centered @ Translate(-centroid)
-        
+        # T_centered is the transformation computed in centered coordinates.
+        # We apply it by: center points -> apply T_centered -> uncenter points
+        # This is handled in _save_transformed_las with the centroid parameter.
         T_centered = result.T_target_source  # 4x4 transformation in centered coords
-        
-        # Build translation matrices
-        T_to_origin = np.eye(4)
-        T_to_origin[:3, 3] = -centroid
-        
-        T_from_origin = np.eye(4)
-        T_from_origin[:3, 3] = centroid
-        
-        # Compose: T_original = T_from_origin @ T_centered @ T_to_origin
-        T_original = T_from_origin @ T_centered @ T_to_origin
-        
+
         if verbose:
-            print(f"\nTransformation in centered coordinates:", file=sys.stderr)
+            print(f"\nTransformation (in centered coordinates):", file=sys.stderr)
             print(T_centered, file=sys.stderr)
-            print(f"\nTransformation in original coordinates:", file=sys.stderr)
-            print(T_original, file=sys.stderr)
-        
+
         # Use metrics from small_gicp result
         # Note: num_inliers is based on the downsampled point count
         num_inliers = result.num_inliers if hasattr(result, 'num_inliers') else 0
@@ -1757,18 +1740,18 @@ class PointCloudPair:
         fitness = num_inliers / n_source if n_source > 0 else 0.0
         # small_gicp error is the sum of squared errors, convert to RMSE
         rmse = np.sqrt(final_error / num_inliers) if num_inliers > 0 else float('inf')
-        
-        # Extract rotation and translation for reporting
-        R = T_original[:3, :3]
-        t = T_original[:3, 3]
-        
+
+        # Extract rotation and translation from T_centered (the actual applied transformation)
+        R = T_centered[:3, :3]
+        t = T_centered[:3, 3]
+
         # Compute rotation angle (magnitude of axis-angle representation)
         rotation_angle_rad = np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))
         rotation_angle_deg = np.degrees(rotation_angle_rad)
-        
+
         alignment_result = {
-            'transformation': T_original,
-            'transformation_centered': T_centered,
+            'transformation': T_centered,  # The actual transformation applied
+            'transformation_centered': T_centered,  # Keep for backwards compatibility
             'centroid': centroid,
             'converged': result.converged if hasattr(result, 'converged') else True,
             'iterations': result.iterations if hasattr(result, 'iterations') else None,
@@ -1781,7 +1764,7 @@ class PointCloudPair:
             'translation': t,
             'rotation_angle_deg': rotation_angle_deg,
         }
-        
+
         if verbose:
             print(f"\nAlignment Results:", file=sys.stderr)
             print(f"  Converged: {alignment_result['converged']}", file=sys.stderr)
