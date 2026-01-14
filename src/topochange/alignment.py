@@ -45,56 +45,55 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _run_pdal_pipeline(steps, arrays=None):
+    """
+    Execute a PDAL pipeline from a list of step dictionaries.
+
+    Args:
+        steps: List of PDAL stage configurations
+        arrays: Optional numpy arrays to pass to the pipeline
+
+    Returns:
+        Executed pipeline object
+    """
+    pipeline_json = json.dumps({"pipeline": steps})
+    if arrays is not None:
+        pipeline = pdal.Pipeline(pipeline_json, arrays=arrays)
+    else:
+        pipeline = pdal.Pipeline(pipeline_json)
+    pipeline.execute()
+    return pipeline
+
+
 class RegistrationMethod(Enum):
     """Available registration methods"""
     ICP = "icp"  # Standard ICP
-    GICP = "gicp"  # Generalized ICP
-    VGICP = "vgicp"  # Voxelized GICP
-    PLANE_ICP = "plane_icp"  # Plane-to-plane ICP
-    COLOR_ICP = "color_icp"  # Color-weighted ICP
-    ROBUST_KERNEL = "robust_kernel"  # ICP with robust kernels
+    GICP = "gicp"  # Generalized ICP (uses normals)
+    VGICP = "vgicp"  # Voxelized GICP (fastest for large clouds)
 
 
 class DownsamplingMethod(Enum):
     """Point cloud downsampling methods"""
     VOXEL = "voxel"
-    RANDOM = "random"
-    UNIFORM = "uniform"
-    FPS = "fps"  # Farthest point sampling
     NONE = "none"
 
 
 @dataclass
 class RegistrationConfig:
     """Configuration for point cloud registration"""
-    
+
     # General parameters
     max_correspondence_distance: Optional[float] = None  # Auto-compute if None
     max_iterations: int = 50
-    convergence_criteria: float = 1e-6
-    num_threads: int = -1  # -1 for auto
-    
+
     # Downsampling parameters
-    downsampling_method: DownsamplingMethod = DownsamplingMethod.VOXEL
     voxel_size: Optional[float] = None  # Auto-compute if None
     target_points: int = 100000  # Target number of points after downsampling
-    
-    # GICP specific
-    gicp_epsilon: float = 0.001
-    
-    # Robust kernel parameters (for outlier handling)
-    use_robust_kernel: bool = True
-    robust_kernel_delta: float = 1.0
-    
+
     # Coarse alignment parameters
     perform_coarse_alignment: bool = True
-    coarse_voxel_multiplier: float = 5.0  # Voxel size multiplier for coarse alignment
-    
-    # Landscape-specific optimizations
-    use_ground_plane_constraint: bool = True
-    ground_plane_weight: float = 0.1
-    estimate_scale: bool = False  # For SfM to LiDAR alignment
-    
+    use_ground_plane_constraint: bool = True  # Constrains rotation for landscape data
+
     # Filtering parameters
     use_ground_filter: bool = False
     ground_filter_params: Optional[Dict[str, Any]] = None
@@ -102,15 +101,11 @@ class RegistrationConfig:
     outlier_k_neighbors: int = 20
     outlier_std_multiplier: float = 2.0
     classification_filter: Optional[Union[List[int], str]] = None  # e.g., [2] for ground only
-    
-    # Color support
-    use_color: bool = False
-    color_weight: float = 0.1
-    
+
     # Validation
     min_fitness_score: float = 0.3  # Minimum acceptable fitness score
     max_rmse: Optional[float] = None  # Maximum acceptable RMSE (auto if None)
-    
+
     # Auto-retry parameters
     enable_auto_retry: bool = True
     max_retries: int = 3
@@ -162,35 +157,22 @@ class PointCloudProcessor:
                             std_multiplier: float = 2.0) -> str:
         """
         Remove statistical outliers using PDAL
-        
+
         Args:
             input_path: Input LAS/LAZ file
             output_path: Output LAS/LAZ file
             k_neighbors: Number of neighbors for outlier detection
             std_multiplier: Standard deviation multiplier
-            
+
         Returns:
             Path to filtered file
         """
-        pipeline = pdal.Pipeline(json.dumps({
-            "pipeline": [
-                {
-                    "type": "readers.las",
-                    "filename": input_path
-                },
-                {
-                    "type": "filters.outlier",
-                    "method": "statistical",
-                    "mean_k": k_neighbors,
-                    "multiplier": std_multiplier
-                },
-                {
-                    "type": "writers.las",
-                    "filename": output_path
-                }
-            ]
-        }))
-        pipeline.execute()
+        _run_pdal_pipeline([
+            {"type": "readers.las", "filename": input_path},
+            {"type": "filters.outlier", "method": "statistical",
+             "mean_k": k_neighbors, "multiplier": std_multiplier},
+            {"type": "writers.las", "filename": output_path}
+        ])
         return output_path
     
     @staticmethod
@@ -199,49 +181,31 @@ class PointCloudProcessor:
                           keep_only_ground: bool = True) -> str:
         """
         Apply SMRF ground classification filter
-        
+
         Args:
             input_path: Input LAS/LAZ file
-            output_path: Output LAS/LAZ file  
+            output_path: Output LAS/LAZ file
             smrf_params: SMRF parameters
             keep_only_ground: If True, keep only ground points; if False, just classify
-            
+
         Returns:
             Path to filtered file
         """
         defaults = {
-            "cell": 1.0,
-            "scalar": 1.25,
-            "slope": 0.15,
-            "threshold": 0.5,
-            "window": 18.0
+            "cell": 1.0, "scalar": 1.25, "slope": 0.15,
+            "threshold": 0.5, "window": 18.0
         }
         params = {**defaults, **(smrf_params or {})}
-        
-        pipeline_steps = [
-            {
-                "type": "readers.las",
-                "filename": input_path
-            },
-            {
-                "type": "filters.smrf",
-                **params
-            }
+
+        steps = [
+            {"type": "readers.las", "filename": input_path},
+            {"type": "filters.smrf", **params}
         ]
-        
         if keep_only_ground:
-            pipeline_steps.append({
-                "type": "filters.range",
-                "limits": "Classification[2:2]"  # Keep only ground
-            })
-        
-        pipeline_steps.append({
-            "type": "writers.las",
-            "filename": output_path
-        })
-        
-        pipeline = pdal.Pipeline(json.dumps({"pipeline": pipeline_steps}))
-        pipeline.execute()
+            steps.append({"type": "filters.range", "limits": "Classification[2:2]"})
+        steps.append({"type": "writers.las", "filename": output_path})
+
+        _run_pdal_pipeline(steps)
         return output_path
     
     @staticmethod
@@ -249,34 +213,21 @@ class PointCloudProcessor:
                                 classifications: List[int]) -> str:
         """
         Filter points by classification codes
-        
+
         Args:
             input_path: Input LAS/LAZ file
             output_path: Output LAS/LAZ file
             classifications: List of classification codes to keep
-            
+
         Returns:
             Path to filtered file
         """
         limits = ",".join([f"Classification[{c}:{c}]" for c in classifications])
-        
-        pipeline = pdal.Pipeline(json.dumps({
-            "pipeline": [
-                {
-                    "type": "readers.las",
-                    "filename": input_path
-                },
-                {
-                    "type": "filters.range",
-                    "limits": limits
-                },
-                {
-                    "type": "writers.las",
-                    "filename": output_path
-                }
-            ]
-        }))
-        pipeline.execute()
+        _run_pdal_pipeline([
+            {"type": "readers.las", "filename": input_path},
+            {"type": "filters.range", "limits": limits},
+            {"type": "writers.las", "filename": output_path}
+        ])
         return output_path
     
     @staticmethod
@@ -284,80 +235,61 @@ class PointCloudProcessor:
                              voxel_size: float) -> str:
         """
         Downsample using voxel grid with PDAL
-        
+
         Args:
             input_path: Input LAS/LAZ file
             output_path: Output LAS/LAZ file
             voxel_size: Voxel size for downsampling
-            
+
         Returns:
             Path to downsampled file
         """
-        pipeline = pdal.Pipeline(json.dumps({
-            "pipeline": [
-                {
-                    "type": "readers.las",
-                    "filename": input_path
-                },
-                {
-                    "type": "filters.voxelcenternearestneighbor",
-                    "cell": voxel_size
-                },
-                {
-                    "type": "writers.las",
-                    "filename": output_path
-                }
-            ]
-        }))
-        pipeline.execute()
+        _run_pdal_pipeline([
+            {"type": "readers.las", "filename": input_path},
+            {"type": "filters.voxelcenternearestneighbor", "cell": voxel_size},
+            {"type": "writers.las", "filename": output_path}
+        ])
         return output_path
     
     @staticmethod
-    def extract_points_and_colors(las_path: str, 
+    def extract_points_and_colors(las_path: str,
                                  max_points: Optional[int] = None) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """
         Extract points and optionally colors from LAS/LAZ file
-        
+
         Args:
             las_path: Path to LAS/LAZ file
             max_points: Maximum number of points to load
-            
+
         Returns:
             Points array (Nx3) and optional colors array (Nx3)
         """
-        pipeline_steps = [
-            {
-                "type": "readers.las",
-                "filename": las_path
-            }
-        ]
-        
+        steps = [{"type": "readers.las", "filename": las_path}]
         if max_points is not None:
-            pipeline_steps.extend([
+            steps.extend([
                 {"type": "filters.randomize"},
                 {"type": "filters.head", "count": max_points}
             ])
-        
-        pipeline = pdal.Pipeline(json.dumps({"pipeline": pipeline_steps}))
-        pipeline.execute()
-        
+
+        pipeline = _run_pdal_pipeline(steps)
         arrays = pipeline.arrays
         if not arrays:
             raise RuntimeError(f"No points loaded from {las_path}")
-        
+
         arr = arrays[0]
         points = np.column_stack([arr["X"], arr["Y"], arr["Z"]])
-        
+
         # Check for color channels
         colors = None
-        if all(field in arr.dtype.names for field in ["Red", "Green", "Blue"]):
+        field_names = arr.dtype.names or ()
+        if all(field in field_names for field in ["Red", "Green", "Blue"]):
             # Normalize colors to 0-1 range (assuming 16-bit color)
             colors = np.column_stack([
                 arr["Red"] / 65535.0,
                 arr["Green"] / 65535.0,
                 arr["Blue"] / 65535.0
             ])
-        
+
         return points, colors
 
 
@@ -468,15 +400,13 @@ class LandscapeAligner:
             # Direct file path
             path = data
             metadata["name"] = Path(path).stem
-            
+
             # Quick metadata extraction with PDAL
-            pipeline = pdal.Pipeline(json.dumps({
-                "pipeline": [
-                    {"type": "readers.las", "filename": path, "count": 0}
-                ]
-            }))
-            pipeline.execute()
-            meta = json.loads(pipeline.metadata)
+            pipeline = _run_pdal_pipeline([
+                {"type": "readers.las", "filename": path, "count": 0}
+            ])
+            raw_meta = pipeline.metadata
+            meta = json.loads(raw_meta) if isinstance(raw_meta, (str, bytes)) else raw_meta
             las_meta = meta.get("metadata", {}).get("readers.las", {})
             
             metadata["bounds"] = (
@@ -499,22 +429,17 @@ class LandscapeAligner:
             # NumPy array - need to save to temp file
             with tempfile.NamedTemporaryFile(suffix='.las', delete=False) as tmp:
                 path = tmp.name
-                
+
             # Write array to LAS using PDAL
             structured_array = np.zeros(len(data), dtype=[('X', 'f8'), ('Y', 'f8'), ('Z', 'f8')])
             structured_array['X'] = data[:, 0]
             structured_array['Y'] = data[:, 1]
             structured_array['Z'] = data[:, 2]
-            
-            pipeline = pdal.Pipeline(json.dumps({
-                "pipeline": [
-                    {
-                        "type": "writers.las",
-                        "filename": path
-                    }
-                ]
-            }), arrays=[structured_array])
-            pipeline.execute()
+
+            _run_pdal_pipeline(
+                [{"type": "writers.las", "filename": path}],
+                arrays=[structured_array]
+            )
             
             metadata["name"] = "numpy_array"
             metadata["total_points"] = len(data)
@@ -659,21 +584,19 @@ class LandscapeAligner:
             processed_target = self._preprocess_pointcloud(target_path, tmpdir, "target", target_meta)
             
             # Load processed points
-            source_points, source_colors = self.processor.extract_points_and_colors(processed_source)
-            target_points, target_colors = self.processor.extract_points_and_colors(processed_target)
-            
+            source_points, _ = self.processor.extract_points_and_colors(processed_source)
+            target_points, _ = self.processor.extract_points_and_colors(processed_target)
+
             logger.info(f"After preprocessing: {len(source_points)} source, {len(target_points)} target points")
-            
+
             # Coarse alignment if requested
             if self.config.perform_coarse_alignment and initial_transform is None:
                 initial_transform = self._coarse_alignment(source_points, target_points)
                 logger.info("Coarse alignment completed")
-            
+
             # Fine registration
             result = self._fine_registration(
-                source_points, target_points,
-                source_colors, target_colors,
-                method, initial_transform
+                source_points, target_points, method, initial_transform
             )
             
             result.method_used = method.value
@@ -796,8 +719,6 @@ class LandscapeAligner:
     def _fine_registration(self,
                           source: np.ndarray,
                           target: np.ndarray,
-                          source_colors: Optional[np.ndarray],
-                          target_colors: Optional[np.ndarray],
                           method: RegistrationMethod,
                           initial_transform: Optional[np.ndarray]) -> RegistrationResult:
         """
@@ -809,20 +730,13 @@ class LandscapeAligner:
         # Prepare point clouds for small_gicp
         source_cloud = small_gicp.PointCloud(source)
         target_cloud = small_gicp.PointCloud(target)
-        
-        # Add colors if available and requested
-        if self.config.use_color and source_colors is not None and target_colors is not None:
-            # Note: small_gicp doesn't directly support colors in registration
-            # This is a placeholder for future color-based correspondence weighting
-            logger.info("Color information available (not yet integrated into registration)")
-        
+
         # Build KD trees
         source_tree = small_gicp.KdTree(source_cloud)
         target_tree = small_gicp.KdTree(target_cloud)
         
-        # Estimate normals if needed
-        if method in [RegistrationMethod.GICP, RegistrationMethod.VGICP, 
-                     RegistrationMethod.PLANE_ICP]:
+        # Estimate normals if needed for GICP variants
+        if method in [RegistrationMethod.GICP, RegistrationMethod.VGICP]:
             logger.info("Estimating normals...")
             source_cloud.estimate_normals(k=30)
             target_cloud.estimate_normals(k=30)
@@ -849,19 +763,12 @@ class LandscapeAligner:
                     max_correspondence_distance=self.config.max_correspondence_distance
                 )
             else:
-                # Map methods to small_gicp names
-                method_map = {
-                    RegistrationMethod.ICP: "ICP",
-                    RegistrationMethod.GICP: "GICP",
-                    RegistrationMethod.PLANE_ICP: "GICP",  # Use GICP with normals
-                    RegistrationMethod.ROBUST_KERNEL: "ICP",
-                    RegistrationMethod.COLOR_ICP: "ICP"  # Fall back to ICP
-                }
-                
+                # ICP or GICP
+                method_name = "GICP" if method == RegistrationMethod.GICP else "ICP"
                 reg_result = small_gicp.align(
                     source_tree, target_tree,
                     init_T=initial_transform,
-                    method=method_map.get(method, "ICP"),
+                    method=method_name,
                     max_iterations=self.config.max_iterations,
                     max_correspondence_distance=self.config.max_correspondence_distance
                 )
@@ -911,21 +818,7 @@ class LandscapeAligner:
         
         return rmse, fitness, num_correspondences
 
-
-class PointCloudPairAligner:
-    """Enhanced aligner for PointCloudPair objects with full integration"""
-    
-    def __init__(self, config: Optional[RegistrationConfig] = None):
-        """
-        Initialize pair aligner
-        
-        Args:
-            config: Registration configuration
-        """
-        self.config = config or RegistrationConfig()
-        self.aligner = LandscapeAligner(config)
-    
-    def align_pair(self, 
+    def align_pair(self,
                   pair: 'PointCloudPair',
                   which: str = "pc1_to_pc2",
                   method: RegistrationMethod = RegistrationMethod.VGICP,
@@ -933,14 +826,14 @@ class PointCloudPairAligner:
                   overwrite: bool = False) -> RegistrationResult:
         """
         Align a PointCloudPair with transformation applied to the result
-        
+
         Args:
             pair: PointCloudPair object
             which: "pc1_to_pc2" or "pc2_to_pc1" - which cloud to align to which
             method: Registration method
             output_path: Optional output path for aligned point cloud
             overwrite: Whether to overwrite existing output
-            
+
         Returns:
             Registration result
         """
@@ -954,17 +847,17 @@ class PointCloudPairAligner:
             source_label = "pc2"
         else:
             raise ValueError("which must be 'pc1_to_pc2' or 'pc2_to_pc1'")
-        
+
         # Check CRS compatibility
         source_crs = source_pc.current_compound_crs or source_pc.original_compound_crs
         target_crs = target_pc.current_compound_crs or target_pc.original_compound_crs
-        
+
         if source_crs != target_crs:
             logger.warning("Point clouds have different CRS. Consider warping to common CRS first.")
-        
+
         # Perform alignment
-        result = self.aligner.align(source_pc, target_pc, method)
-        
+        result = self.align(source_pc, target_pc, method)
+
         # Apply transformation if successful
         if result.converged and output_path is not None:
             self._apply_transformation(
@@ -976,7 +869,7 @@ class PointCloudPairAligner:
                 pair=pair,
                 source_label=source_label,
             )
-            
+
             # Update CRS history if available
             if hasattr(source_pc, 'crs_history') and source_pc.crs_history is not None:
                 source_pc.crs_history.record_transformation_entry(
@@ -988,9 +881,9 @@ class PointCloudPairAligner:
                     alignment_origin=source_label,
                     note=f"RMSE: {result.rmse:.3f}, Fitness: {result.fitness:.3f}"
                 )
-        
+
         return result
-    
+
     def _apply_transformation(self,
                             pointcloud: 'PointCloud',
                             transformation: np.ndarray,
@@ -1004,115 +897,59 @@ class PointCloudPairAligner:
         """
         if Path(output_path).exists() and not overwrite:
             raise FileExistsError(f"Output file exists: {output_path}")
-        
+
         # Format transformation matrix for PDAL
         matrix_str = " ".join(f"{val:.12g}" for val in transformation.reshape(-1))
-        
+
         # Use target CRS if provided, otherwise use source CRS
         crs = target_crs or pointcloud.current_compound_crs or pointcloud.original_compound_crs
-        
-        pipeline_spec = {
-            "pipeline": [
-                {
-                    "type": "readers.las",
-                    "filename": pointcloud.filename
-                },
-                {
-                    "type": "filters.transformation",
-                    "matrix": matrix_str
-                },
-                {
-                    "type": "writers.las",
-                    "filename": output_path,
-                    "a_srs": crs if crs else ""
-                }
-            ]
-        }
-        
-        pipeline = pdal.Pipeline(json.dumps(pipeline_spec))
-        pipeline.execute()
-        
+
+        _run_pdal_pipeline([
+            {"type": "readers.las", "filename": pointcloud.filename},
+            {"type": "filters.transformation", "matrix": matrix_str},
+            {"type": "writers.las", "filename": output_path, "a_srs": crs if crs else ""}
+        ])
+
         logger.info(f"Transformed point cloud saved to {output_path}")
-        
+
         # Instantiate a new PointCloud from the transformed file
         from .pointcloud import PointCloud
-        aligned_pc = PointCloud.from_file(str(output_path))
-        
+        aligned_pc = PointCloud.from_file(str(output_path))  # type: ignore[arg-type]
+
         # Update the pair object to reference the new aligned PointCloud
         if pair is not None and source_label is not None:
             if source_label == "pc1":
-                pair.pc1 = aligned_pc
+                pair.pc1 = aligned_pc  # type: ignore[assignment]
             elif source_label == "pc2":
-                pair.pc2 = aligned_pc
+                pair.pc2 = aligned_pc  # type: ignore[assignment]
 
 
-# Convenience functions
+# Backwards compatibility alias
+PointCloudPairAligner = LandscapeAligner
+
+
+# Convenience function
 def quick_align(source: Union[str, 'PointCloud'],
                target: Union[str, 'PointCloud'],
                method: str = "vgicp",
                use_ground: bool = False) -> Tuple[np.ndarray, float]:
     """
-    Quick alignment with automatic parameters
-    
+    Quick alignment with automatic parameters and retry logic.
+
     Args:
         source: Source point cloud (file path or PointCloud object)
         target: Target point cloud (file path or PointCloud object)
-        method: Registration method name
+        method: Registration method name ("icp", "gicp", or "vgicp")
         use_ground: Whether to filter to ground points only
-        
+
     Returns:
-        Transformation matrix and RMSE
+        Tuple of (transformation matrix, RMSE)
     """
     config = RegistrationConfig(
         use_ground_filter=use_ground,
         classification_filter=[2] if use_ground else None,
         enable_auto_retry=True
     )
-    
     aligner = LandscapeAligner(config)
-    method_enum = RegistrationMethod(method.lower())
-    result = aligner.align(source, target, method_enum)
-    
+    result = aligner.align(source, target, RegistrationMethod(method.lower()))
     return result.transformation, result.rmse
-
-
-def robust_align(source: Union[str, 'PointCloud'],
-                target: Union[str, 'PointCloud'],
-                methods: List[str] = ["vgicp", "gicp", "icp"]) -> RegistrationResult:
-    """
-    Try multiple methods and return best result
-    
-    Args:
-        source: Source point cloud
-        target: Target point cloud
-        methods: List of method names to try
-        
-    Returns:
-        Best registration result
-    """
-    best_result = None
-    best_rmse = np.inf
-    
-    for method_name in methods:
-        config = RegistrationConfig(
-            enable_auto_retry=True,
-            max_retries=2
-        )
-        
-        aligner = LandscapeAligner(config)
-        
-        try:
-            method = RegistrationMethod(method_name.lower())
-            result = aligner.align(source, target, method)
-            
-            if result.rmse < best_rmse and result.is_valid(config):
-                best_result = result
-                best_rmse = result.rmse
-                logger.info(f"Best method so far: {method_name} with RMSE {best_rmse:.3f}")
-        except Exception as e:
-            logger.warning(f"Method {method_name} failed: {e}")
-    
-    if best_result is None:
-        raise RuntimeError("All registration methods failed")
-    
-    return best_result
