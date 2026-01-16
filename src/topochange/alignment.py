@@ -778,25 +778,27 @@ class LandscapeAligner:
             # Perform registration
             logger.info(f"Running {method.value} registration...")
 
-            # Downsampling resolution for preprocessing (use voxel_size if set, else default)
-            downsample_resolution = self.config.voxel_size or 0.25
             max_corr_dist = self.config.max_correspondence_distance or 1.0
             num_threads = 4
 
             if method in [RegistrationMethod.GICP, RegistrationMethod.VGICP]:
                 # GICP/VGICP require preprocessing for normals and covariances
                 # See: https://github.com/koide3/small_gicp/blob/master/src/example/basic_registration.py
-                logger.info("Preprocessing point clouds (downsampling + covariance estimation)...")
+
+                # Build preprocessing kwargs - only include downsampling if enabled
+                preprocess_kwargs = {"num_threads": num_threads}
+                if self.config.downsample:
+                    downsample_resolution = self.config.voxel_size or 0.25
+                    preprocess_kwargs["downsampling_resolution"] = downsample_resolution
+                    logger.info(f"Preprocessing point clouds (downsampling at {downsample_resolution}m + covariance estimation)...")
+                else:
+                    logger.info("Preprocessing point clouds (covariance estimation, no downsampling)...")
 
                 target_cloud, target_tree = small_gicp.preprocess_points(
-                    target,
-                    downsampling_resolution=downsample_resolution,
-                    num_threads=num_threads,
+                    target, **preprocess_kwargs
                 )
                 source_cloud, source_tree = small_gicp.preprocess_points(
-                    source,
-                    downsampling_resolution=downsample_resolution,
-                    num_threads=num_threads,
+                    source, **preprocess_kwargs
                 )
 
                 logger.info(f"After preprocessing: {source_cloud.size()} source, "
@@ -814,16 +816,19 @@ class LandscapeAligner:
                 )
             else:
                 # Plain ICP can use raw numpy arrays directly
-                reg_result = small_gicp.align(
-                    target,
-                    source,
-                    init_T_target_source=initial_transform,
-                    registration_type="ICP",
-                    downsampling_resolution=downsample_resolution,
-                    max_correspondence_distance=max_corr_dist,
-                    max_iterations=self.config.max_iterations,
-                    num_threads=num_threads,
-                )
+                align_kwargs = {
+                    "init_T_target_source": initial_transform,
+                    "registration_type": "ICP",
+                    "max_correspondence_distance": max_corr_dist,
+                    "max_iterations": self.config.max_iterations,
+                    "num_threads": num_threads,
+                }
+                if self.config.downsample:
+                    downsample_resolution = self.config.voxel_size or 0.25
+                    align_kwargs["downsampling_resolution"] = downsample_resolution
+                    logger.info(f"Using downsampling at {downsample_resolution}m")
+
+                reg_result = small_gicp.align(target, source, **align_kwargs)
 
             # Extract results - use T_target_source attribute
             result.transformation = reg_result.T_target_source
