@@ -378,6 +378,7 @@ class PointCloudPair:
     _transformation_history: List[Dict[str, Any]] = field(default_factory=list)
     _pc1_transformed: Optional[PointCloud] = field(default=None, repr=False)
     _pc1_cropped: Optional[PointCloud] = field(default=None, repr=False)
+    _pc1_cropped_original: Optional[PointCloud] = field(default=None, repr=False)  # Preserved unaligned version
     _pc2_cropped: Optional[PointCloud] = field(default=None, repr=False)
     _alignment_result: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
@@ -386,6 +387,7 @@ class PointCloudPair:
         self._transformation_history = []
         self._pc1_transformed = None
         self._pc1_cropped = None
+        self._pc1_cropped_original = None
         self._pc2_cropped = None
         self._alignment_result = None
     
@@ -1021,6 +1023,7 @@ class PointCloudPair:
 
         # Store cropped clouds internally for use by alignment
         self._pc1_cropped = pc1_cropped
+        self._pc1_cropped_original = pc1_cropped  # Preserve unaligned version
         self._pc2_cropped = pc2_cropped
 
         return pc1_cropped, pc2_cropped
@@ -1822,6 +1825,7 @@ class PointCloudPair:
 
             # Update internal state
             # Update _pc1_cropped so iterative alignment passes use the aligned cloud
+            # Note: _pc1_cropped_original preserves the unaligned cropped version
             if self._pc1_cropped is not None:
                 self._pc1_cropped = aligned_pc
             self._pc1_transformed = aligned_pc
@@ -2300,9 +2304,117 @@ class PointCloudPair:
     # =========================================================================
     # 2D Differencing Methods (via RasterPair)
     # =========================================================================
-    
+
+    # Valid DEM source options for dem1 (compare/older)
+    _DEM1_OPTIONS = {
+        "dtm": "dtm",
+        "dsm": "dsm",
+        "dtm_transformed": "dtm",
+        "dsm_transformed": "dsm",
+        "dtm_aligned": "dtm",
+        "dsm_aligned": "dsm",
+        "dtm_transformed_aligned": "dtm",
+        "dsm_transformed_aligned": "dsm",
+    }
+
+    # Valid DEM source options for dem2 (reference/younger)
+    _DEM2_OPTIONS = {
+        "dtm": "dtm",
+        "dsm": "dsm",
+    }
+
+    def _resolve_pc1_source(self, dem1_option: str) -> Tuple[PointCloud, str]:
+        """
+        Resolve which pc1 variant to use based on dem1 option string.
+
+        Parameters
+        ----------
+        dem1_option : str
+            One of: "dtm", "dsm", "dtm_transformed", "dsm_transformed",
+            "dtm_aligned", "dsm_aligned", "dtm_transformed_aligned", "dsm_transformed_aligned"
+
+        Returns
+        -------
+        tuple[PointCloud, str]
+            (point_cloud_source, dem_type)
+
+        Raises
+        ------
+        ValueError
+            If dem1_option is invalid or required point cloud variant is not available.
+        """
+        if dem1_option not in self._DEM1_OPTIONS:
+            valid = ", ".join(sorted(self._DEM1_OPTIONS.keys()))
+            raise ValueError(f"Invalid dem1 option '{dem1_option}'. Valid options: {valid}")
+
+        dem_type = self._DEM1_OPTIONS[dem1_option]
+
+        # Determine which point cloud source to use
+        # Options containing "aligned" or "transformed" use the aligned/transformed version
+        # Options without these use the original cropped (unaligned) version
+        needs_aligned = "aligned" in dem1_option or "transformed" in dem1_option
+
+        if needs_aligned:
+            # Use aligned/transformed version
+            if self._pc1_transformed is not None:
+                return self._pc1_transformed, dem_type
+            elif self._pc1_cropped is not None:
+                # _pc1_cropped gets updated to aligned version after alignment
+                return self._pc1_cropped, dem_type
+            else:
+                raise ValueError(
+                    f"dem1='{dem1_option}' requires an aligned/transformed point cloud, "
+                    "but no alignment has been performed. Run align_point_clouds() first, "
+                    "or use dem1='dtm' or dem1='dsm' for the unaligned version."
+                )
+        else:
+            # Use original cropped (unaligned) version
+            if self._pc1_cropped_original is not None:
+                return self._pc1_cropped_original, dem_type
+            elif self._pc1_cropped is not None and self._pc1_transformed is None:
+                # No alignment done yet, _pc1_cropped is still the original
+                return self._pc1_cropped, dem_type
+            elif self.pc1 is not None:
+                # Fall back to original pc1 (not cropped)
+                import warnings
+                warnings.warn(
+                    f"No cropped point cloud available for dem1='{dem1_option}'. "
+                    "Using original pc1. Run crop_to_overlap() first for proper results."
+                )
+                return self.pc1, dem_type
+            else:
+                raise ValueError("No point cloud available for dem1.")
+
+    def _resolve_pc2_source(self, dem2_option: str) -> Tuple[PointCloud, str]:
+        """
+        Resolve which pc2 variant to use based on dem2 option string.
+
+        Parameters
+        ----------
+        dem2_option : str
+            One of: "dtm", "dsm"
+
+        Returns
+        -------
+        tuple[PointCloud, str]
+            (point_cloud_source, dem_type)
+        """
+        if dem2_option not in self._DEM2_OPTIONS:
+            valid = ", ".join(sorted(self._DEM2_OPTIONS.keys()))
+            raise ValueError(f"Invalid dem2 option '{dem2_option}'. Valid options: {valid}")
+
+        dem_type = self._DEM2_OPTIONS[dem2_option]
+
+        # pc2 is always the reference - use cropped if available
+        if self._pc2_cropped is not None:
+            return self._pc2_cropped, dem_type
+        else:
+            return self.pc2, dem_type
+
     def compute_2d_difference(
         self,
+        dem1: Optional[str] = None,
+        dem2: Optional[str] = None,
         dem_type: str = "dtm",
         resolution: float = 1.0,
         interpolation: str = "idw",
@@ -2315,24 +2427,39 @@ class PointCloudPair:
     ) -> Dict[str, Any]:
         """
         Compute 2D (raster-based) elevation difference.
-        
+
         This method:
         1. Creates DEMs from both point clouds
         2. Creates a RasterPair
         3. Uses RasterPair.compute_difference() for differencing
-        
+
         Parameters
         ----------
-        dem_type : str, {"dtm", "dsm"}
-            Type of DEM to create
+        dem1 : str, optional
+            DEM source for compare/older point cloud (pc1). Options:
+            - "dtm" or "dsm": Use original cropped (unaligned) point cloud
+            - "dtm_transformed", "dsm_transformed": Use transformed point cloud
+            - "dtm_aligned", "dsm_aligned": Use aligned point cloud
+            - "dtm_transformed_aligned", "dsm_transformed_aligned": Use fully processed cloud
+            If not specified, falls back to dem_type + use_transformed behavior.
+        dem2 : str, optional
+            DEM source for reference/younger point cloud (pc2). Options:
+            - "dtm": Create DTM from reference cloud (cropped to overlap)
+            - "dsm": Create DSM from reference cloud (cropped to overlap)
+            If not specified, falls back to dem_type.
+        dem_type : str, {"dtm", "dsm"}, default "dtm"
+            Type of DEM to create. Only used if dem1/dem2 are not specified.
+            Deprecated: Use dem1 and dem2 parameters instead.
         resolution : float
             DEM resolution in map units
         interpolation : str
             DEM interpolation method
         transform_first : bool
-            Transform compare DEM to match reference before differencing
+            Transform compare DEM to match reference before differencing.
+            Set to False when using unaligned dem1 options to preserve raw differences.
         use_transformed : bool
-            Use transformed pc1 for DEM creation
+            Use transformed pc1 for DEM creation. Only used if dem1 is not specified.
+            Deprecated: Use dem1 parameter instead.
         output_dir : str, optional
             Directory for output files
         overwrite : bool
@@ -2341,36 +2468,133 @@ class PointCloudPair:
             Print progress messages
         **dem_kwargs
             Additional arguments for DEM creation
-            
+
         Returns
         -------
         dict
-            Results from RasterPair.compute_difference()
+            Results from RasterPair.compute_difference() plus:
+            - dem1_source: str describing which pc1 variant was used
+            - dem2_source: str describing which pc2 variant was used
+            - dem_type: str (for backward compatibility)
+            - raster_pair: RasterPair object
+
+        Examples
+        --------
+        # Use aligned DTM for compare, DTM for reference (typical workflow)
+        >>> result = pc_pair.compute_2d_difference(
+        ...     dem1="dtm_transformed_aligned",
+        ...     dem2="dtm",
+        ...     resolution=1.0,
+        ... )
+
+        # Use unaligned DTM for compare to see raw differences
+        >>> result = pc_pair.compute_2d_difference(
+        ...     dem1="dtm",
+        ...     dem2="dtm",
+        ...     resolution=1.0,
+        ...     transform_first=False,  # Don't re-align during differencing
+        ... )
+
+        # Legacy usage (deprecated but still supported)
+        >>> result = pc_pair.compute_2d_difference(
+        ...     dem_type="dtm",
+        ...     use_transformed=True,
+        ... )
         """
+        import sys
+
         if verbose:
-            print(f"\n{'=' * 60}")
-            print("Computing 2D (DEM-based) Difference")
-            print(f"{'=' * 60}")
-        
+            print(f"\n{'=' * 60}", file=sys.stderr)
+            print("Computing 2D (DEM-based) Difference", file=sys.stderr)
+            print(f"{'=' * 60}", file=sys.stderr)
+
+        # Resolve dem1 and dem2 sources
+        if dem1 is not None:
+            # New API: use explicit dem1 option
+            pc1_source, dem1_type = self._resolve_pc1_source(dem1)
+            dem1_source_desc = dem1
+        else:
+            # Legacy API: use dem_type and use_transformed
+            dem1_type = dem_type
+            if use_transformed and self._pc1_transformed is not None:
+                pc1_source = self._pc1_transformed
+                dem1_source_desc = f"{dem_type}_transformed"
+            elif self._pc1_cropped is not None:
+                pc1_source = self._pc1_cropped
+                dem1_source_desc = f"{dem_type}_cropped"
+            else:
+                pc1_source = self.pc1
+                dem1_source_desc = f"{dem_type}_original"
+
+        if dem2 is not None:
+            # New API: use explicit dem2 option
+            pc2_source, dem2_type = self._resolve_pc2_source(dem2)
+            dem2_source_desc = dem2
+        else:
+            # Legacy API: use dem_type
+            dem2_type = dem_type
+            if self._pc2_cropped is not None:
+                pc2_source = self._pc2_cropped
+                dem2_source_desc = f"{dem_type}_cropped"
+            else:
+                pc2_source = self.pc2
+                dem2_source_desc = f"{dem_type}_original"
+
+        if verbose:
+            print(f"DEM1 source: {dem1_source_desc} ({Path(pc1_source.filename).name})", file=sys.stderr)
+            print(f"DEM2 source: {dem2_source_desc} ({Path(pc2_source.filename).name})", file=sys.stderr)
+            print(f"DEM1 type: {dem1_type.upper()}", file=sys.stderr)
+            print(f"DEM2 type: {dem2_type.upper()}", file=sys.stderr)
+
+        # Determine output paths
+        if output_dir is None:
+            dir1 = Path(pc1_source.filename).parent
+            dir2 = Path(pc2_source.filename).parent
+        else:
+            dir1 = dir2 = Path(output_dir)
+            dir1.mkdir(parents=True, exist_ok=True)
+
+        out1 = dir1 / f"{Path(pc1_source.filename).stem}_{dem1_type}_{int(resolution)}m.tif"
+        out2 = dir2 / f"{Path(pc2_source.filename).stem}_{dem2_type}_{int(resolution)}m.tif"
+
+        if verbose:
+            print(f"\nCreating DEM from pc1: {Path(pc1_source.filename).name}", file=sys.stderr)
+
         # Create DEMs
-        dem1, dem2 = self.create_dem_pair(
-            dem_type=dem_type,
+        raster_dem1 = pc1_source.create_dem(
+            output_path=str(out1),
+            dem_type=dem1_type,
             resolution=resolution,
             interpolation=interpolation,
-            use_transformed=use_transformed,
-            output_dir=output_dir,
-            overwrite=overwrite,
-            verbose=verbose,
             **dem_kwargs,
         )
-        
-        # Create RasterPair (dem1 = compare, dem2 = reference)
-        raster_pair = RasterPair(dem1, dem2)
-        
+
         if verbose:
-            print("\nRasterPair comparison:")
+            print(f"Creating DEM from pc2: {Path(pc2_source.filename).name}", file=sys.stderr)
+
+        raster_dem2 = pc2_source.create_dem(
+            output_path=str(out2),
+            dem_type=dem2_type,
+            resolution=resolution,
+            interpolation=interpolation,
+            **dem_kwargs,
+        )
+
+        # Copy epoch info
+        raster_dem1.epoch = getattr(pc1_source, 'epoch', None)
+        raster_dem2.epoch = getattr(pc2_source, 'epoch', None)
+
+        if verbose:
+            print(f"\nDEM1: {out1}", file=sys.stderr)
+            print(f"DEM2: {out2}", file=sys.stderr)
+
+        # Create RasterPair (dem1 = compare, dem2 = reference)
+        raster_pair = RasterPair(raster_dem1, raster_dem2)
+
+        if verbose:
+            print("\nRasterPair comparison:", file=sys.stderr)
             raster_pair.print_summary()
-        
+
         # Compute difference using RasterPair
         result = raster_pair.compute_difference(
             transform_first=transform_first,
@@ -2379,14 +2603,17 @@ class PointCloudPair:
             overwrite=overwrite,
             verbose=verbose,
         )
-        
-        # Add point cloud context to result
-        result['dem_type'] = dem_type
+
+        # Add context to result
+        result['dem1_source'] = dem1_source_desc
+        result['dem2_source'] = dem2_source_desc
+        result['dem_type'] = dem1_type  # For backward compatibility
         result['dem_resolution'] = resolution
         result['dem_interpolation'] = interpolation
         result['pc1_file'] = self.pc1.filename
         result['pc2_file'] = self.pc2.filename
-        
+        result['raster_pair'] = raster_pair
+
         return result
     
     def compute_dtm_difference(self, **kwargs) -> Dict[str, Any]:
