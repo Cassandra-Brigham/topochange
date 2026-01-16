@@ -86,8 +86,9 @@ class RegistrationConfig:
     max_correspondence_distance: Optional[float] = None  # Auto-compute if None
     max_iterations: int = 50
 
-    # Centering parameters
+    # Centering and cropping parameters
     center_to_origin: bool = True  # Center both clouds to (0,0,0) before registration
+    crop_dimensions: Optional[Tuple[float, float]] = None  # (x, y) crop rectangle centered on origin
 
     # Downsampling parameters
     voxel_size: Optional[float] = None  # Auto-compute if None
@@ -611,6 +612,28 @@ class LandscapeAligner:
                 # Center both point clouds in-place
                 source_points -= centroid
                 target_points -= centroid
+
+            # Crop to rectangular extent centered on origin if requested
+            if self.config.crop_dimensions is not None:
+                crop_x, crop_y = self.config.crop_dimensions
+                half_x, half_y = crop_x / 2.0, crop_y / 2.0
+
+                # Filter source points
+                source_mask = (
+                    (source_points[:, 0] >= -half_x) & (source_points[:, 0] <= half_x) &
+                    (source_points[:, 1] >= -half_y) & (source_points[:, 1] <= half_y)
+                )
+                source_points = source_points[source_mask]
+
+                # Filter target points
+                target_mask = (
+                    (target_points[:, 0] >= -half_x) & (target_points[:, 0] <= half_x) &
+                    (target_points[:, 1] >= -half_y) & (target_points[:, 1] <= half_y)
+                )
+                target_points = target_points[target_mask]
+
+                logger.info(f"Cropped to {crop_x}x{crop_y}m rectangle: "
+                           f"{len(source_points)} source, {len(target_points)} target points")
 
             # Coarse alignment if requested
             if self.config.perform_coarse_alignment and initial_transform is None:
