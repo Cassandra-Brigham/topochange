@@ -91,8 +91,9 @@ class RegistrationConfig:
     crop_dimensions: Optional[Tuple[float, float]] = None  # (x, y) crop rectangle centered on origin
 
     # Downsampling parameters
-    voxel_size: Optional[float] = None  # Auto-compute if None
-    target_points: int = 100000  # Target number of points after downsampling
+    downsample: bool = False  # Disable downsampling by default (use full point density)
+    voxel_size: Optional[float] = None  # Auto-compute if None (when downsample=True)
+    target_points: int = 100000  # Target number of points after downsampling (when downsample=True)
 
     # Coarse alignment parameters
     perform_coarse_alignment: bool = True
@@ -700,25 +701,26 @@ class LandscapeAligner:
             )
             logger.info(f"Removed outliers from {prefix}")
         
-        # 4. Downsampling
-        if self.config.voxel_size is None and metadata["bounds"] and metadata["total_points"]:
-            # Auto-compute voxel size
-            voxel_size = self.processor.estimate_optimal_voxel_size(
-                metadata["bounds"],
-                metadata["total_points"],
-                self.config.target_points
-            )
-        else:
-            voxel_size = self.config.voxel_size or 1.0
-        
-        if voxel_size > 0:
-            step += 1
-            output_path = os.path.join(tmpdir, f"{prefix}_step{step}_downsampled.laz")
-            current_path = self.processor.downsample_voxel_pdal(
-                current_path, output_path, voxel_size
-            )
-            logger.info(f"Downsampled {prefix} with voxel size {voxel_size:.3f}")
-        
+        # 4. Downsampling (only if enabled)
+        if self.config.downsample:
+            if self.config.voxel_size is None and metadata["bounds"] and metadata["total_points"]:
+                # Auto-compute voxel size
+                voxel_size = self.processor.estimate_optimal_voxel_size(
+                    metadata["bounds"],
+                    metadata["total_points"],
+                    self.config.target_points
+                )
+            else:
+                voxel_size = self.config.voxel_size or 1.0
+
+            if voxel_size > 0:
+                step += 1
+                output_path = os.path.join(tmpdir, f"{prefix}_step{step}_downsampled.laz")
+                current_path = self.processor.downsample_voxel_pdal(
+                    current_path, output_path, voxel_size
+                )
+                logger.info(f"Downsampled {prefix} with voxel size {voxel_size:.3f}")
+
         return current_path
     
     def _coarse_alignment(self, 
