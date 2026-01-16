@@ -769,52 +769,34 @@ class LandscapeAligner:
         """
         _require_small_gicp()
         result = RegistrationResult()
-        
-        # Prepare point clouds for small_gicp
-        source_cloud = small_gicp.PointCloud(source)
-        target_cloud = small_gicp.PointCloud(target)
 
-        # Build KD trees
-        source_tree = small_gicp.KdTree(source_cloud)
-        target_tree = small_gicp.KdTree(target_cloud)
-        
-        # Estimate normals if needed for GICP variants
-        if method in [RegistrationMethod.GICP, RegistrationMethod.VGICP]:
-            logger.info("Estimating normals...")
-            source_cloud.estimate_normals(k=30)
-            target_cloud.estimate_normals(k=30)
-        
         # Set initial transformation
         if initial_transform is None:
             initial_transform = np.eye(4)
-        
+
         try:
             # Perform registration
             logger.info(f"Running {method.value} registration...")
-            
-            if method == RegistrationMethod.VGICP:
-                # Voxelized GICP
-                voxel_size = self.config.voxel_size or 1.0
-                source_voxels = small_gicp.VoxelHashMap(source_cloud, voxel_size)
-                target_voxels = small_gicp.VoxelHashMap(target_cloud, voxel_size)
-                
-                reg_result = small_gicp.align(
-                    source_voxels, target_voxels,
-                    init_T=initial_transform,
-                    method="VGICP",
-                    max_iterations=self.config.max_iterations,
-                    max_correspondence_distance=self.config.max_correspondence_distance
-                )
-            else:
-                # ICP or GICP
-                method_name = "GICP" if method == RegistrationMethod.GICP else "ICP"
-                reg_result = small_gicp.align(
-                    source_tree, target_tree,
-                    init_T=initial_transform,
-                    method=method_name,
-                    max_iterations=self.config.max_iterations,
-                    max_correspondence_distance=self.config.max_correspondence_distance
-                )
+
+            # Map method to registration_type string
+            reg_type_map = {
+                RegistrationMethod.ICP: "ICP",
+                RegistrationMethod.GICP: "GICP",
+                RegistrationMethod.VGICP: "VGICP",
+            }
+            registration_type = reg_type_map.get(method, "GICP")
+
+            # Use the simple numpy array API (signature 1)
+            # This handles normals estimation internally
+            reg_result = small_gicp.align(
+                target,  # target points (numpy array)
+                source,  # source points (numpy array)
+                init_T_target_source=initial_transform,
+                registration_type=registration_type,
+                max_iterations=self.config.max_iterations,
+                max_correspondence_distance=self.config.max_correspondence_distance or 1.0,
+                num_threads=4,
+            )
             
             # Extract results
             result.transformation = reg_result.T
