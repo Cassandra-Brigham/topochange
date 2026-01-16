@@ -86,6 +86,9 @@ class RegistrationConfig:
     max_correspondence_distance: Optional[float] = None  # Auto-compute if None
     max_iterations: int = 50
 
+    # Centering parameters
+    center_to_origin: bool = True  # Center both clouds to (0,0,0) before registration
+
     # Downsampling parameters
     voxel_size: Optional[float] = None  # Auto-compute if None
     target_points: int = 100000  # Target number of points after downsampling
@@ -295,7 +298,7 @@ class PointCloudProcessor:
 
 class RegistrationResult:
     """Container for registration results"""
-    
+
     def __init__(self):
         self.transformation: np.ndarray = np.eye(4)
         self.rmse: float = np.inf
@@ -306,6 +309,7 @@ class RegistrationResult:
         self.scale: float = 1.0
         self.method_used: str = ""
         self.retry_count: int = 0
+        self.centroid: Optional[np.ndarray] = None  # Centroid used for centering (if any)
         self.metadata: Dict[str, Any] = {}
     
     def is_valid(self, config: RegistrationConfig) -> bool:
@@ -582,12 +586,30 @@ class LandscapeAligner:
             # Preprocessing pipeline
             processed_source = self._preprocess_pointcloud(source_path, tmpdir, "source", source_meta)
             processed_target = self._preprocess_pointcloud(target_path, tmpdir, "target", target_meta)
-            
+
             # Load processed points
             source_points, _ = self.processor.extract_points_and_colors(processed_source)
             target_points, _ = self.processor.extract_points_and_colors(processed_target)
 
             logger.info(f"After preprocessing: {len(source_points)} source, {len(target_points)} target points")
+
+            # Center both point clouds to common origin if requested
+            centroid = None
+            if self.config.center_to_origin:
+                # Compute shared centroid (weighted average)
+                n_source = len(source_points)
+                n_target = len(target_points)
+                n_total = n_source + n_target
+
+                source_centroid = np.mean(source_points, axis=0)
+                target_centroid = np.mean(target_points, axis=0)
+                centroid = (source_centroid * n_source + target_centroid * n_target) / n_total
+
+                logger.info(f"Centering to origin (centroid: [{centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f}])")
+
+                # Center both point clouds in-place
+                source_points -= centroid
+                target_points -= centroid
 
             # Coarse alignment if requested
             if self.config.perform_coarse_alignment and initial_transform is None:
@@ -598,9 +620,10 @@ class LandscapeAligner:
             result = self._fine_registration(
                 source_points, target_points, method, initial_transform
             )
-            
+
             result.method_used = method.value
-            
+            result.centroid = centroid
+
             return result
     
     def _preprocess_pointcloud(self,
