@@ -98,12 +98,13 @@ class RegistrationConfig:
     use_ground_plane_constraint: bool = True  # Constrains rotation for landscape data
 
     # Filtering parameters
-    use_ground_filter: bool = False
+    point_filter: str = "ground"  # "ground" (default), "all", or "custom" (uses classification_filter)
+    use_ground_filter: bool = False  # Use SMRF to classify ground points (for unclassified data)
     ground_filter_params: Optional[Dict[str, Any]] = None
     outlier_removal: bool = True
     outlier_k_neighbors: int = 20
     outlier_std_multiplier: float = 2.0
-    classification_filter: Optional[Union[List[int], str]] = None  # e.g., [2] for ground only
+    classification_filter: Optional[Union[List[int], str]] = None  # Custom list when point_filter="custom"
 
     # Validation
     min_fitness_score: float = 0.3  # Minimum acceptable fitness score
@@ -637,23 +638,24 @@ class LandscapeAligner:
         current_path = input_path
         step = 0
         
-        # 1. Classification filtering
-        if self.config.classification_filter is not None:
-            step += 1
-            output_path = os.path.join(tmpdir, f"{prefix}_step{step}_classified.laz")
-            
+        # 1. Point filtering based on classification
+        classifications = None
+        if self.config.point_filter == "ground":
+            classifications = [2]  # Ground class only
+        elif self.config.point_filter == "custom" and self.config.classification_filter is not None:
             if self.config.classification_filter == "ground":
-                classifications = [2]  # Ground class
+                classifications = [2]
             elif isinstance(self.config.classification_filter, (list, tuple)):
                 classifications = list(self.config.classification_filter)
-            else:
-                classifications = None
-            
-            if classifications:
-                current_path = self.processor.filter_by_classification(
-                    current_path, output_path, classifications
-                )
-                logger.info(f"Filtered {prefix} to classifications: {classifications}")
+        # point_filter == "all" means no filtering
+
+        if classifications:
+            step += 1
+            output_path = os.path.join(tmpdir, f"{prefix}_step{step}_classified.laz")
+            current_path = self.processor.filter_by_classification(
+                current_path, output_path, classifications
+            )
+            logger.info(f"Filtered {prefix} to classifications: {classifications}")
         
         # 2. Ground filtering with SMRF
         if self.config.use_ground_filter:
