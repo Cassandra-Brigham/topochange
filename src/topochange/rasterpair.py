@@ -1545,8 +1545,11 @@ class RasterPair:
         if verbose:
             print(f"\n--- Computing Difference (raster2 - raster1) ---", file=sys.stderr)
         
-        # Transform raster1 if needed
+        # Transform raster1 to match raster2
+        # Always do horizontal CRS and grid alignment for spatial comparability
+        # Only do vertical datum transformation if transform_first=True
         if transform_first:
+            # Full transformation including vertical datum
             raster1_aligned = self.transform_raster1_to_match_raster2(
                 skip_epoch=skip_epoch,
                 interpolation_method=interpolation_method,
@@ -1554,7 +1557,15 @@ class RasterPair:
                 verbose=verbose,
             )
         else:
-            raster1_aligned = self._raster1_transformed or self.raster1
+            # Horizontal CRS + grid alignment only, preserve vertical datum
+            raster1_aligned = self.transform_raster1_to_match_raster2(
+                skip_epoch=True,
+                skip_vertical=True,
+                skip_units=True,
+                interpolation_method=interpolation_method,
+                overwrite=overwrite,
+                verbose=verbose,
+            )
         
         # Read both rasters
         with rasterio.open(raster1_aligned.filename) as src1:
