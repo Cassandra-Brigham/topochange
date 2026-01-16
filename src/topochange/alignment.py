@@ -778,30 +778,57 @@ class LandscapeAligner:
             # Perform registration
             logger.info(f"Running {method.value} registration...")
 
-            # Map method to registration_type string
-            reg_type_map = {
-                RegistrationMethod.ICP: "ICP",
-                RegistrationMethod.GICP: "GICP",
-                RegistrationMethod.VGICP: "VGICP",
-            }
-            registration_type = reg_type_map.get(method, "GICP")
+            # Downsampling resolution for preprocessing (use voxel_size if set, else default)
+            downsample_resolution = self.config.voxel_size or 0.25
+            max_corr_dist = self.config.max_correspondence_distance or 1.0
+            num_threads = 4
 
-            # Use the simple numpy array API (signature 1)
-            # This handles normals estimation internally
-            reg_result = small_gicp.align(
-                target,  # target points (numpy array)
-                source,  # source points (numpy array)
-                init_T_target_source=initial_transform,
-                registration_type=registration_type,
-                max_iterations=self.config.max_iterations,
-                max_correspondence_distance=self.config.max_correspondence_distance or 1.0,
-                num_threads=4,
-            )
-            
-            # Extract results
-            result.transformation = reg_result.T
-            result.converged = reg_result.converged
-            result.iterations = reg_result.iterations
+            if method in [RegistrationMethod.GICP, RegistrationMethod.VGICP]:
+                # GICP/VGICP require preprocessing for normals and covariances
+                # See: https://github.com/koide3/small_gicp/blob/master/src/example/basic_registration.py
+                logger.info("Preprocessing point clouds (downsampling + covariance estimation)...")
+
+                target_cloud, target_tree = small_gicp.preprocess_points(
+                    target,
+                    downsampling_resolution=downsample_resolution,
+                    num_threads=num_threads,
+                )
+                source_cloud, source_tree = small_gicp.preprocess_points(
+                    source,
+                    downsampling_resolution=downsample_resolution,
+                    num_threads=num_threads,
+                )
+
+                logger.info(f"After preprocessing: {source_cloud.size()} source, "
+                           f"{target_cloud.size()} target points")
+
+                # Align preprocessed point clouds (default is GICP when using preprocessed clouds)
+                reg_result = small_gicp.align(
+                    target_cloud,
+                    source_cloud,
+                    target_tree,
+                    init_T_target_source=initial_transform,
+                    max_correspondence_distance=max_corr_dist,
+                    max_iterations=self.config.max_iterations,
+                    num_threads=num_threads,
+                )
+            else:
+                # Plain ICP can use raw numpy arrays directly
+                reg_result = small_gicp.align(
+                    target,
+                    source,
+                    init_T_target_source=initial_transform,
+                    registration_type="ICP",
+                    downsampling_resolution=downsample_resolution,
+                    max_correspondence_distance=max_corr_dist,
+                    max_iterations=self.config.max_iterations,
+                    num_threads=num_threads,
+                )
+
+            # Extract results - use T_target_source attribute
+            result.transformation = reg_result.T_target_source
+            result.converged = getattr(reg_result, 'converged', True)
+            result.iterations = getattr(reg_result, 'iterations', 0)
             
             # Compute fitness metrics
             result.rmse, result.fitness, result.num_correspondences = \
