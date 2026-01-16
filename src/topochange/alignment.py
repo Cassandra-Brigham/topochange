@@ -38,7 +38,6 @@ def _require_small_gicp():
 
 if TYPE_CHECKING:
     from .pointcloud import PointCloud
-    from .pointcloudpair import PointCloudPair
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -70,12 +69,6 @@ class RegistrationMethod(Enum):
     ICP = "icp"  # Standard ICP
     GICP = "gicp"  # Generalized ICP (uses normals)
     VGICP = "vgicp"  # Voxelized GICP (fastest for large clouds)
-
-
-class DownsamplingMethod(Enum):
-    """Point cloud downsampling methods"""
-    VOXEL = "voxel"
-    NONE = "none"
 
 
 @dataclass
@@ -867,138 +860,3 @@ class LandscapeAligner:
         num_correspondences = len(valid_distances)
         
         return rmse, fitness, num_correspondences
-
-    def align_pair(self,
-                  pair: 'PointCloudPair',
-                  which: str = "pc1_to_pc2",
-                  method: RegistrationMethod = RegistrationMethod.GICP,
-                  output_path: Optional[str] = None,
-                  overwrite: bool = False) -> RegistrationResult:
-        """
-        Align a PointCloudPair with transformation applied to the result
-
-        Args:
-            pair: PointCloudPair object
-            which: "pc1_to_pc2" or "pc2_to_pc1" - which cloud to align to which
-            method: Registration method
-            output_path: Optional output path for aligned point cloud
-            overwrite: Whether to overwrite existing output
-
-        Returns:
-            Registration result
-        """
-        if which == "pc1_to_pc2":
-            source_pc = pair.pc1
-            target_pc = pair.pc2
-            source_label = "pc1"
-        elif which == "pc2_to_pc1":
-            source_pc = pair.pc2
-            target_pc = pair.pc1
-            source_label = "pc2"
-        else:
-            raise ValueError("which must be 'pc1_to_pc2' or 'pc2_to_pc1'")
-
-        # Check CRS compatibility
-        source_crs = source_pc.current_compound_crs or source_pc.original_compound_crs
-        target_crs = target_pc.current_compound_crs or target_pc.original_compound_crs
-
-        if source_crs != target_crs:
-            logger.warning("Point clouds have different CRS. Consider warping to common CRS first.")
-
-        # Perform alignment
-        result = self.align(source_pc, target_pc, method)
-
-        # Apply transformation if successful
-        if result.converged and output_path is not None:
-            self._apply_transformation(
-                source_pc,
-                result.transformation,
-                output_path,
-                overwrite,
-                target_crs,
-                pair=pair,
-                source_label=source_label,
-            )
-
-            # Update CRS history if available
-            if hasattr(source_pc, 'crs_history') and source_pc.crs_history is not None:
-                source_pc.crs_history.record_transformation_entry(
-                    transformation_type="Align",
-                    source_crs_proj=source_crs,
-                    target_crs_proj=target_crs,
-                    method=f"{method.value} (small_gicp)",
-                    transformation_matrix=result.transformation.tolist(),
-                    alignment_origin=source_label,
-                    note=f"RMSE: {result.rmse:.3f}, Fitness: {result.fitness:.3f}"
-                )
-
-        return result
-
-    def _apply_transformation(self,
-                            pointcloud: 'PointCloud',
-                            transformation: np.ndarray,
-                            output_path: str,
-                            overwrite: bool = False,
-                            target_crs: Optional[str] = None,
-                            pair: Optional['PointCloudPair'] = None,
-                            source_label: Optional[str] = None) -> None:
-        """
-        Apply transformation matrix to point cloud and save
-        """
-        if Path(output_path).exists() and not overwrite:
-            raise FileExistsError(f"Output file exists: {output_path}")
-
-        # Format transformation matrix for PDAL
-        matrix_str = " ".join(f"{val:.12g}" for val in transformation.reshape(-1))
-
-        # Use target CRS if provided, otherwise use source CRS
-        crs = target_crs or pointcloud.current_compound_crs or pointcloud.original_compound_crs
-
-        _run_pdal_pipeline([
-            {"type": "readers.las", "filename": pointcloud.filename},
-            {"type": "filters.transformation", "matrix": matrix_str},
-            {"type": "writers.las", "filename": output_path, "a_srs": crs if crs else ""}
-        ])
-
-        logger.info(f"Transformed point cloud saved to {output_path}")
-
-        # Instantiate a new PointCloud from the transformed file
-        from .pointcloud import PointCloud
-        aligned_pc = PointCloud.from_file(str(output_path))  # type: ignore[arg-type]
-
-        # Update the pair object to reference the new aligned PointCloud
-        if pair is not None and source_label is not None:
-            if source_label == "pc1":
-                pair.pc1 = aligned_pc  # type: ignore[assignment]
-            elif source_label == "pc2":
-                pair.pc2 = aligned_pc  # type: ignore[assignment]
-
-
-# Backwards compatibility alias
-PointCloudPairAligner = LandscapeAligner
-
-
-# Convenience function
-def quick_align(source: Union[str, 'PointCloud'],
-               target: Union[str, 'PointCloud'],
-               method: str = "gicp",
-               use_ground: bool = True) -> Tuple[np.ndarray, float]:
-    """
-    Quick alignment with automatic parameters and retry logic.
-
-    Args:
-        source: Source point cloud (file path or PointCloud object)
-        target: Target point cloud (file path or PointCloud object)
-        method: Registration method name ("icp", "gicp", or "vgicp")
-        use_ground: Whether to filter to ground points only (default True)
-
-    Returns:
-        Tuple of (transformation matrix, RMSE)
-    """
-    config = RegistrationConfig(
-        point_filter="ground" if use_ground else "all",
-        enable_auto_retry=True
-    )
-    aligner = LandscapeAligner(config)
-    result = aligner.align(source, target, RegistrationMethod(method.lower()))
-    return result.transformation, result.rmse
