@@ -347,10 +347,10 @@ class LandscapeAligner:
         self.config = config or RegistrationConfig()
         self.processor = PointCloudProcessor()
         
-    def align(self, 
+    def align(self,
              source: Union[str, 'PointCloud', np.ndarray],
              target: Union[str, 'PointCloud', np.ndarray],
-             method: RegistrationMethod = RegistrationMethod.VGICP,
+             method: RegistrationMethod = RegistrationMethod.GICP,
              initial_transform: Optional[np.ndarray] = None) -> RegistrationResult:
         """
         Align source point cloud to target with automatic retry on failure
@@ -869,7 +869,7 @@ class LandscapeAligner:
     def align_pair(self,
                   pair: 'PointCloudPair',
                   which: str = "pc1_to_pc2",
-                  method: RegistrationMethod = RegistrationMethod.VGICP,
+                  method: RegistrationMethod = RegistrationMethod.GICP,
                   output_path: Optional[str] = None,
                   overwrite: bool = False) -> RegistrationResult:
         """
@@ -979,8 +979,8 @@ PointCloudPairAligner = LandscapeAligner
 # Convenience function
 def quick_align(source: Union[str, 'PointCloud'],
                target: Union[str, 'PointCloud'],
-               method: str = "vgicp",
-               use_ground: bool = False) -> Tuple[np.ndarray, float]:
+               method: str = "gicp",
+               use_ground: bool = True) -> Tuple[np.ndarray, float]:
     """
     Quick alignment with automatic parameters and retry logic.
 
@@ -988,14 +988,13 @@ def quick_align(source: Union[str, 'PointCloud'],
         source: Source point cloud (file path or PointCloud object)
         target: Target point cloud (file path or PointCloud object)
         method: Registration method name ("icp", "gicp", or "vgicp")
-        use_ground: Whether to filter to ground points only
+        use_ground: Whether to filter to ground points only (default True)
 
     Returns:
         Tuple of (transformation matrix, RMSE)
     """
     config = RegistrationConfig(
-        use_ground_filter=use_ground,
-        classification_filter=[2] if use_ground else None,
+        point_filter="ground" if use_ground else "all",
         enable_auto_retry=True
     )
     aligner = LandscapeAligner(config)
