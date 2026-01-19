@@ -1254,12 +1254,12 @@ class PointCloudPair:
             if verbose:
                 print(f"No transformations needed.", file=sys.stderr)
         
-        # Update metadata to match reference
+        # Update metadata to match reference (only update fields that were transformed)
         current.add_metadata(
-            horizontal_CRS=target_horiz_crs,
-            vertical_CRS=target_vert_crs,
-            geoid_model=target_geoid,
-            epoch=target_epoch,
+            horizontal_CRS=target_horiz_crs if needs_horizontal else None,
+            vertical_CRS=target_vert_crs if needs_vertical else None,
+            geoid_model=target_geoid if needs_vertical else None,
+            epoch=target_epoch if needs_epoch else None,
         )
         
         # Cache result
