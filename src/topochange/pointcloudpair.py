@@ -2421,6 +2421,7 @@ class PointCloudPair:
         transform_first: bool = True,
         use_transformed: bool = True,
         output_dir: Optional[str] = None,
+        diff_output_path: Optional[str] = None,
         overwrite: bool = True,
         verbose: bool = True,
         **dem_kwargs,
@@ -2600,6 +2601,7 @@ class PointCloudPair:
             transform_first=transform_first,
             interpolation_method="bilinear",
             clip_to_overlap=True,
+            output_path=diff_output_path,
             overwrite=overwrite,
             verbose=verbose,
         )
