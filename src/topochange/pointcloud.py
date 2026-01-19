@@ -1760,6 +1760,14 @@ class PointCloud:
                 dem.current_horizontal_units = self.horizontal_unit.display_name
                 dem.original_horizontal_units = self.horizontal_unit.display_name
 
+        # Inherit additional metadata from source point cloud
+        dem.epoch = getattr(self, 'epoch', None)
+        dem.current_geoid_model = getattr(self, 'geoid_model', None)
+        dem.original_geoid_model = getattr(self, 'geoid_model', None)
+        dem.current_vertical_crs = getattr(self, 'current_vertical_crs', None)
+        dem.original_vertical_crs = getattr(self, 'original_vertical_crs', None)
+        dem.is_orthometric = getattr(self, 'is_orthometric', None)
+
         return dem
 
     # -------------------------------------------------------------------------
@@ -1884,13 +1892,16 @@ class PointCloud:
         if hasattr(self, 'is_orthometric') and not hasattr(target_pc, 'is_orthometric'):
             target_pc.is_orthometric = self.is_orthometric
         
-        # Preserve unit info objects
-        if hasattr(self, 'horizontal_unit') and target_pc.horizontal_unit.name == "unknown":
-            target_pc.horizontal_unit = self.horizontal_unit
-            target_pc.horizontal_units = self.horizontal_unit.display_name
-        if hasattr(self, 'vertical_unit') and target_pc.vertical_unit.name == "unknown":
-            target_pc.vertical_unit = self.vertical_unit
-            target_pc.vertical_units = self.vertical_unit.display_name
+        # Preserve unit info objects - copy from source if target has unknown units
+        # or if source has known units (source is authoritative for most transformations)
+        if hasattr(self, 'horizontal_unit') and self.horizontal_unit.name != "unknown":
+            if target_pc.horizontal_unit.name == "unknown":
+                target_pc.horizontal_unit = self.horizontal_unit
+                target_pc.horizontal_units = self.horizontal_unit.display_name
+        if hasattr(self, 'vertical_unit') and self.vertical_unit.name != "unknown":
+            if target_pc.vertical_unit.name == "unknown":
+                target_pc.vertical_unit = self.vertical_unit
+                target_pc.vertical_units = self.vertical_unit.display_name
 
     def warp_pointcloud(
         self,

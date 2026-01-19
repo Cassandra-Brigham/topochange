@@ -2581,9 +2581,21 @@ class PointCloudPair:
             **dem_kwargs,
         )
 
-        # Copy epoch info
+        # Copy metadata from source point clouds to rasters
         raster_dem1.epoch = getattr(pc1_source, 'epoch', None)
         raster_dem2.epoch = getattr(pc2_source, 'epoch', None)
+
+        # Copy geoid model
+        raster_dem1.current_geoid_model = getattr(pc1_source, 'geoid_model', None)
+        raster_dem1.original_geoid_model = getattr(pc1_source, 'geoid_model', None)
+        raster_dem2.current_geoid_model = getattr(pc2_source, 'geoid_model', None)
+        raster_dem2.original_geoid_model = getattr(pc2_source, 'geoid_model', None)
+
+        # Copy vertical CRS
+        raster_dem1.current_vertical_crs = getattr(pc1_source, 'current_vertical_crs', None)
+        raster_dem1.original_vertical_crs = getattr(pc1_source, 'original_vertical_crs', None)
+        raster_dem2.current_vertical_crs = getattr(pc2_source, 'current_vertical_crs', None)
+        raster_dem2.original_vertical_crs = getattr(pc2_source, 'original_vertical_crs', None)
 
         if verbose:
             print(f"\nDEM1: {out1}", file=sys.stderr)
