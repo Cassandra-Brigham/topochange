@@ -1715,7 +1715,23 @@ class RasterPair:
         diff_raster.current_horizontal_crs = getattr(self.raster2, 'current_horizontal_crs', None)
         diff_raster.current_vertical_crs = getattr(self.raster2, 'current_vertical_crs', None)
         diff_raster.current_geoid_model = getattr(self.raster2, 'current_geoid_model', None)
-        diff_raster.epoch = getattr(self.raster2, 'epoch', None)
+
+        # Store both epochs for the difference raster (DoD spans two time periods)
+        # epoch_start = older/compare epoch (raster1), epoch_end = newer/reference epoch (raster2)
+        diff_raster.epoch_start = getattr(raster1_aligned, 'epoch', None) or getattr(self.raster1, 'epoch', None)
+        diff_raster.epoch_end = getattr(self.raster2, 'epoch', None)
+        # Keep single epoch attribute for backward compatibility (use reference epoch)
+        diff_raster.epoch = diff_raster.epoch_end
+
+        # Copy unit metadata from raster2 (the reference)
+        diff_raster.current_vertical_unit = getattr(self.raster2, 'current_vertical_unit', None)
+        diff_raster.original_vertical_unit = getattr(self.raster2, 'original_vertical_unit', None)
+        diff_raster.current_vertical_units = getattr(self.raster2, 'current_vertical_units', None)
+        diff_raster.original_vertical_units = getattr(self.raster2, 'original_vertical_units', None)
+        diff_raster.current_horizontal_unit = getattr(self.raster2, 'current_horizontal_unit', None)
+        diff_raster.original_horizontal_unit = getattr(self.raster2, 'original_horizontal_unit', None)
+        diff_raster.current_horizontal_units = getattr(self.raster2, 'current_horizontal_units', None)
+        diff_raster.original_horizontal_units = getattr(self.raster2, 'original_horizontal_units', None)
         
         # Create comprehensive CRS history for the difference raster
         # This tracks dual-parent lineage (derived from BOTH raster1 and raster2)
