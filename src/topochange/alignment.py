@@ -65,9 +65,10 @@ def _run_pdal_pipeline(steps, arrays=None):
 
 
 class RegistrationMethod(Enum):
-    """Available registration methods"""
-    ICP = "icp"  # Standard ICP
-    GICP = "gicp"  # Generalized ICP (uses normals)
+    """Available registration methods (maps to small_gicp registration_type)"""
+    ICP = "icp"  # Standard ICP (point-to-point)
+    PLANE_ICP = "plane_icp"  # Point-to-plane ICP (uses normals)
+    GICP = "gicp"  # Generalized ICP (uses covariances)
     VGICP = "vgicp"  # Voxelized GICP (fastest for large clouds)
 
 
@@ -76,6 +77,7 @@ class RegistrationConfig:
     """Configuration for point cloud registration"""
 
     # General parameters
+    method: str = "gicp"  # Registration type: "icp", "plane_icp", "gicp", "vgicp"
     max_correspondence_distance: Optional[float] = None  # Auto-compute if None
     max_iterations: int = 50
 
@@ -344,20 +346,24 @@ class LandscapeAligner:
     def align(self,
              source: Union[str, 'PointCloud', np.ndarray],
              target: Union[str, 'PointCloud', np.ndarray],
-             method: RegistrationMethod = RegistrationMethod.GICP,
+             method: Optional[RegistrationMethod] = None,
              initial_transform: Optional[np.ndarray] = None) -> RegistrationResult:
         """
         Align source point cloud to target with automatic retry on failure
-        
+
         Args:
             source: Source point cloud (file path, PointCloud object, or Nx3 array)
             target: Target point cloud (file path, PointCloud object, or Nx3 array)
-            method: Registration method to use
+            method: Registration method to use. If None, uses config.method.
             initial_transform: Optional initial transformation
-            
+
         Returns:
             Registration result
         """
+        # Use config.method if method not specified
+        if method is None:
+            method = RegistrationMethod(self.config.method)
+
         # Extract paths and metadata
         source_path, source_meta = self._extract_path_and_metadata(source)
         target_path, target_meta = self._extract_path_and_metadata(target)
@@ -781,18 +787,30 @@ class LandscapeAligner:
             max_corr_dist = self.config.max_correspondence_distance or 1.0
             num_threads = 4
 
-            if method in [RegistrationMethod.GICP, RegistrationMethod.VGICP]:
-                # GICP/VGICP require preprocessing for normals and covariances
-                # See: https://github.com/koide3/small_gicp/blob/master/src/example/basic_registration.py
+            # Methods requiring preprocessing (normals/covariances)
+            needs_preprocessing = method in [
+                RegistrationMethod.PLANE_ICP,
+                RegistrationMethod.GICP,
+                RegistrationMethod.VGICP,
+            ]
 
-                # Build preprocessing kwargs - only include downsampling if enabled
+            if needs_preprocessing:
+                # PLANE_ICP, GICP, VGICP require preprocessing for normals/covariances
+                # See: https://github.com/koide3/small_gicp
+
+                # Build preprocessing kwargs
                 preprocess_kwargs = {"num_threads": num_threads}
                 if self.config.downsample:
                     downsample_resolution = self.config.voxel_size or 0.25
                     preprocess_kwargs["downsampling_resolution"] = downsample_resolution
-                    logger.info(f"Preprocessing point clouds (downsampling at {downsample_resolution}m + covariance estimation)...")
+                    logger.info(
+                        f"Preprocessing (downsample={downsample_resolution}m + "
+                        "covariance estimation)..."
+                    )
                 else:
-                    logger.info("Preprocessing point clouds (covariance estimation, no downsampling)...")
+                    logger.info(
+                        "Preprocessing (covariance estimation, no downsampling)..."
+                    )
 
                 target_cloud, target_tree = small_gicp.preprocess_points(
                     target, **preprocess_kwargs
@@ -801,15 +819,21 @@ class LandscapeAligner:
                     source, **preprocess_kwargs
                 )
 
-                logger.info(f"After preprocessing: {source_cloud.size()} source, "
-                           f"{target_cloud.size()} target points")
+                logger.info(
+                    f"After preprocessing: {source_cloud.size()} source, "
+                    f"{target_cloud.size()} target points"
+                )
 
-                # Align preprocessed point clouds (default is GICP when using preprocessed clouds)
+                # Map method to small_gicp registration_type
+                # VGICP with preprocessed points is effectively GICP
+                reg_type = "GICP" if method == RegistrationMethod.VGICP else method.value.upper()
+
                 reg_result = small_gicp.align(
                     target_cloud,
                     source_cloud,
                     target_tree,
                     init_T_target_source=initial_transform,
+                    registration_type=reg_type,
                     max_correspondence_distance=max_corr_dist,
                     max_iterations=self.config.max_iterations,
                     num_threads=num_threads,
