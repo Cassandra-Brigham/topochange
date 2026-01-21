@@ -2918,6 +2918,8 @@ class PointCloudPair:
         -------
         dict
             Results from RasterPair.compute_difference() plus:
+            - dem1_raster: Raster object for DEM1 (compare/older)
+            - dem2_raster: Raster object for DEM2 (reference/younger)
             - dem1_source: str describing which pc1 variant was used
             - dem2_source: str describing which pc2 variant was used
             - dem_type: str (for backward compatibility)
@@ -3089,6 +3091,8 @@ class PointCloudPair:
         )
 
         # Add context to result
+        result['dem1_raster'] = raster_dem1
+        result['dem2_raster'] = raster_dem2
         result['dem1_source'] = dem1_source_desc
         result['dem2_source'] = dem2_source_desc
         result['dem_type'] = dem1_type  # For backward compatibility
