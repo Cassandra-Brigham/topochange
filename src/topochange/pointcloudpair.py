@@ -856,15 +856,16 @@ class PointCloudPair:
         use_transformed: bool = True,
     ) -> Dict[str, Any]:
         """
-        Compute overlap polygon with buffer for alignment preparation (Area B).
+        Compute overlap polygon shrunk inward by buffer distance.
 
-        Area B = overlap polygon + buffer. This is used for the compare cloud
-        during alignment to provide context beyond the strict overlap area.
+        The shrunk polygon ensures the compare cloud extents are fully within
+        the reference cloud coverage with a margin. This avoids edge effects
+        during alignment and differencing.
 
         Parameters
         ----------
         buffer_distance : float, default 10.0
-            Buffer distance in map units (typically meters).
+            Distance to shrink the overlap polygon inward (in map units, typically meters).
         use_transformed : bool, default True
             If True and pc1 has been transformed, use the transformed version.
 
@@ -872,10 +873,10 @@ class PointCloudPair:
         -------
         dict
             {
-                'buffered_polygon': shapely.Polygon,
+                'buffered_polygon': shapely.Polygon (shrunk inward),
                 'buffered_bounds': tuple,
                 'buffered_area': float,
-                'overlap_polygon': shapely.Polygon,
+                'overlap_polygon': shapely.Polygon (original),
                 'overlap_area': float,
                 'buffer_distance': float,
             }
@@ -893,7 +894,14 @@ class PointCloudPair:
             }
 
         overlap_poly = overlap_result['overlap_polygon']
-        buffered_poly = overlap_poly.buffer(buffer_distance)
+        # Negative buffer shrinks the polygon inward
+        buffered_poly = overlap_poly.buffer(-buffer_distance)
+
+        if buffered_poly.is_empty:
+            raise ValueError(
+                f"Buffer distance of {buffer_distance}m resulted in empty polygon. "
+                "The overlap area is too small for this buffer. Try a smaller buffer value."
+            )
 
         return {
             'buffered_polygon': buffered_poly,
@@ -1124,15 +1132,15 @@ class PointCloudPair:
         verbose: bool = True,
     ) -> PointCloud:
         """
-        Crop compare point cloud (pc1) to overlap area plus buffer (Area B).
+        Crop compare point cloud (pc1) to overlap area shrunk inward by buffer.
 
-        Area B is used for the compare cloud during alignment to provide
-        spatial context beyond the strict overlap region.
+        This ensures the compare cloud extents are fully within the reference
+        cloud coverage with a margin, avoiding edge effects during alignment.
 
         Parameters
         ----------
         buffer_distance : float, default 10.0
-            Buffer distance around overlap area in map units (typically meters).
+            Distance to shrink the overlap polygon inward (in map units, typically meters).
         output_dir : str, optional
             Output directory for cropped file. If None, uses same directory as input.
         use_transformed : bool, default True
@@ -1145,7 +1153,7 @@ class PointCloudPair:
         Returns
         -------
         PointCloud
-            pc1 cropped to Area B (overlap + buffer).
+            pc1 cropped to overlap area minus buffer (shrunk inward).
         """
         import sys
         from pyproj import CRS as CRS_, Transformer
@@ -1163,10 +1171,10 @@ class PointCloudPair:
         epsg_utm = getattr(self.pc2, 'epsg_utm', None)
 
         if verbose:
-            print(f"\n--- Cropping Compare Cloud with Buffer (Area B) ---", file=sys.stderr)
-            print(f"Buffer distance: {buffer_distance} m", file=sys.stderr)
-            print(f"Overlap area: {buffered_result['overlap_area']:,.0f} m²", file=sys.stderr)
-            print(f"Buffered area: {buffered_result['buffered_area']:,.0f} m²", file=sys.stderr)
+            print(f"\n--- Cropping Compare Cloud (shrunk inward) ---", file=sys.stderr)
+            print(f"Interior buffer: {buffer_distance} m", file=sys.stderr)
+            print(f"Original overlap area: {buffered_result['overlap_area']:,.0f} m²", file=sys.stderr)
+            print(f"Shrunk area: {buffered_result['buffered_area']:,.0f} m²", file=sys.stderr)
 
         # Select pc1 source
         pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
