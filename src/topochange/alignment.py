@@ -44,13 +44,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def _run_pdal_pipeline(steps, arrays=None):
+def _run_pdal_pipeline(steps, arrays=None, need_arrays=None):
     """
     Execute a PDAL pipeline from a list of step dictionaries.
 
     Args:
         steps: List of PDAL stage configurations
         arrays: Optional numpy arrays to pass to the pipeline
+        need_arrays: If True, use execute() to get arrays back. If False, use
+                    execute_streaming() for memory efficiency. If None (default),
+                    auto-detect based on whether pipeline has a writer.
 
     Returns:
         Executed pipeline object
@@ -60,7 +63,22 @@ def _run_pdal_pipeline(steps, arrays=None):
         pipeline = pdal.Pipeline(pipeline_json, arrays=arrays)
     else:
         pipeline = pdal.Pipeline(pipeline_json)
-    pipeline.execute()
+
+    # Auto-detect if we need arrays returned
+    if need_arrays is None:
+        # If pipeline ends with a writer, we don't need arrays back
+        has_writer = any(
+            step.get("type", "").startswith("writers.")
+            for step in steps
+        )
+        need_arrays = not has_writer
+
+    if need_arrays:
+        pipeline.execute()
+    else:
+        # Use streaming for file-to-file operations (memory efficient)
+        pipeline.execute_streaming(chunk_size=1000000)
+
     return pipeline
 
 

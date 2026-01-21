@@ -157,66 +157,89 @@ class PipelineWrapper:
         if self._input_arrays is not None:
             return self._execute_subprocess_with_arrays()
 
-        # Create a temporary script that runs the pipeline and outputs results
-        script = f'''
+        # Use file-based transfer for arrays to avoid JSON memory issues
+        with tempfile.NamedTemporaryFile(suffix='.npz', delete=False) as tmp:
+            arrays_file = tmp.name
+
+        try:
+            # Create a temporary script that saves arrays to file instead of JSON
+            script = f'''
 import pdal
 import json
 import numpy as np
-import sys
 
 pipeline_json = {repr(self.pipeline_json)}
 pipeline = pdal.Pipeline(pipeline_json)
 count = pipeline.execute()
 
-# Get arrays and convert to lists for JSON serialization
-arrays_data = []
-for arr in pipeline.arrays:
-    # Convert structured array to dict of lists
-    arr_dict = {{name: arr[name].tolist() for name in arr.dtype.names}}
-    arrays_data.append(arr_dict)
+# Save arrays to temp file instead of JSON serialization (more memory efficient)
+save_dict = {{'num_arrays': np.array([len(pipeline.arrays)])}}
+for i, arr in enumerate(pipeline.arrays):
+    for name in arr.dtype.names:
+        save_dict[f'arr{{i}}_{{name}}'] = arr[name]
+    save_dict[f'arr{{i}}_dtype'] = str(arr.dtype)
+np.savez({repr(arrays_file)}, **save_dict)
 
-# Get metadata
-metadata = pipeline.metadata
-
+# Only print metadata as JSON (small)
 result = {{
     "count": count,
-    "arrays": arrays_data,
-    "metadata": metadata,
+    "metadata": pipeline.metadata,
     "log": getattr(pipeline, 'log', '')
 }}
 print(json.dumps(result))
 '''
 
-        result = subprocess.run(
-            [CONDA_PYTHON, '-c', script],
-            capture_output=True, text=True, env=_get_conda_env()
-        )
+            result = subprocess.run(
+                [CONDA_PYTHON, '-c', script],
+                capture_output=True, text=True, env=_get_conda_env()
+            )
 
-        if result.returncode != 0:
-            raise RuntimeError(f"PDAL pipeline failed: {result.stderr}")
+            if result.returncode != 0:
+                raise RuntimeError(f"PDAL pipeline failed: {result.stderr}")
 
-        try:
-            data = json.loads(result.stdout)
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"Failed to parse PDAL output: {e}\nOutput: {result.stdout}\nStderr: {result.stderr}")
+            try:
+                data = json.loads(result.stdout)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"Failed to parse PDAL output: {e}\nOutput: {result.stdout}\nStderr: {result.stderr}")
 
-        self._count = data['count']
-        self._metadata = data['metadata']
-        self._log = data.get('log', '')
+            self._count = data['count']
+            self._metadata = data['metadata']
+            self._log = data.get('log', '')
 
-        # Reconstruct numpy structured arrays
-        self._arrays = []
-        for arr_dict in data['arrays']:
-            if arr_dict:
-                # Determine dtype from the data
-                dtype = [(name, np.array(values).dtype) for name, values in arr_dict.items()]
-                n_points = len(next(iter(arr_dict.values())))
-                arr = np.empty(n_points, dtype=dtype)
-                for name, values in arr_dict.items():
-                    arr[name] = values
-                self._arrays.append(arr)
+            # Load arrays from temp file (more memory efficient than JSON)
+            self._arrays = []
+            if os.path.exists(arrays_file):
+                import re
+                npz_data = np.load(arrays_file, allow_pickle=True)
+                num_arrays = int(npz_data['num_arrays'][0])
 
-        return self._count
+                for i in range(num_arrays):
+                    dtype_str = str(npz_data[f'arr{i}_dtype'])
+                    # Parse dtype string to get field names
+                    fields = re.findall(r"\('(\w+)'", dtype_str)
+
+                    if fields:
+                        # Get first field to determine length
+                        first_field = npz_data[f'arr{i}_{fields[0]}']
+                        n_points = len(first_field)
+
+                        # Build dtype from actual data
+                        dtype_list = []
+                        for name in fields:
+                            arr_data = npz_data[f'arr{i}_{name}']
+                            dtype_list.append((name, arr_data.dtype))
+
+                        arr = np.empty(n_points, dtype=dtype_list)
+                        for name in fields:
+                            arr[name] = npz_data[f'arr{i}_{name}']
+                        self._arrays.append(arr)
+
+            return self._count
+
+        finally:
+            # Clean up temp file
+            if os.path.exists(arrays_file):
+                os.remove(arrays_file)
 
     def _execute_subprocess_with_arrays(self) -> int:
         """Execute using subprocess with input arrays passed via temp file."""
