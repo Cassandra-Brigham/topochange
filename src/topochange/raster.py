@@ -1792,7 +1792,7 @@ class Raster:
             # Return existing raster instead of raising error (caching behavior)
             import sys
             print(f"Loading existing warped raster: {os.path.basename(output_path)}", file=sys.stderr)
-            return Raster(output_path)
+            return Raster.from_file(output_path)
         
         # Select resampling method
         resampling_map = {
