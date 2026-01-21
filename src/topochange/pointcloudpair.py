@@ -1052,12 +1052,16 @@ class PointCloudPair:
             print(f"Common CRS: {common_crs.to_epsg() or common_crs.name}", file=sys.stderr)
             print(f"PC1 native CRS: {pc1_native_crs_wkt[:80] if pc1_native_crs_wkt else 'None'}...", file=sys.stderr)
             print(f"PC2 native CRS: {pc2_native_crs_wkt[:80] if pc2_native_crs_wkt else 'None'}...", file=sys.stderr)
+            print(f"PC1 area (common CRS): {pc1_poly_common.area:,.0f} m²", file=sys.stderr)
+            print(f"PC2 area (common CRS): {pc2_poly_common.area:,.0f} m²", file=sys.stderr)
             print(f"Intersection area: {overlap_area:,.0f} m²", file=sys.stderr)
             print(f"Overlap fraction pc1: {pc1_overlap_frac:.1%}", file=sys.stderr)
             print(f"Overlap fraction pc2: {pc2_overlap_frac:.1%}", file=sys.stderr)
             if interior_buffer is not None and interior_buffer > 0:
                 print(f"Interior buffer for compare: {interior_buffer} m", file=sys.stderr)
-                print(f"Compare clip area (after buffer): {pc1_buffered_area:,.0f} m²", file=sys.stderr)
+                print(f"PC2 shrunk area: {pc2_shrunk.area:,.0f} m²", file=sys.stderr)
+                print(f"PC1 clip poly area (PC2 shrunk ∩ PC1): {pc1_clip_poly_common.area:,.0f} m²", file=sys.stderr)
+                print(f"PC2 clip poly area (full intersection): {pc2_clip_poly_common.area:,.0f} m²", file=sys.stderr)
 
         # Transform clip polygons to each point cloud's native CRS for clipping
         if pc1_native_crs_wkt:
