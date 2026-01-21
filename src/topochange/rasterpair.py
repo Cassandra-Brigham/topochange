@@ -1690,7 +1690,67 @@ class RasterPair:
         })
         
         if os.path.exists(output_path) and not overwrite:
-            raise ValueError(f"Output file exists and overwrite=False: {output_path}")
+            # Caching: load existing difference raster and compute stats from it
+            print(f"\nLoading existing difference raster: {os.path.basename(output_path)}", file=sys.stderr)
+            diff_raster = Raster.from_file(output_path, rtype='dod', metadata={})
+
+            # Read the data and compute stats
+            with rasterio.open(output_path) as src:
+                diff_data = src.read(1)
+                valid_mask = ~np.isnan(diff_data) & (diff_data != src.nodata if src.nodata is not None else True)
+                valid_diff = diff_data[valid_mask]
+
+                stats = {
+                    'count_valid': int(np.sum(valid_mask)),
+                    'count_total': diff_data.size,
+                    'min': float(np.min(valid_diff)) if len(valid_diff) > 0 else np.nan,
+                    'max': float(np.max(valid_diff)) if len(valid_diff) > 0 else np.nan,
+                    'mean': float(np.mean(valid_diff)) if len(valid_diff) > 0 else np.nan,
+                    'std': float(np.std(valid_diff)) if len(valid_diff) > 0 else np.nan,
+                    'median': float(np.median(valid_diff)) if len(valid_diff) > 0 else np.nan,
+                    'nmad': float(1.4826 * np.median(np.abs(valid_diff - np.median(valid_diff)))) if len(valid_diff) > 0 else np.nan,
+                    'rmse': float(np.sqrt(np.mean(valid_diff**2))) if len(valid_diff) > 0 else np.nan,
+                }
+
+                # Compute histogram
+                if len(valid_diff) > 0:
+                    hist_counts, hist_edges = np.histogram(valid_diff, bins=100)
+                    histogram = {'counts': hist_counts.tolist(), 'edges': hist_edges.tolist()}
+                else:
+                    histogram = {'counts': [], 'edges': []}
+
+            if verbose:
+                print(f"\n--- Difference Statistics (from cached file) ---", file=sys.stderr)
+                print(f"{'Statistic':<12} {'Value (m)':<14}", file=sys.stderr)
+                print("-" * 27, file=sys.stderr)
+                print(f"{'Min':<12} {stats['min']:>14.4f}", file=sys.stderr)
+                print(f"{'Max':<12} {stats['max']:>14.4f}", file=sys.stderr)
+                print(f"{'Mean':<12} {stats['mean']:>14.4f}", file=sys.stderr)
+                print(f"{'Std':<12} {stats['std']:>14.4f}", file=sys.stderr)
+                print(f"{'Median':<12} {stats['median']:>14.4f}", file=sys.stderr)
+                print(f"{'NMAD':<12} {stats['nmad']:>14.4f}", file=sys.stderr)
+                print(f"{'RMSE':<12} {stats['rmse']:>14.4f}", file=sys.stderr)
+
+            # Build metadata summary
+            metadata = {
+                'raster1_source': self.raster1.filename,
+                'raster2_source': self.raster2.filename,
+                'raster1_epoch': getattr(self.raster1, 'epoch', None),
+                'raster2_epoch': getattr(self.raster2, 'epoch', None),
+                'transformation_applied': transform_first,
+                'interpolation_method': interpolation_method,
+                'transformation_history': [],
+                'loaded_from_cache': True,
+            }
+
+            return {
+                'difference_raster': diff_raster,
+                'difference_raster_path': output_path,
+                'stats': stats,
+                'histogram': histogram,
+                'transformation_history': [],
+                'metadata': metadata,
+            }
         
         with rasterio.open(output_path, 'w', **diff_profile) as dst:
             dst.write(diff.astype(np.float32), 1)

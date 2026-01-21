@@ -1789,7 +1789,10 @@ class Raster:
             output_path = f"{base}_{tag}{ext}"
         
         if os.path.exists(output_path) and not overwrite:
-            raise ValueError(f"Output file exists and overwrite=False: {output_path}")
+            # Return existing raster instead of raising error (caching behavior)
+            import sys
+            print(f"Loading existing warped raster: {os.path.basename(output_path)}", file=sys.stderr)
+            return Raster(output_path)
         
         # Select resampling method
         resampling_map = {

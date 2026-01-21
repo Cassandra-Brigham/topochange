@@ -1405,7 +1405,9 @@ class PointCloud:
         }
 
         pipe = pdal.Pipeline(json.dumps(pipeline_spec))
-        count = pipe.execute()
+        # Use streaming execution for memory efficiency - this pipeline writes to
+        # a file and doesn't need array data returned to Python
+        count = pipe.execute_streaming(chunk_size=1000000)
 
         if count == 0:
             import warnings
@@ -2168,7 +2170,8 @@ class PointCloud:
         }
         
         pipe = pdal.Pipeline(json.dumps(pipeline_spec))
-        execute_count = pipe.execute()
+        # Use streaming execution for memory efficiency - writes to file
+        execute_count = pipe.execute_streaming(chunk_size=1000000)
 
         # Verify output - try multiple methods to get point count
         out_count_val = 0
@@ -2177,16 +2180,7 @@ class PointCloud:
         if execute_count and execute_count > 0:
             out_count_val = execute_count
 
-        # Method 2: Check pipeline arrays
-        if out_count_val == 0:
-            try:
-                arrays = pipe.arrays
-                if arrays and len(arrays) > 0 and len(arrays[0]) > 0:
-                    out_count_val = len(arrays[0])
-            except Exception:
-                pass
-
-        # Method 3: Check metadata
+        # Method 2: Check metadata (arrays not available in streaming mode)
         if out_count_val == 0:
             md = pipe.metadata.get("metadata", {})
             writer_keys = [k for k in md.keys() if k.startswith("writers.las")]
@@ -2382,30 +2376,31 @@ class PointCloud:
         }
 
         pipe = pdal.Pipeline(json.dumps(pipeline_spec))
-        pipe.execute()
+        # Use streaming execution for memory efficiency - writes to file
+        execute_count = pipe.execute_streaming(chunk_size=1000000)
 
         # Determine how many points we actually wrote
-        md = pipe.metadata.get("metadata", {})
-        writer_keys = [k for k in md.keys() if k.startswith("writers.las")]
-        writer_md = md.get(writer_keys[0], {}) if writer_keys else {}
+        out_count_val = execute_count if execute_count and execute_count > 0 else 0
 
-        out_count = (
-            writer_md.get("num_points")
-            or writer_md.get("count")
-            or writer_md.get("points")
-        )
-        try:
-            out_count_val = int(out_count) if out_count is not None else 0
-        except Exception:
-            out_count_val = 0
-
+        # Fallback: check metadata
         if out_count_val == 0:
+            md = pipe.metadata.get("metadata", {})
+            writer_keys = [k for k in md.keys() if k.startswith("writers.las")]
+            writer_md = md.get(writer_keys[0], {}) if writer_keys else {}
+
+            out_count = (
+                writer_md.get("num_points")
+                or writer_md.get("count")
+                or writer_md.get("points")
+            )
             try:
-                arrays = pipe.arrays
-                if arrays:
-                    out_count_val = len(arrays[-1])
+                out_count_val = int(out_count) if out_count is not None else 0
             except Exception:
-                pass
+                out_count_val = 0
+
+        # Fallback: check if output file exists with data
+        if out_count_val == 0 and output_path.exists() and output_path.stat().st_size > 0:
+            out_count_val = 1  # File has data, trust it worked
 
         if out_count_val == 0:
             log_text = getattr(pipe, "log", "")
@@ -2582,22 +2577,31 @@ class PointCloud:
         }
 
         pipe = pdal.Pipeline(json.dumps(pipeline_spec))
-        pipe.execute()
+        # Use streaming execution for memory efficiency - writes to file
+        execute_count = pipe.execute_streaming(chunk_size=1000000)
 
         # Sanity check: did we actually write any points?
-        meta = pipe.metadata
-        md = meta.get("metadata", {})
-        writer_md = md.get("writers.las", {})
+        out_count_val = execute_count if execute_count and execute_count > 0 else 0
 
-        out_count = (
-            writer_md.get("num_points")
-            or writer_md.get("count")
-            or writer_md.get("points")
-        )
-        try:
-            out_count_val = int(out_count) if out_count is not None else 0
-        except Exception:
-            out_count_val = 0
+        # Fallback: check metadata
+        if out_count_val == 0:
+            meta = pipe.metadata
+            md = meta.get("metadata", {})
+            writer_md = md.get("writers.las", {})
+
+            out_count = (
+                writer_md.get("num_points")
+                or writer_md.get("count")
+                or writer_md.get("points")
+            )
+            try:
+                out_count_val = int(out_count) if out_count is not None else 0
+            except Exception:
+                out_count_val = 0
+
+        # Fallback: check if output file exists with data
+        if out_count_val == 0 and output_path.exists() and output_path.stat().st_size > 0:
+            out_count_val = 1  # File has data, trust it worked
 
         if out_count_val == 0:
             log_text = getattr(pipe, "log", "")

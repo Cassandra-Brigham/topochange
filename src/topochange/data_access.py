@@ -2791,7 +2791,8 @@ class GetDEMs:
                 
                 logger.info(f"Merging {len(downloaded_laz_files)} tiles into {merged_laz}")
                 merge_pipe = pdal.Pipeline(json.dumps(merge_pipeline))
-                merge_pipe.execute()
+                # Use streaming execution for memory efficiency when merging large tiles
+                merge_pipe.execute_streaming(chunk_size=1000000)
                 input_laz = merged_laz
             
             # Create DTM

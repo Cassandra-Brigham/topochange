@@ -374,7 +374,8 @@ def _save_transformed_las(
     pipeline_spec = {"pipeline": pipeline_steps}
 
     pipe = pdal.Pipeline(json.dumps(pipeline_spec))
-    pipe.execute()
+    # Use streaming execution for memory efficiency - writes to file
+    pipe.execute_streaming(chunk_size=1000000)
 
 
 # =============================================================================
