@@ -2419,6 +2419,7 @@ class PointCloudPair:
         resolution: float = 1.0,
         interpolation: str = "idw",
         transform_first: bool = True,
+        skip_epoch: bool = False,
         use_transformed: bool = True,
         output_dir: Optional[str] = None,
         diff_output_path: Optional[str] = None,
@@ -2458,6 +2459,10 @@ class PointCloudPair:
         transform_first : bool
             Transform compare DEM to match reference before differencing.
             Set to False when using unaligned dem1 options to preserve raw differences.
+        skip_epoch : bool
+            If True, skip epoch transformation during differencing. Use this when
+            you've already decided not to do epoch transformation (e.g., when you
+            called transform_compare_to_match_reference with skip_epoch=True).
         use_transformed : bool
             Use transformed pc1 for DEM creation. Only used if dem1 is not specified.
             Deprecated: Use dem1 parameter instead.
@@ -2611,6 +2616,7 @@ class PointCloudPair:
         # Compute difference using RasterPair
         result = raster_pair.compute_difference(
             transform_first=transform_first,
+            skip_epoch=skip_epoch,
             interpolation_method="bilinear",
             clip_to_overlap=True,
             output_path=diff_output_path,
