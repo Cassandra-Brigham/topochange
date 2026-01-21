@@ -390,7 +390,55 @@ class PointCloudPair:
         self._pc1_cropped_original = None
         self._pc2_cropped = None
         self._alignment_result = None
-    
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    @staticmethod
+    def _copy_pc_metadata_to_raster(raster: Raster, pc: PointCloud) -> None:
+        """
+        Copy metadata from a point cloud to a raster.
+
+        Centralizes metadata transfer to ensure consistency across all methods
+        that create rasters from point clouds.
+
+        Parameters
+        ----------
+        raster : Raster
+            Target raster to copy metadata to.
+        pc : PointCloud
+            Source point cloud to copy metadata from.
+        """
+        # Epoch
+        raster.epoch = getattr(pc, 'epoch', None)
+
+        # Geoid model
+        raster.current_geoid_model = getattr(pc, 'geoid_model', None)
+        raster.original_geoid_model = getattr(pc, 'geoid_model', None)
+
+        # Vertical CRS
+        raster.current_vertical_crs = getattr(pc, 'current_vertical_crs', None)
+        raster.original_vertical_crs = getattr(pc, 'original_vertical_crs', None)
+
+        # Orthometric flag
+        raster.is_orthometric = getattr(pc, 'is_orthometric', None)
+
+        # Units (only if raster has unknown units)
+        if hasattr(pc, 'vertical_unit') and pc.vertical_unit is not None:
+            if not hasattr(raster, 'current_vertical_unit') or raster.current_vertical_unit is None or raster.current_vertical_unit.name == "unknown":
+                raster.current_vertical_unit = pc.vertical_unit
+                raster.original_vertical_unit = pc.vertical_unit
+                raster.current_vertical_units = getattr(pc, 'vertical_units', pc.vertical_unit.display_name)
+                raster.original_vertical_units = getattr(pc, 'vertical_units', pc.vertical_unit.display_name)
+
+        if hasattr(pc, 'horizontal_unit') and pc.horizontal_unit is not None:
+            if not hasattr(raster, 'current_horizontal_unit') or raster.current_horizontal_unit is None or raster.current_horizontal_unit.name == "unknown":
+                raster.current_horizontal_unit = pc.horizontal_unit
+                raster.original_horizontal_unit = pc.horizontal_unit
+                raster.current_horizontal_units = getattr(pc, 'horizontal_units', pc.horizontal_unit.display_name)
+                raster.original_horizontal_units = getattr(pc, 'horizontal_units', pc.horizontal_unit.display_name)
+
     # =========================================================================
     # Comparison Methods
     # =========================================================================
@@ -2097,9 +2145,9 @@ class PointCloudPair:
             **dem2_kwargs,
         )
         
-        # Copy epoch and CRS info to DEMs
-        dem1.epoch = getattr(pc1_source, 'epoch', None)
-        dem2.epoch = getattr(self.pc2, 'epoch', None)
+        # Copy all metadata from point clouds to DEMs
+        self._copy_pc_metadata_to_raster(dem1, pc1_source)
+        self._copy_pc_metadata_to_raster(dem2, self.pc2)
 
         if verbose:
             print(f"\nDEM1: {out1}", file=sys.stderr)
@@ -2586,21 +2634,9 @@ class PointCloudPair:
             **dem_kwargs,
         )
 
-        # Copy metadata from source point clouds to rasters
-        raster_dem1.epoch = getattr(pc1_source, 'epoch', None)
-        raster_dem2.epoch = getattr(pc2_source, 'epoch', None)
-
-        # Copy geoid model
-        raster_dem1.current_geoid_model = getattr(pc1_source, 'geoid_model', None)
-        raster_dem1.original_geoid_model = getattr(pc1_source, 'geoid_model', None)
-        raster_dem2.current_geoid_model = getattr(pc2_source, 'geoid_model', None)
-        raster_dem2.original_geoid_model = getattr(pc2_source, 'geoid_model', None)
-
-        # Copy vertical CRS
-        raster_dem1.current_vertical_crs = getattr(pc1_source, 'current_vertical_crs', None)
-        raster_dem1.original_vertical_crs = getattr(pc1_source, 'original_vertical_crs', None)
-        raster_dem2.current_vertical_crs = getattr(pc2_source, 'current_vertical_crs', None)
-        raster_dem2.original_vertical_crs = getattr(pc2_source, 'original_vertical_crs', None)
+        # Copy all metadata from source point clouds to rasters
+        self._copy_pc_metadata_to_raster(raster_dem1, pc1_source)
+        self._copy_pc_metadata_to_raster(raster_dem2, pc2_source)
 
         if verbose:
             print(f"\nDEM1: {out1}", file=sys.stderr)
@@ -2643,150 +2679,6 @@ class PointCloudPair:
     def compute_dsm_difference(self, **kwargs) -> Dict[str, Any]:
         """Compute DSM-based difference. Convenience wrapper."""
         return self.compute_2d_difference(dem_type="dsm", **kwargs)
-
-    def compute_mixed_2d_difference(
-        self,
-        dem_type_pc1: str = "dtm",
-        dem_type_pc2: str = "dsm",
-        resolution: float = 1.0,
-        interpolation: str = "idw",
-        classifications_pc1: Optional[Union[str, List[int], Set[int]]] = "auto",
-        classifications_pc2: Optional[Union[str, List[int], Set[int]]] = "auto",
-        transform_first: bool = True,
-        use_transformed: bool = True,
-        output_dir: Optional[str] = None,
-        overwrite: bool = True,
-        verbose: bool = True,
-        **dem_kwargs,
-    ) -> Dict[str, Any]:
-        """
-        Compute 2D difference with different DEM types for each cloud.
-
-        This method allows mixing DTM and DSM between the compare and reference
-        clouds. Useful for scenarios like:
-        - DTM from newer survey vs DSM from older survey (vegetation change)
-        - DSM from drone vs DTM from lidar (canopy height estimation)
-
-        Parameters
-        ----------
-        dem_type_pc1 : str, {"dtm", "dsm"}, default "dtm"
-            DEM type for pc1 (compare cloud). Only used when classifications_pc1="auto".
-        dem_type_pc2 : str, {"dtm", "dsm"}, default "dsm"
-            DEM type for pc2 (reference cloud). Only used when classifications_pc2="auto".
-        resolution : float
-            DEM resolution in map units
-        interpolation : str
-            DEM interpolation method
-        classifications_pc1 : str, list, or set, default "auto"
-            Classification filter for pc1. "auto" uses dem_type_pc1.
-        classifications_pc2 : str, list, or set, default "auto"
-            Classification filter for pc2. "auto" uses dem_type_pc2.
-        transform_first : bool
-            Transform compare DEM to match reference before differencing
-        use_transformed : bool
-            Use transformed pc1 for DEM creation
-        output_dir : str, optional
-            Directory for output files
-        overwrite : bool
-            Overwrite existing files
-        verbose : bool
-            Print progress messages
-        **dem_kwargs
-            Additional arguments for DEM creation
-
-        Returns
-        -------
-        dict
-            Results from RasterPair.compute_difference() plus metadata
-        """
-        import sys
-
-        if verbose:
-            print(f"\n{'=' * 60}", file=sys.stderr)
-            print("Computing Mixed 2D (DEM-based) Difference", file=sys.stderr)
-            print(f"{'=' * 60}", file=sys.stderr)
-            print(f"PC1 DEM type: {dem_type_pc1.upper()}", file=sys.stderr)
-            print(f"PC2 DEM type: {dem_type_pc2.upper()}", file=sys.stderr)
-
-        # Select source for pc1
-        pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
-
-        # Determine output paths
-        if output_dir is None:
-            dir1 = Path(pc1_source.filename).parent
-            dir2 = Path(self.pc2.filename).parent
-        else:
-            dir1 = dir2 = Path(output_dir)
-            dir1.mkdir(parents=True, exist_ok=True)
-
-        out1 = dir1 / f"{Path(pc1_source.filename).stem}_{dem_type_pc1}_{int(resolution)}m.tif"
-        out2 = dir2 / f"{Path(self.pc2.filename).stem}_{dem_type_pc2}_{int(resolution)}m.tif"
-
-        # Prepare classification filters
-        dem1_kwargs = dict(dem_kwargs)
-        dem2_kwargs = dict(dem_kwargs)
-
-        if classifications_pc1 != "auto":
-            dem1_kwargs["classification_filter"] = classifications_pc1
-        if classifications_pc2 != "auto":
-            dem2_kwargs["classification_filter"] = classifications_pc2
-
-        # Create DEM from pc1
-        if verbose:
-            print(f"\nCreating {dem_type_pc1.upper()} from pc1: {Path(pc1_source.filename).name}",
-                  file=sys.stderr)
-
-        dem1 = pc1_source.create_dem(
-            output_path=str(out1),
-            dem_type=dem_type_pc1,
-            resolution=resolution,
-            interpolation=interpolation,
-            **dem1_kwargs,
-        )
-
-        # Create DEM from pc2
-        if verbose:
-            print(f"Creating {dem_type_pc2.upper()} from pc2: {Path(self.pc2.filename).name}",
-                  file=sys.stderr)
-
-        dem2 = self.pc2.create_dem(
-            output_path=str(out2),
-            dem_type=dem_type_pc2,
-            resolution=resolution,
-            interpolation=interpolation,
-            **dem2_kwargs,
-        )
-
-        # Copy epoch info
-        dem1.epoch = getattr(pc1_source, 'epoch', None)
-        dem2.epoch = getattr(self.pc2, 'epoch', None)
-
-        # Create RasterPair (dem1 = compare, dem2 = reference)
-        raster_pair = RasterPair(dem1, dem2)
-
-        if verbose:
-            print("\nRasterPair comparison:", file=sys.stderr)
-            raster_pair.print_summary()
-
-        # Compute difference using RasterPair
-        result = raster_pair.compute_difference(
-            transform_first=transform_first,
-            interpolation_method="bilinear",
-            clip_to_overlap=True,
-            overwrite=overwrite,
-            verbose=verbose,
-        )
-
-        # Add point cloud context to result
-        result['dem_type_pc1'] = dem_type_pc1
-        result['dem_type_pc2'] = dem_type_pc2
-        result['dem_resolution'] = resolution
-        result['dem_interpolation'] = interpolation
-        result['pc1_file'] = self.pc1.filename
-        result['pc2_file'] = self.pc2.filename
-        result['mixed_difference'] = True
-
-        return result
 
     # =========================================================================
     # Full Pipeline Methods
@@ -2902,6 +2794,7 @@ class PointCloudPair:
             dem_type=dem_type,
             resolution=resolution,
             interpolation=interpolation,
+            skip_epoch=skip_epoch,
             use_transformed=True,
             output_dir=output_dir,
             overwrite=overwrite,
