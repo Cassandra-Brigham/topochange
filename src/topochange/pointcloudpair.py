@@ -172,6 +172,8 @@ def _load_points_from_las(
     max_points: Optional[int] = None,
     voxel_size: Optional[float] = None,
     streaming: bool = True,
+    point_filter: Optional[Union[str, List[int]]] = None,
+    crop_bounds: Optional[Tuple[float, float, float, float]] = None,
 ) -> np.ndarray:
     """
     Load XYZ points from a LAS/LAZ file using PDAL.
@@ -189,6 +191,14 @@ def _load_points_from_las(
     streaming : bool, default True
         If True and voxel_size is set, use streaming mode to process points
         in chunks. This prevents memory spikes for large point clouds.
+    point_filter : str or list of int, optional
+        Filter points by classification. Options:
+        - "ground": Keep only ground points (classification 2)
+        - "all" or None: Keep all points (default)
+        - List of ints: Keep points with these classification codes
+    crop_bounds : tuple, optional
+        Bounding box to crop points (minx, miny, maxx, maxy).
+        Applied before other filters for efficiency.
 
     Returns
     -------
@@ -198,34 +208,65 @@ def _load_points_from_las(
     import tempfile
     import os as _os
 
-    # For streaming with voxel downsampling, write to temp file first
+    # Build list of PDAL filters to apply
+    filters = []
+
+    # Crop filter (apply first for efficiency)
+    if crop_bounds is not None:
+        minx, miny, maxx, maxy = crop_bounds
+        filters.append({
+            "type": "filters.crop",
+            "bounds": f"([{minx}, {maxx}], [{miny}, {maxy}])",
+        })
+
+    # Point classification filter
+    if point_filter is not None and point_filter != "all":
+        if point_filter == "ground":
+            # Ground points are classification 2
+            filters.append({
+                "type": "filters.range",
+                "limits": "Classification[2:2]",
+            })
+        elif isinstance(point_filter, (list, tuple)):
+            # List of classification codes
+            class_expr = ",".join(
+                f"Classification[{c}:{c}]" for c in point_filter
+            )
+            filters.append({
+                "type": "filters.range",
+                "limits": class_expr,
+            })
+
+    # Voxel downsampling filter
+    if voxel_size is not None:
+        filters.append({
+            "type": "filters.voxeldownsize",
+            "cell": voxel_size,
+            "mode": "center",
+        })
+
+    # For streaming with filters, write to temp file first
     # This avoids loading all points into Python memory
-    if streaming and voxel_size is not None:
-        # Create temp file for downsampled output
+    if streaming and filters:
+        # Create temp file for filtered output
         with tempfile.NamedTemporaryFile(suffix='.las', delete=False) as tmp:
             tmp_path = tmp.name
 
         try:
-            # Pipeline: read -> voxel downsample -> write to temp file
-            downsample_spec = {
-                "pipeline": [
-                    {"type": "readers.las", "filename": str(filename)},
-                    {
-                        "type": "filters.voxeldownsize",
-                        "cell": voxel_size,
-                        "mode": "center",
-                    },
-                    {"type": "writers.las", "filename": tmp_path},
-                ]
-            }
-            pipe = pdal.Pipeline(json.dumps(downsample_spec))
+            # Pipeline: read -> filters -> write to temp file
+            pipeline_stages = [{"type": "readers.las", "filename": str(filename)}]
+            pipeline_stages.extend(filters)
+            pipeline_stages.append({"type": "writers.las", "filename": tmp_path})
+
+            filter_spec = {"pipeline": pipeline_stages}
+            pipe = pdal.Pipeline(json.dumps(filter_spec))
             # Use streaming execution - processes in chunks
             if hasattr(pipe, 'execute_streaming'):
                 pipe.execute_streaming(chunk_size=100000)
             else:
                 pipe.execute()
 
-            # Now read the (much smaller) downsampled file
+            # Now read the (much smaller) filtered file
             read_spec = {
                 "pipeline": [
                     {"type": "readers.las", "filename": tmp_path},
@@ -236,7 +277,7 @@ def _load_points_from_las(
 
             arrays = read_pipe.arrays
             if not arrays or len(arrays) == 0:
-                raise ValueError(f"No points after downsampling from {filename}")
+                raise ValueError(f"No points after filtering from {filename}")
 
             arr = arrays[0]
             points = np.column_stack([arr['X'], arr['Y'], arr['Z']]).astype(np.float64)
@@ -248,20 +289,10 @@ def _load_points_from_las(
 
     else:
         # Standard non-streaming approach
-        pipeline_spec = {
-            "pipeline": [
-                {"type": "readers.las", "filename": str(filename)},
-            ]
-        }
+        pipeline_stages = [{"type": "readers.las", "filename": str(filename)}]
+        pipeline_stages.extend(filters)
 
-        # Use voxel grid downsampling if specified
-        if voxel_size is not None:
-            pipeline_spec["pipeline"].append({
-                "type": "filters.voxeldownsize",
-                "cell": voxel_size,
-                "mode": "center",
-            })
-
+        pipeline_spec = {"pipeline": pipeline_stages}
         pipe = pdal.Pipeline(json.dumps(pipeline_spec))
         pipe.execute()
 
@@ -1378,7 +1409,7 @@ class PointCloudPair:
     
     def align_point_clouds(
         self,
-        method: str = "vgicp",
+        method: str = "gicp",
         downsample_resolution: Optional[float] = None,
         max_correspondence_distance: float = 1.0,
         max_iterations: int = 50,
@@ -1389,13 +1420,15 @@ class PointCloudPair:
         overwrite: bool = True,
         verbose: bool = True,
         initial_voxel_size: Optional[float] = None,
-        max_points: Optional[int] = 2_000_000,
-        auto_downsample: bool = True,
+        max_points: Optional[int] = None,
+        auto_downsample: bool = False,
         target_points: int = 2_000_000,
         source_cloud: Optional[PointCloud] = None,
         target_cloud: Optional[PointCloud] = None,
         alignment_buffer: float = 10.0,
         use_cropped_clouds: bool = False,
+        point_filter: Optional[Union[str, List[int]]] = "ground",
+        alignment_box_size: Optional[Tuple[float, float]] = None,
     ) -> Dict[str, Any]:
         """
         Align pc1 to pc2 using ICP registration via small_gicp.
@@ -1452,6 +1485,16 @@ class PointCloudPair:
             If True, automatically crop clouds before alignment:
             - Compare cloud (pc1) cropped to Area B (overlap + buffer)
             - Reference cloud (pc2) cropped to Area A (overlap only)
+        point_filter : str or list of int, default "ground"
+            Filter points by classification for alignment. Options:
+            - "ground": Use only ground points (classification 2) - recommended
+            - "all" or None: Use all points
+            - List of ints: Use points with these classification codes
+        alignment_box_size : tuple of (width, height), optional
+            If specified, restrict alignment to a box of this size (in meters)
+            centered on the overlap centroid. Useful for memory-constrained
+            environments like Colab. Example: (200, 200) for a 200x200m box.
+            If None (default), uses the full overlap area.
         """
         if not _has_small_gicp():
             raise ImportError(
@@ -1588,6 +1631,34 @@ class PointCloudPair:
                 print(f"Initial voxel downsampling: {load_voxel_size} m", file=sys.stderr)
             if max_points:
                 print(f"Max points per cloud: {max_points:,}", file=sys.stderr)
+            if point_filter:
+                print(f"Point filter: {point_filter}", file=sys.stderr)
+
+        # =========================================================================
+        # Compute crop bounds if alignment_box_size is specified
+        # =========================================================================
+        crop_bounds = None
+        if alignment_box_size is not None:
+            # Get overlap centroid to center the box
+            overlap_info = self.compute_overlap_polygon(use_transformed=True)
+            if overlap_info['has_overlap']:
+                centroid = overlap_info['overlap_polygon'].centroid
+                box_width, box_height = alignment_box_size
+                half_w, half_h = box_width / 2, box_height / 2
+                crop_bounds = (
+                    centroid.x - half_w,  # minx
+                    centroid.y - half_h,  # miny
+                    centroid.x + half_w,  # maxx
+                    centroid.y + half_h,  # maxy
+                )
+                if verbose:
+                    print(f"Alignment box: {box_width}x{box_height}m centered at "
+                          f"({centroid.x:.1f}, {centroid.y:.1f})", file=sys.stderr)
+            else:
+                import warnings
+                warnings.warn(
+                    "No overlap found - cannot compute alignment box. Using full area."
+                )
 
         # Load points with optional downsampling for memory efficiency
         if verbose:
@@ -1597,6 +1668,8 @@ class PointCloudPair:
             source_pc.filename,
             max_points=max_points,
             voxel_size=load_voxel_size,
+            point_filter=point_filter,
+            crop_bounds=crop_bounds,
         )
 
         if verbose:
@@ -1606,6 +1679,8 @@ class PointCloudPair:
             target_pc.filename,
             max_points=max_points,
             voxel_size=load_voxel_size,
+            point_filter=point_filter,
+            crop_bounds=crop_bounds,
         )
 
         if verbose:
@@ -2451,6 +2526,7 @@ class PointCloudPair:
         overwrite: bool = False,
         skip_epoch: bool = False,
         verbose: bool = True,
+        alignment_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Auto-prepare point clouds for differencing based on dem1 tier.
@@ -2480,6 +2556,10 @@ class PointCloudPair:
             or you want faster processing.
         verbose : bool, default True
             Print progress messages.
+        alignment_kwargs : dict, optional
+            Additional keyword arguments for align_point_clouds(). Useful for
+            environment-specific settings (e.g., Colab with limited memory).
+            Example: {"target_points": 500_000, "max_correspondence_distance": 1.0}
         """
         import sys
 
@@ -2617,15 +2697,21 @@ class PointCloudPair:
             else:
                 if verbose:
                     print(f"\n--- Auto-preparing: ICP alignment ---", file=sys.stderr)
-                self.align_point_clouds(
-                    method="vgicp",
-                    auto_downsample=True,
-                    target_points=2_000_000,
-                    use_cropped_clouds=True,
-                    output_path=str(aligned_path),
-                    overwrite=overwrite,
-                    verbose=verbose,
-                )
+                # Merge default alignment settings with any user-provided kwargs
+                # Defaults: gicp method, ground points, no downsampling, full area
+                align_params = {
+                    "method": "gicp",
+                    "point_filter": "ground",
+                    "auto_downsample": False,
+                    "alignment_box_size": None,  # Use full overlap area
+                    "use_cropped_clouds": True,
+                    "output_path": str(aligned_path),
+                    "overwrite": overwrite,
+                    "verbose": verbose,
+                }
+                if alignment_kwargs:
+                    align_params.update(alignment_kwargs)
+                self.align_point_clouds(**align_params)
 
     def _resolve_pc1_source(self, dem1_option: str) -> Tuple[PointCloud, str]:
         """
@@ -2753,6 +2839,7 @@ class PointCloudPair:
         verbose: bool = True,
         auto_prepare: bool = True,
         interior_buffer: float = 10.0,
+        alignment_kwargs: Optional[Dict[str, Any]] = None,
         **dem_kwargs,
     ) -> Dict[str, Any]:
         """
@@ -2816,6 +2903,11 @@ class PointCloudPair:
         interior_buffer : float, default 10.0
             Buffer distance (meters) for cropping compare cloud when using
             aligned tiers. Only used when auto_prepare=True.
+        alignment_kwargs : dict, optional
+            Additional keyword arguments for align_point_clouds() when using
+            aligned tiers with auto_prepare=True. Useful for environment-specific
+            settings (e.g., Colab with limited memory). Example:
+            {"target_points": 500_000, "max_correspondence_distance": 1.0}
         **dem_kwargs
             Additional arguments for DEM creation
 
@@ -2858,6 +2950,16 @@ class PointCloudPair:
         ...     overwrite=False,  # Will load existing files if found
         ... )
 
+        # Colab/low-memory environment with custom alignment settings
+        >>> result = pc_pair.compute_2d_difference(
+        ...     dem1="dtm_transformed_aligned",
+        ...     dem2="dtm",
+        ...     alignment_kwargs={
+        ...         "target_points": 500_000,  # Fewer points for memory
+        ...         "max_correspondence_distance": 1.0,
+        ...     },
+        ... )
+
         # Legacy usage (deprecated but still supported)
         >>> result = pc_pair.compute_2d_difference(
         ...     dem_type="dtm",
@@ -2880,6 +2982,7 @@ class PointCloudPair:
                 overwrite=overwrite,
                 skip_epoch=skip_epoch,
                 verbose=verbose,
+                alignment_kwargs=alignment_kwargs,
             )
 
         # Resolve dem1 and dem2 sources
