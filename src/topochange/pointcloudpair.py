@@ -918,6 +918,7 @@ class PointCloudPair:
         use_transformed: bool = True,
         target_crs: Optional[Any] = None,
         interior_buffer: Optional[float] = None,
+        use_true_extent: bool = True,
         overwrite: bool = True,
         verbose: bool = True,
     ) -> Tuple[PointCloud, PointCloud]:
@@ -944,6 +945,11 @@ class PointCloudPair:
             distance (in meters). This ensures the compare cloud is smaller on all
             sides than the reference, which is useful for alignment. The reference
             cloud still uses the full intersection polygon.
+        use_true_extent : bool, default True
+            If True and interior_buffer is specified, compute the true data footprint
+            of the reference cloud using hexbin instead of bounding box. This is slower
+            but ensures the buffer is applied to actual data boundaries, not the
+            rectangular bounding box which may extend beyond where data exists.
         overwrite : bool, default True
             Whether to overwrite existing output files.
         verbose : bool, default True
@@ -973,6 +979,22 @@ class PointCloudPair:
 
         if pc1_poly_4326 is None or pc2_poly_4326 is None:
             raise ValueError("Point cloud outline polygons not available. Ensure from_file() was called.")
+
+        # If interior_buffer is requested and use_true_extent is True, compute true
+        # data footprint for PC2 using hexbin instead of bounding box
+        pc2_true_poly_4326 = None
+        if interior_buffer is not None and interior_buffer > 0 and use_true_extent:
+            if verbose:
+                print(f"\n--- Computing true data footprint for reference cloud ---", file=sys.stderr)
+            try:
+                from topochange.pointcloud import get_true_extent
+                _, _, pc2_true_poly_4326 = get_true_extent(self.pc2)
+                if verbose:
+                    print(f"True extent computed successfully", file=sys.stderr)
+            except Exception as e:
+                if verbose:
+                    print(f"Warning: Could not compute true extent ({e}), using bounding box", file=sys.stderr)
+                pc2_true_poly_4326 = None
 
         # Get native CRS for each point cloud (for clipping)
         pc1_native_crs_wkt = (
@@ -1018,12 +1040,24 @@ class PointCloudPair:
         pc1_overlap_frac = overlap_area / pc1_poly_common.area if pc1_poly_common.area > 0 else 0
         pc2_overlap_frac = overlap_area / pc2_poly_common.area if pc2_poly_common.area > 0 else 0
 
+        # Transform true extent polygon to common CRS if available
+        pc2_true_poly_common = None
+        if pc2_true_poly_4326 is not None:
+            if not common_crs.equals(wgs84):
+                pc2_true_poly_common = shapely_transform(transformer_to_common.transform, pc2_true_poly_4326)
+            else:
+                pc2_true_poly_common = pc2_true_poly_4326
+
         # Apply interior buffer to compare cloud's clip polygon if requested
         # This shrinks PC2's (reference) actual extent inward, ensuring PC1 is
         # fully within reference coverage with a margin on all sides
         if interior_buffer is not None and interior_buffer > 0:
+            # Use true extent polygon if available, otherwise fall back to bounding box
+            pc2_for_buffer = pc2_true_poly_common if pc2_true_poly_common is not None else pc2_poly_common
+            using_true_extent = pc2_true_poly_common is not None
+
             # Shrink PC2's actual boundary inward by the buffer distance
-            pc2_shrunk = pc2_poly_common.buffer(-interior_buffer)
+            pc2_shrunk = pc2_for_buffer.buffer(-interior_buffer)
             if pc2_shrunk.is_empty:
                 raise ValueError(
                     f"Interior buffer of {interior_buffer}m resulted in empty polygon "
@@ -1041,6 +1075,7 @@ class PointCloudPair:
         else:
             pc1_clip_poly_common = overlap_poly_common
             pc1_buffered_area = None
+            using_true_extent = False
 
         # Reference cloud uses full intersection polygon (clips to where both overlap)
         pc2_clip_poly_common = overlap_poly_common
@@ -1052,13 +1087,17 @@ class PointCloudPair:
             print(f"Common CRS: {common_crs.to_epsg() or common_crs.name}", file=sys.stderr)
             print(f"PC1 native CRS: {pc1_native_crs_wkt[:80] if pc1_native_crs_wkt else 'None'}...", file=sys.stderr)
             print(f"PC2 native CRS: {pc2_native_crs_wkt[:80] if pc2_native_crs_wkt else 'None'}...", file=sys.stderr)
-            print(f"PC1 area (common CRS): {pc1_poly_common.area:,.0f} m²", file=sys.stderr)
-            print(f"PC2 area (common CRS): {pc2_poly_common.area:,.0f} m²", file=sys.stderr)
+            print(f"PC1 area (bounding box): {pc1_poly_common.area:,.0f} m²", file=sys.stderr)
+            print(f"PC2 area (bounding box): {pc2_poly_common.area:,.0f} m²", file=sys.stderr)
+            if pc2_true_poly_common is not None:
+                print(f"PC2 area (true extent): {pc2_true_poly_common.area:,.0f} m²", file=sys.stderr)
             print(f"Intersection area: {overlap_area:,.0f} m²", file=sys.stderr)
             print(f"Overlap fraction pc1: {pc1_overlap_frac:.1%}", file=sys.stderr)
             print(f"Overlap fraction pc2: {pc2_overlap_frac:.1%}", file=sys.stderr)
             if interior_buffer is not None and interior_buffer > 0:
                 print(f"Interior buffer for compare: {interior_buffer} m", file=sys.stderr)
+                print(f"Using true extent for buffer: {using_true_extent}", file=sys.stderr)
+                print(f"PC2 extent used for buffer: {pc2_for_buffer.area:,.0f} m²", file=sys.stderr)
                 print(f"PC2 shrunk area: {pc2_shrunk.area:,.0f} m²", file=sys.stderr)
                 print(f"PC1 clip poly area (PC2 shrunk ∩ PC1): {pc1_clip_poly_common.area:,.0f} m²", file=sys.stderr)
                 print(f"PC2 clip poly area (full intersection): {pc2_clip_poly_common.area:,.0f} m²", file=sys.stderr)

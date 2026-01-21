@@ -142,6 +142,92 @@ def _reproject_poly(poly: Polygon, src_epsg: Union[str, int], dst_epsg: Union[st
     return transform(lambda x, y, z=None: tf.transform(x, y), poly)
 
 
+def get_true_extent(pc: "PointCloud") -> Tuple[int, Polygon, Polygon]:
+    """
+    Extract point cloud true data boundary using hexbin filter.
+
+    This computes the actual data footprint (not just bounding box) by using
+    PDAL's hexbin filter which creates a polygon from occupied hex cells.
+
+    Parameters
+    ----------
+    pc : PointCloud
+        Point cloud object with filename attribute.
+
+    Returns
+    -------
+    tuple[int, Polygon, Polygon]
+        (epsg_utm, poly_utm, poly_4326) - UTM EPSG code, polygon in UTM,
+        and polygon in WGS84.
+
+    Raises
+    ------
+    RuntimeError
+        If true extent cannot be computed.
+    """
+    import json
+    import pdal
+    from pyproj import CRS as CRS_
+    from shapely import wkt
+
+    # Try hexbin approach (streaming-compatible, gives true data polygon)
+    try:
+        hexbin_pipe = pdal.Pipeline(
+            json.dumps(
+                {
+                    "pipeline": [
+                        {"type": "readers.las", "filename": str(pc.filename)},
+                        {
+                            "type": "filters.hexbin",
+                            "edge_size": 10,  # 10m hex cells
+                            "threshold": 1,   # Include cells with at least 1 point
+                        },
+                    ]
+                }
+            )
+        )
+        # Use streaming execution if available
+        if hasattr(hexbin_pipe, 'execute_streaming_metadata'):
+            hexbin_pipe.execute_streaming_metadata(chunk_size=100000)
+        elif hasattr(hexbin_pipe, 'execute_metadata_only'):
+            hexbin_pipe.execute_metadata_only()
+        else:
+            hexbin_pipe.execute()
+
+        hexbin_md = hexbin_pipe.metadata.get("metadata", {}).get("filters.hexbin", {})
+        boundary_wkt = hexbin_md.get("boundary")
+
+        if boundary_wkt:
+            # Parse WKT boundary (in native CRS)
+            poly_native = wkt.loads(boundary_wkt)
+
+            # Transform to EPSG:4326
+            src_crs_wkt = (
+                getattr(pc, "current_horizontal_crs", None)
+                or getattr(pc, "original_horizontal_crs", None)
+                or getattr(pc, "current_compound_crs", None)
+                or getattr(pc, "original_compound_crs", None)
+            )
+
+            if src_crs_wkt:
+                src_crs = CRS_.from_user_input(src_crs_wkt)
+                dst_crs = CRS_.from_epsg(4326)
+                tf = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
+                poly_4326 = transform(lambda x, y, z=None: tf.transform(x, y), poly_native)
+            else:
+                poly_4326 = poly_native
+
+            if not poly_4326.is_empty:
+                epsg_utm = _determine_utm_epsg(poly_4326)
+                poly_utm = _reproject_poly(poly_4326, 4326, epsg_utm)
+                return epsg_utm, poly_utm, poly_4326
+
+    except Exception as e:
+        raise RuntimeError(f"Could not compute true extent using hexbin: {e}")
+
+    raise RuntimeError("Hexbin filter did not return a boundary polygon")
+
+
 @dataclass
 class PointCloud:
     """
