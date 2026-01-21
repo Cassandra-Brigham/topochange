@@ -2449,6 +2449,7 @@ class PointCloudPair:
         interior_buffer: float = 10.0,
         output_dir: Optional[str] = None,
         overwrite: bool = False,
+        skip_epoch: bool = False,
         verbose: bool = True,
     ) -> None:
         """
@@ -2473,6 +2474,10 @@ class PointCloudPair:
             Output directory for intermediate files. If None, uses pc1's directory.
         overwrite : bool, default False
             If False, reuse existing files on disk. If True, reprocess everything.
+        skip_epoch : bool, default False
+            If True, skip epoch transformation even for dtm_transformed and
+            dtm_transformed_aligned tiers. Useful when epoch difference is negligible
+            or you want faster processing.
         verbose : bool, default True
             Print progress messages.
         """
@@ -2541,9 +2546,9 @@ class PointCloudPair:
                 else:
                     # Run transformation
                     if verbose:
-                        print(f"\n--- Auto-preparing: Full transformation ---", file=sys.stderr)
+                        print(f"\n--- Auto-preparing: Full transformation (skip_epoch={skip_epoch}) ---", file=sys.stderr)
                     self.transform_compare_to_match_reference(
-                        skip_epoch=False,
+                        skip_epoch=skip_epoch,
                         skip_vertical=False,
                         skip_horizontal=False,
                         overwrite=overwrite,
@@ -2789,9 +2794,10 @@ class PointCloudPair:
             Transform compare DEM to match reference before differencing.
             Set to False when using unaligned dem1 options to preserve raw differences.
         skip_epoch : bool
-            If True, skip epoch transformation during differencing. Use this when
-            you've already decided not to do epoch transformation (e.g., when you
-            called transform_compare_to_match_reference with skip_epoch=True).
+            If True, skip epoch transformation at both point cloud and raster levels.
+            When auto_prepare=True, this is passed to transform_compare_to_match_reference()
+            so epoch transformation is skipped for dtm_transformed and dtm_transformed_aligned
+            tiers. Useful when epoch difference is negligible or for faster processing.
         use_transformed : bool
             Use transformed pc1 for DEM creation. Only used if dem1 is not specified.
             Deprecated: Use dem1 parameter instead.
@@ -2872,6 +2878,7 @@ class PointCloudPair:
                 interior_buffer=interior_buffer,
                 output_dir=output_dir,
                 overwrite=overwrite,
+                skip_epoch=skip_epoch,
                 verbose=verbose,
             )
 
