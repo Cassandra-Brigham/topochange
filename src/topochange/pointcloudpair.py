@@ -2657,6 +2657,15 @@ class PointCloudPair:
                     print(f"  PC2: {pc2_cropped_path.name}", file=sys.stderr)
                 self._pc1_cropped = PointCloud(str(cropped_path))
                 self._pc1_cropped.from_file()
+                # Copy metadata from transformed source or reference
+                # For transformed/aligned tiers, epoch should match reference (coordinates are transformed)
+                if is_transformed_tier or is_aligned_tier:
+                    self._pc1_cropped.add_metadata(
+                        horizontal_CRS=getattr(self.pc2, 'current_horizontal_crs', None) or getattr(self.pc2, 'original_horizontal_crs', None),
+                        vertical_CRS=getattr(self.pc2, 'current_vertical_crs', None) or getattr(self.pc2, 'original_vertical_crs', None),
+                        geoid_model=getattr(self.pc2, 'geoid_model', None),
+                        epoch=getattr(self.pc2, 'epoch', None),
+                    )
                 self._pc1_cropped_original = self._pc1_cropped  # Preserve for later
                 self._pc2_cropped = PointCloud(str(pc2_cropped_path))
                 self._pc2_cropped.from_file()
@@ -2683,15 +2692,13 @@ class PointCloudPair:
                     print(f"\n--- Loading existing aligned cloud: {aligned_path.name} ---", file=sys.stderr)
                 aligned_pc = PointCloud(str(aligned_path))
                 aligned_pc.from_file()
-                # Copy metadata from source
-                if self._pc1_cropped:
-                    aligned_pc.add_metadata(
-                        compound_CRS=self._pc1_cropped.current_compound_crs or self._pc1_cropped.original_compound_crs,
-                        horizontal_CRS=self._pc1_cropped.current_horizontal_crs or self._pc1_cropped.original_horizontal_crs,
-                        vertical_CRS=self._pc1_cropped.current_vertical_crs or self._pc1_cropped.original_vertical_crs,
-                        geoid_model=self._pc1_cropped.geoid_model,
-                        epoch=self._pc1_cropped.epoch,
-                    )
+                # Copy metadata from reference (pc2) since aligned cloud coordinates are in reference frame
+                aligned_pc.add_metadata(
+                    horizontal_CRS=getattr(self.pc2, 'current_horizontal_crs', None) or getattr(self.pc2, 'original_horizontal_crs', None),
+                    vertical_CRS=getattr(self.pc2, 'current_vertical_crs', None) or getattr(self.pc2, 'original_vertical_crs', None),
+                    geoid_model=getattr(self.pc2, 'geoid_model', None),
+                    epoch=getattr(self.pc2, 'epoch', None),
+                )
                 # Update state
                 self._pc1_cropped = aligned_pc
                 self._pc1_transformed = aligned_pc
