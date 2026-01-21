@@ -261,7 +261,7 @@ class PointCloud:
     # -------------------------------------------------------------------------
     # Metadata loading
     # -------------------------------------------------------------------------
-    def from_file(self, lightweight: bool = False, bbox_only: bool = True) -> None:
+    def from_file(self, lightweight: bool = False, bbox_only: bool = False) -> None:
         """
         Load point cloud from LAS/LAZ file with metadata extraction.
 
@@ -278,11 +278,11 @@ class PointCloud:
             environments like Google Colab, or when you only need basic
             CRS and bounds information.
 
-        bbox_only : bool, default True
+        bbox_only : bool, default False
             Only applies when lightweight=True.
             - If True: Use simple bounding box for polygon (fastest, no point loading)
             - If False: Use hexbin filter for true data footprint polygon
-              (loads points but more accurate boundary)
+              (more accurate boundary, captures actual data extent)
 
         Optimized for memory efficiency, especially in Google Colab:
         - Uses metadata-only execution where possible (skips array serialization)
