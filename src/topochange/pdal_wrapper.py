@@ -78,16 +78,19 @@ class PipelineWrapper:
     Mimics the pdal.Pipeline API for compatibility with existing code.
     """
 
-    def __init__(self, pipeline_json: str):
+    def __init__(self, pipeline_json: str, arrays: Optional[List[np.ndarray]] = None):
         """
         Initialize pipeline with JSON string.
 
         Args:
             pipeline_json: JSON string defining the PDAL pipeline
+            arrays: Optional list of numpy structured arrays to use as input
+                   (for pipelines that start with a writer instead of reader)
         """
         self.pipeline_json = pipeline_json
+        self._input_arrays = arrays  # Arrays to pass TO the pipeline
         self._count = 0
-        self._arrays: List[np.ndarray] = []
+        self._arrays: List[np.ndarray] = []  # Arrays returned FROM the pipeline
         self._metadata: Dict[str, Any] = {}
         self._log = ""
 
@@ -127,7 +130,10 @@ class PipelineWrapper:
 
     def _execute_native(self) -> int:
         """Execute using native pdal module."""
-        pipeline = _native_pdal.Pipeline(self.pipeline_json)
+        if self._input_arrays is not None:
+            pipeline = _native_pdal.Pipeline(self.pipeline_json, arrays=self._input_arrays)
+        else:
+            pipeline = _native_pdal.Pipeline(self.pipeline_json)
         self._count = pipeline.execute()
         self._arrays = list(pipeline.arrays)
         self._metadata = pipeline.metadata
@@ -136,7 +142,10 @@ class PipelineWrapper:
 
     def _execute_streaming_native(self, chunk_size: int) -> int:
         """Execute streaming using native pdal module."""
-        pipeline = _native_pdal.Pipeline(self.pipeline_json)
+        if self._input_arrays is not None:
+            pipeline = _native_pdal.Pipeline(self.pipeline_json, arrays=self._input_arrays)
+        else:
+            pipeline = _native_pdal.Pipeline(self.pipeline_json)
         self._count = pipeline.execute_streaming(chunk_size=chunk_size)
         self._arrays = list(pipeline.arrays) if hasattr(pipeline, 'arrays') else []
         self._metadata = pipeline.metadata if hasattr(pipeline, 'metadata') else {}
@@ -144,6 +153,10 @@ class PipelineWrapper:
 
     def _execute_subprocess(self) -> int:
         """Execute using subprocess with conda's Python."""
+        # If we have input arrays, we need to serialize them and pass to subprocess
+        if self._input_arrays is not None:
+            return self._execute_subprocess_with_arrays()
+
         # Create a temporary script that runs the pipeline and outputs results
         script = f'''
 import pdal
@@ -204,6 +217,102 @@ print(json.dumps(result))
                 self._arrays.append(arr)
 
         return self._count
+
+    def _execute_subprocess_with_arrays(self) -> int:
+        """Execute using subprocess with input arrays passed via temp file."""
+        # Save input arrays to a temporary numpy file to pass to subprocess
+        with tempfile.NamedTemporaryFile(suffix='.npz', delete=False) as tmp:
+            arrays_file = tmp.name
+
+        try:
+            # Save each input array with metadata about its dtype
+            save_dict = {}
+            for i, arr in enumerate(self._input_arrays):
+                # Save the array data
+                for name in arr.dtype.names:
+                    save_dict[f'arr{i}_{name}'] = arr[name]
+                # Save dtype info as string
+                save_dict[f'arr{i}_dtype'] = str(arr.dtype)
+
+            save_dict['num_arrays'] = np.array([len(self._input_arrays)])
+            np.savez(arrays_file, **save_dict)
+
+            # Create script that loads arrays and runs pipeline
+            script = f'''
+import pdal
+import json
+import numpy as np
+
+# Load input arrays from temp file
+data = np.load({repr(arrays_file)}, allow_pickle=True)
+num_arrays = int(data['num_arrays'][0])
+
+input_arrays = []
+for i in range(num_arrays):
+    # Reconstruct structured array
+    dtype_str = str(data[f'arr{{i}}_dtype'])
+    # Parse dtype string to get field names
+    import re
+    fields = re.findall(r"\\('(\\w+)'", dtype_str)
+
+    # Get first field to determine length
+    first_field = data[f'arr{{i}}_{{fields[0]}}']
+    n_points = len(first_field)
+
+    # Build dtype from actual data
+    dtype_list = []
+    for name in fields:
+        arr_data = data[f'arr{{i}}_{{name}}']
+        dtype_list.append((name, arr_data.dtype))
+
+    arr = np.empty(n_points, dtype=dtype_list)
+    for name in fields:
+        arr[name] = data[f'arr{{i}}_{{name}}']
+    input_arrays.append(arr)
+
+pipeline_json = {repr(self.pipeline_json)}
+pipeline = pdal.Pipeline(pipeline_json, arrays=input_arrays)
+count = pipeline.execute()
+
+# Get output arrays (usually empty for writers)
+arrays_data = []
+for arr in pipeline.arrays:
+    arr_dict = {{name: arr[name].tolist() for name in arr.dtype.names}}
+    arrays_data.append(arr_dict)
+
+result = {{
+    "count": count,
+    "arrays": arrays_data,
+    "metadata": pipeline.metadata,
+    "log": getattr(pipeline, 'log', '')
+}}
+print(json.dumps(result))
+'''
+
+            result = subprocess.run(
+                [CONDA_PYTHON, '-c', script],
+                capture_output=True, text=True, env=_get_conda_env()
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(f"PDAL pipeline failed: {result.stderr}")
+
+            try:
+                data = json.loads(result.stdout)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"Failed to parse PDAL output: {e}\nOutput: {result.stdout}\nStderr: {result.stderr}")
+
+            self._count = data['count']
+            self._metadata = data['metadata']
+            self._log = data.get('log', '')
+            self._arrays = []
+
+            return self._count
+
+        finally:
+            # Clean up temp file
+            if os.path.exists(arrays_file):
+                os.remove(arrays_file)
 
     def _execute_streaming_subprocess(self, chunk_size: int) -> int:
         """Execute streaming using subprocess with conda's Python."""
@@ -409,17 +518,18 @@ class PdalModule:
 
         return self._version
 
-    def Pipeline(self, pipeline_json: str) -> PipelineWrapper:
+    def Pipeline(self, pipeline_json: str, arrays: Optional[List[np.ndarray]] = None) -> PipelineWrapper:
         """
         Create a new Pipeline.
 
         Args:
             pipeline_json: JSON string defining the PDAL pipeline
+            arrays: Optional list of numpy structured arrays to use as input
 
         Returns:
             PipelineWrapper instance
         """
-        return PipelineWrapper(pipeline_json)
+        return PipelineWrapper(pipeline_json, arrays=arrays)
 
 
 # Create the module-level instance
