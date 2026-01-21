@@ -58,13 +58,41 @@ def _run_pdal_pipeline(steps, arrays=None, need_arrays=None):
     Returns:
         Executed pipeline object
     """
+    # Filters that don't support PDAL streaming mode
+    NON_STREAMING_FILTERS = {
+        "filters.outlier",
+        "filters.smrf",
+        "filters.pmf",
+        "filters.elm",
+        "filters.csf",
+        "filters.approximatecoplanar",
+        "filters.cluster",
+        "filters.covariancefeatures",
+        "filters.eigenvalues",
+        "filters.estimaterank",
+        "filters.hag_dem",
+        "filters.hag_delaunay",
+        "filters.hag_nn",
+        "filters.iqr",
+        "filters.lloydkmeans",
+        "filters.miniball",
+        "filters.neighborclassifier",
+        "filters.nndistance",
+        "filters.normal",
+        "filters.planefit",
+        "filters.poisson",
+        "filters.radialdensity",
+        "filters.reciprocity",
+        "filters.skewnessbalancing",
+    }
+
     pipeline_json = json.dumps({"pipeline": steps})
     if arrays is not None:
         pipeline = pdal.Pipeline(pipeline_json, arrays=arrays)
     else:
         pipeline = pdal.Pipeline(pipeline_json)
 
-    # Auto-detect if we need arrays returned
+    # Auto-detect if we need arrays returned or must use standard execute
     if need_arrays is None:
         # If pipeline ends with a writer, we don't need arrays back
         has_writer = any(
@@ -73,7 +101,14 @@ def _run_pdal_pipeline(steps, arrays=None, need_arrays=None):
         )
         need_arrays = not has_writer
 
-    if need_arrays:
+    # Check if any filter doesn't support streaming
+    has_non_streaming_filter = any(
+        step.get("type", "") in NON_STREAMING_FILTERS
+        for step in steps
+    )
+
+    if need_arrays or has_non_streaming_filter:
+        # Must use standard execute
         pipeline.execute()
     else:
         # Use streaming for file-to-file operations (memory efficient)
