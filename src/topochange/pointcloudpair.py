@@ -1019,21 +1019,30 @@ class PointCloudPair:
         pc2_overlap_frac = overlap_area / pc2_poly_common.area if pc2_poly_common.area > 0 else 0
 
         # Apply interior buffer to compare cloud's clip polygon if requested
-        # This shrinks the compare polygon inward so it's smaller than reference on all sides
+        # This shrinks PC2's (reference) actual extent inward, ensuring PC1 is
+        # fully within reference coverage with a margin on all sides
         if interior_buffer is not None and interior_buffer > 0:
-            # Negative buffer shrinks the polygon inward
-            pc1_clip_poly_common = overlap_poly_common.buffer(-interior_buffer)
+            # Shrink PC2's actual boundary inward by the buffer distance
+            pc2_shrunk = pc2_poly_common.buffer(-interior_buffer)
+            if pc2_shrunk.is_empty:
+                raise ValueError(
+                    f"Interior buffer of {interior_buffer}m resulted in empty polygon "
+                    "when applied to reference extent. Try a smaller buffer value."
+                )
+            # PC1 clip polygon = PC2's shrunk boundary intersected with PC1's extent
+            # This ensures PC1 is 10m inside PC2's boundary, and only where PC1 has data
+            pc1_clip_poly_common = pc2_shrunk.intersection(pc1_poly_common)
             if pc1_clip_poly_common.is_empty:
                 raise ValueError(
-                    f"Interior buffer of {interior_buffer}m resulted in empty polygon. "
-                    "Try a smaller buffer value."
+                    f"Interior buffer of {interior_buffer}m resulted in no overlap "
+                    "between shrunk reference and compare extents. Try a smaller buffer value."
                 )
             pc1_buffered_area = pc1_clip_poly_common.area
         else:
             pc1_clip_poly_common = overlap_poly_common
             pc1_buffered_area = None
 
-        # Reference cloud always uses full intersection polygon
+        # Reference cloud uses full intersection polygon (clips to where both overlap)
         pc2_clip_poly_common = overlap_poly_common
 
         if verbose:
