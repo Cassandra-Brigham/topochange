@@ -2467,6 +2467,7 @@ class PointCloudPair:
     def _predict_output_paths(
         self,
         output_dir: Optional[str] = None,
+        skip_epoch: bool = False,
     ) -> Dict[str, Path]:
         """
         Predict output file paths for all transformation steps.
@@ -2478,6 +2479,9 @@ class PointCloudPair:
         ----------
         output_dir : str, optional
             Output directory. If None, uses same directory as pc1.
+        skip_epoch : bool, default False
+            If True, exclude epoch from the filename suffix even if epoch
+            transformation would normally be needed.
 
         Returns
         -------
@@ -2504,8 +2508,9 @@ class PointCloudPair:
         needs_epoch = 'epoch' in comparison['transformations_needed']
 
         # Build suffix for full transformation (matches transform_compare_to_match_reference)
+        # Only include epoch in suffix if needed AND not skipped
         suffix_parts = []
-        if needs_epoch and target_epoch:
+        if needs_epoch and target_epoch and not skip_epoch:
             suffix_parts.append(f"epoch{target_epoch:.2f}".replace(".", "p"))
         if needs_vertical and target_vertical_kind:
             suffix_parts.append(target_vertical_kind)
@@ -2578,8 +2583,8 @@ class PointCloudPair:
         is_transformed_tier = "transformed" in dem1 and not is_aligned_tier
         is_base_tier = not is_aligned_tier and not is_transformed_tier
 
-        # Predict output paths for existence checks
-        predicted_paths = self._predict_output_paths(output_dir=output_dir)
+        # Predict output paths for existence checks (respecting skip_epoch for naming)
+        predicted_paths = self._predict_output_paths(output_dir=output_dir, skip_epoch=skip_epoch)
 
         # Check what transformations are needed
         comparison = self.check_all_match()
