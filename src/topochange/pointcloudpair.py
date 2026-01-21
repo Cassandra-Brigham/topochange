@@ -2214,6 +2214,7 @@ class PointCloudPair:
             dem_type=dem_type,
             resolution=resolution,
             interpolation=interpolation,
+            overwrite=overwrite,
             **dem1_kwargs,
         )
 
@@ -2225,6 +2226,7 @@ class PointCloudPair:
             dem_type=dem_type,
             resolution=resolution,
             interpolation=interpolation,
+            overwrite=overwrite,
             **dem2_kwargs,
         )
         
@@ -2836,7 +2838,7 @@ class PointCloudPair:
         use_transformed: bool = True,
         output_dir: Optional[str] = None,
         diff_output_path: Optional[str] = None,
-        overwrite: bool = True,
+        overwrite: bool = False,
         verbose: bool = True,
         auto_prepare: bool = True,
         interior_buffer: float = 10.0,
@@ -3044,6 +3046,7 @@ class PointCloudPair:
             dem_type=dem1_type,
             resolution=resolution,
             interpolation=interpolation,
+            overwrite=overwrite,
             **dem_kwargs,
         )
 
@@ -3055,6 +3058,7 @@ class PointCloudPair:
             dem_type=dem2_type,
             resolution=resolution,
             interpolation=interpolation,
+            overwrite=overwrite,
             **dem_kwargs,
         )
 
@@ -3534,6 +3538,7 @@ class PointCloudPair:
                 dem_type=dt_pc2,
                 resolution=resolution,
                 interpolation=interpolation,
+                overwrite=overwrite,
                 **dem2_kwargs,
             )
             dem2.epoch = getattr(self.pc2, 'epoch', None)

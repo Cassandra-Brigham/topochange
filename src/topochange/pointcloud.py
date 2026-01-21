@@ -1451,6 +1451,7 @@ class PointCloud:
         window_size: Optional[int] = None,
         power: float = 2.0,
         radius: Optional[float] = None,
+        overwrite: bool = False,
     ) -> "Raster":
         """
         Create advanced DEM with comprehensive options.
@@ -1465,6 +1466,12 @@ class PointCloud:
         """
 
         from .raster import Raster  # local import to avoid circulars
+
+        # Caching: if output file exists and overwrite=False, load and return it
+        if os.path.exists(output_path) and not overwrite:
+            import sys
+            print(f"Loading existing DEM: {os.path.basename(str(output_path))}", file=sys.stderr)
+            return Raster.from_file(str(output_path), rtype=dem_type, metadata={})
 
         # Known interpolation keywords (not enforced, kept for reference)
         valid_interpolations = {
