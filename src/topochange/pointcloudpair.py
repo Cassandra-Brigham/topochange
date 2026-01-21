@@ -379,6 +379,7 @@ class PointCloudPair:
     _pc1_transformed: Optional[PointCloud] = field(default=None, repr=False)
     _pc1_cropped: Optional[PointCloud] = field(default=None, repr=False)
     _pc1_cropped_original: Optional[PointCloud] = field(default=None, repr=False)  # Preserved unaligned version
+    _pc1_horizontal_only: Optional[PointCloud] = field(default=None, repr=False)  # Horizontal-only transformed
     _pc2_cropped: Optional[PointCloud] = field(default=None, repr=False)
     _alignment_result: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
@@ -388,6 +389,7 @@ class PointCloudPair:
         self._pc1_transformed = None
         self._pc1_cropped = None
         self._pc1_cropped_original = None
+        self._pc1_horizontal_only = None
         self._pc2_cropped = None
         self._alignment_result = None
 
@@ -917,8 +919,13 @@ class PointCloudPair:
         from pyproj import CRS as CRS_, Transformer
         from shapely.ops import transform as shapely_transform
 
-        # Select pc1 source
-        pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
+        # Select pc1 source - check for horizontal-only first, then transformed
+        if self._pc1_horizontal_only is not None and not use_transformed:
+            pc1_source = self._pc1_horizontal_only
+        elif use_transformed and self._pc1_transformed is not None:
+            pc1_source = self._pc1_transformed
+        else:
+            pc1_source = self.pc1
 
         # Get outline polygons in WGS84 (set during from_file())
         pc1_poly_4326 = getattr(pc1_source, 'poly_4326', None)
@@ -2371,9 +2378,258 @@ class PointCloudPair:
         "dsm": "dsm",
     }
 
+    def _predict_output_paths(
+        self,
+        output_dir: Optional[str] = None,
+    ) -> Dict[str, Path]:
+        """
+        Predict output file paths for all transformation steps.
+
+        Uses the same naming conventions as the actual transformation methods
+        to enable checking for existing files before reprocessing.
+
+        Parameters
+        ----------
+        output_dir : str, optional
+            Output directory. If None, uses same directory as pc1.
+
+        Returns
+        -------
+        dict
+            Dictionary with keys: 'horizontal_only', 'transformed', 'cropped',
+            'cropped_buffered', 'aligned', 'pc2_cropped'
+        """
+        src_path = Path(self.pc1.filename)
+
+        # Determine output directory
+        if output_dir is None:
+            out_dir = src_path.parent
+        else:
+            out_dir = Path(output_dir)
+
+        # Get transformation info to build suffix
+        comparison = self.check_all_match()
+        target_epoch = getattr(self.pc2, 'epoch', None)
+        target_is_ortho = getattr(self.pc2, 'is_orthometric', None)
+        target_vertical_kind = "orth" if target_is_ortho else "ellip" if target_is_ortho is False else None
+
+        needs_horizontal = 'horizontal_crs' in comparison['transformations_needed']
+        needs_vertical = 'vertical_datum' in comparison['transformations_needed']
+        needs_epoch = 'epoch' in comparison['transformations_needed']
+
+        # Build suffix for full transformation (matches transform_compare_to_match_reference)
+        suffix_parts = []
+        if needs_epoch and target_epoch:
+            suffix_parts.append(f"epoch{target_epoch:.2f}".replace(".", "p"))
+        if needs_vertical and target_vertical_kind:
+            suffix_parts.append(target_vertical_kind)
+        if needs_horizontal:
+            suffix_parts.append("reproj")
+        full_transform_suffix = "_".join(suffix_parts) if suffix_parts else "transformed"
+
+        paths = {
+            # Horizontal-only transform
+            'horizontal_only': out_dir / (src_path.stem + "_reproj" + src_path.suffix),
+            # Full transformation
+            'transformed': out_dir / (src_path.stem + f"_{full_transform_suffix}" + src_path.suffix),
+            # Cropped (after transform) - with and without buffer
+            'cropped': out_dir / (src_path.stem + f"_{full_transform_suffix}_intersection" + src_path.suffix),
+            'cropped_buffered': out_dir / (src_path.stem + f"_{full_transform_suffix}_intersection_buffered" + src_path.suffix),
+            # Aligned
+            'aligned': out_dir / (src_path.stem + f"_{full_transform_suffix}_intersection_buffered_aligned" + src_path.suffix),
+            # Reference cropped
+            'pc2_cropped': out_dir / (Path(self.pc2.filename).stem + "_intersection" + Path(self.pc2.filename).suffix),
+        }
+
+        return paths
+
+    def _auto_prepare_for_differencing(
+        self,
+        dem1: str,
+        interior_buffer: float = 10.0,
+        output_dir: Optional[str] = None,
+        overwrite: bool = False,
+        verbose: bool = True,
+    ) -> None:
+        """
+        Auto-prepare point clouds for differencing based on dem1 tier.
+
+        This method checks if each processing step has already been done
+        (either in memory or on disk) before executing, to avoid redundant
+        computation when files from previous runs exist.
+
+        Tiers:
+        - "dtm"/"dsm": horizontal-only transform, crop to overlap
+        - "dtm_transformed"/"dsm_transformed": full transform, crop to overlap
+        - "dtm_transformed_aligned"/"dsm_transformed_aligned": full transform, crop, align
+
+        Parameters
+        ----------
+        dem1 : str
+            The dem1 option string determining the transformation tier.
+        interior_buffer : float, default 10.0
+            Buffer distance (meters) for cropping compare cloud in aligned tier.
+        output_dir : str, optional
+            Output directory for intermediate files. If None, uses pc1's directory.
+        overwrite : bool, default False
+            If False, reuse existing files on disk. If True, reprocess everything.
+        verbose : bool, default True
+            Print progress messages.
+        """
+        import sys
+
+        is_aligned_tier = "aligned" in dem1
+        is_transformed_tier = "transformed" in dem1 and not is_aligned_tier
+        is_base_tier = not is_aligned_tier and not is_transformed_tier
+
+        # Predict output paths for existence checks
+        predicted_paths = self._predict_output_paths(output_dir=output_dir)
+
+        # Check what transformations are needed
+        comparison = self.check_all_match()
+        needs_horizontal = 'horizontal_crs' in comparison['transformations_needed']
+
+        # =========================================================================
+        # Step 1: Transform compare cloud based on tier
+        # =========================================================================
+        if is_base_tier:
+            # Tier 1: Horizontal-only transform
+            if self._pc1_horizontal_only is None:
+                horizontal_path = predicted_paths['horizontal_only']
+                if not overwrite and horizontal_path.exists():
+                    # Load existing file
+                    if verbose:
+                        print(f"\n--- Loading existing horizontal-only transform: {horizontal_path.name} ---", file=sys.stderr)
+                    self._pc1_horizontal_only = PointCloud(str(horizontal_path))
+                    self._pc1_horizontal_only.from_file()
+                elif needs_horizontal:
+                    # Run transformation
+                    if verbose:
+                        print(f"\n--- Auto-preparing: Horizontal-only transform ---", file=sys.stderr)
+                    target_horiz_crs = (
+                        getattr(self.pc2, 'current_horizontal_crs', None) or
+                        getattr(self.pc2, 'original_horizontal_crs', None)
+                    )
+                    self._pc1_horizontal_only = self.pc1.warp_pointcloud(
+                        target_horizontal_crs=target_horiz_crs,
+                        output_path=str(horizontal_path),
+                        overwrite=overwrite,
+                    )
+                else:
+                    # No horizontal transform needed - use original
+                    if verbose:
+                        print(f"\n--- No horizontal transform needed, using original pc1 ---", file=sys.stderr)
+                    self._pc1_horizontal_only = self.pc1
+
+        elif is_transformed_tier or is_aligned_tier:
+            # Tier 2/3: Full transform
+            if self._pc1_transformed is None:
+                transformed_path = predicted_paths['transformed']
+                if not overwrite and transformed_path.exists():
+                    # Load existing file
+                    if verbose:
+                        print(f"\n--- Loading existing full transform: {transformed_path.name} ---", file=sys.stderr)
+                    self._pc1_transformed = PointCloud(str(transformed_path))
+                    self._pc1_transformed.from_file()
+                    # Copy metadata from reference
+                    self._pc1_transformed.add_metadata(
+                        horizontal_CRS=getattr(self.pc2, 'current_horizontal_crs', None) or getattr(self.pc2, 'original_horizontal_crs', None),
+                        vertical_CRS=getattr(self.pc2, 'current_vertical_crs', None) or getattr(self.pc2, 'original_vertical_crs', None),
+                        geoid_model=getattr(self.pc2, 'geoid_model', None),
+                        epoch=getattr(self.pc2, 'epoch', None),
+                    )
+                else:
+                    # Run transformation
+                    if verbose:
+                        print(f"\n--- Auto-preparing: Full transformation ---", file=sys.stderr)
+                    self.transform_compare_to_match_reference(
+                        skip_epoch=False,
+                        skip_vertical=False,
+                        skip_horizontal=False,
+                        overwrite=overwrite,
+                        verbose=verbose,
+                    )
+
+        # =========================================================================
+        # Step 2: Crop to overlap (needed for all tiers)
+        # =========================================================================
+        if self._pc1_cropped is None or self._pc2_cropped is None:
+            # Determine cropped path based on tier
+            if is_aligned_tier and interior_buffer:
+                cropped_path = predicted_paths['cropped_buffered']
+            else:
+                cropped_path = predicted_paths['cropped']
+            pc2_cropped_path = predicted_paths['pc2_cropped']
+
+            # Check if both cropped files exist
+            if not overwrite and cropped_path.exists() and pc2_cropped_path.exists():
+                if verbose:
+                    print(f"\n--- Loading existing cropped clouds ---", file=sys.stderr)
+                    print(f"  PC1: {cropped_path.name}", file=sys.stderr)
+                    print(f"  PC2: {pc2_cropped_path.name}", file=sys.stderr)
+                self._pc1_cropped = PointCloud(str(cropped_path))
+                self._pc1_cropped.from_file()
+                self._pc1_cropped_original = self._pc1_cropped  # Preserve for later
+                self._pc2_cropped = PointCloud(str(pc2_cropped_path))
+                self._pc2_cropped.from_file()
+            else:
+                if verbose:
+                    print(f"\n--- Auto-preparing: Crop to overlap ---", file=sys.stderr)
+                use_transformed = is_transformed_tier or is_aligned_tier
+                self.crop_to_overlap(
+                    output_dir=output_dir,
+                    use_transformed=use_transformed,
+                    interior_buffer=interior_buffer if is_aligned_tier else None,
+                    overwrite=overwrite,
+                    verbose=verbose,
+                )
+
+        # =========================================================================
+        # Step 3: Align (only for aligned tier)
+        # =========================================================================
+        if is_aligned_tier and self._alignment_result is None:
+            aligned_path = predicted_paths['aligned']
+
+            if not overwrite and aligned_path.exists():
+                if verbose:
+                    print(f"\n--- Loading existing aligned cloud: {aligned_path.name} ---", file=sys.stderr)
+                aligned_pc = PointCloud(str(aligned_path))
+                aligned_pc.from_file()
+                # Copy metadata from source
+                if self._pc1_cropped:
+                    aligned_pc.add_metadata(
+                        compound_CRS=self._pc1_cropped.current_compound_crs or self._pc1_cropped.original_compound_crs,
+                        horizontal_CRS=self._pc1_cropped.current_horizontal_crs or self._pc1_cropped.original_horizontal_crs,
+                        vertical_CRS=self._pc1_cropped.current_vertical_crs or self._pc1_cropped.original_vertical_crs,
+                        geoid_model=self._pc1_cropped.geoid_model,
+                        epoch=self._pc1_cropped.epoch,
+                    )
+                # Update state
+                self._pc1_cropped = aligned_pc
+                self._pc1_transformed = aligned_pc
+                # Mark alignment as done (minimal dict to pass checks)
+                self._alignment_result = {'loaded_from_file': str(aligned_path)}
+            else:
+                if verbose:
+                    print(f"\n--- Auto-preparing: ICP alignment ---", file=sys.stderr)
+                self.align_point_clouds(
+                    method="vgicp",
+                    auto_downsample=True,
+                    target_points=2_000_000,
+                    use_cropped_clouds=True,
+                    output_path=str(aligned_path),
+                    overwrite=overwrite,
+                    verbose=verbose,
+                )
+
     def _resolve_pc1_source(self, dem1_option: str) -> Tuple[PointCloud, str]:
         """
         Resolve which pc1 variant to use based on dem1 option string.
+
+        Three tiers of transformation:
+        - Tier 1 ("dtm"/"dsm"): horizontal-only transformed (or original if no transform needed)
+        - Tier 2 ("dtm_transformed"/"dsm_transformed"): fully transformed (horizontal + vertical + epoch)
+        - Tier 3 ("dtm_transformed_aligned"/"dsm_transformed_aligned"): fully transformed + ICP aligned
 
         Parameters
         ----------
@@ -2397,37 +2653,54 @@ class PointCloudPair:
 
         dem_type = self._DEM1_OPTIONS[dem1_option]
 
-        # Determine which point cloud source to use
-        # Options containing "aligned" or "transformed" use the aligned/transformed version
-        # Options without these use the original cropped (unaligned) version
-        needs_aligned = "aligned" in dem1_option or "transformed" in dem1_option
+        # Tier 3: Transformed + Aligned
+        if "aligned" in dem1_option:
+            # Use aligned cloud (stored in _pc1_cropped after alignment, or _pc1_transformed)
+            if self._alignment_result is not None:
+                # Alignment was performed - use the aligned result
+                if self._pc1_cropped is not None:
+                    return self._pc1_cropped, dem_type
+                elif self._pc1_transformed is not None:
+                    return self._pc1_transformed, dem_type
+            raise ValueError(
+                f"dem1='{dem1_option}' requires alignment. "
+                "Run align_point_clouds() first or use auto_prepare=True."
+            )
 
-        if needs_aligned:
-            # Use aligned/transformed version
-            if self._pc1_transformed is not None:
+        # Tier 2: Fully Transformed (no alignment)
+        elif "transformed" in dem1_option:
+            # Use fully transformed cloud (before alignment)
+            # Check if alignment was done - if so, we need the pre-alignment transformed version
+            if self._alignment_result is not None and self._pc1_cropped_original is not None:
+                # Alignment was done - use the preserved pre-alignment cropped version
+                # This is the transformed+cropped version before ICP was applied
+                return self._pc1_cropped_original, dem_type
+            elif self._pc1_transformed is not None:
                 return self._pc1_transformed, dem_type
             elif self._pc1_cropped is not None:
-                # _pc1_cropped gets updated to aligned version after alignment
+                # _pc1_cropped might have transformed data if crop_to_overlap used use_transformed=True
                 return self._pc1_cropped, dem_type
-            else:
-                raise ValueError(
-                    f"dem1='{dem1_option}' requires an aligned/transformed point cloud, "
-                    "but no alignment has been performed. Run align_point_clouds() first, "
-                    "or use dem1='dtm' or dem1='dsm' for the unaligned version."
-                )
+            raise ValueError(
+                f"dem1='{dem1_option}' requires transformation. "
+                "Run transform_compare_to_match_reference() first or use auto_prepare=True."
+            )
+
+        # Tier 1: Horizontal-only (base dtm/dsm)
         else:
-            # Use original cropped (unaligned) version
-            if self._pc1_cropped_original is not None:
+            # Use horizontal-only transformed cloud
+            if self._pc1_horizontal_only is not None:
+                return self._pc1_horizontal_only, dem_type
+            # Fall back to cropped original (if no horizontal transform needed)
+            elif self._pc1_cropped_original is not None:
                 return self._pc1_cropped_original, dem_type
-            elif self._pc1_cropped is not None and self._pc1_transformed is None:
-                # No alignment done yet, _pc1_cropped is still the original
+            elif self._pc1_cropped is not None and self._alignment_result is None:
                 return self._pc1_cropped, dem_type
             elif self.pc1 is not None:
                 # Fall back to original pc1 (not cropped)
                 import warnings
                 warnings.warn(
-                    f"No cropped point cloud available for dem1='{dem1_option}'. "
-                    "Using original pc1. Run crop_to_overlap() first for proper results."
+                    f"No cropped/transformed point cloud available for dem1='{dem1_option}'. "
+                    "Using original pc1. Consider using auto_prepare=True."
                 )
                 return self.pc1, dem_type
             else:
@@ -2473,24 +2746,32 @@ class PointCloudPair:
         diff_output_path: Optional[str] = None,
         overwrite: bool = True,
         verbose: bool = True,
+        auto_prepare: bool = True,
+        interior_buffer: float = 10.0,
         **dem_kwargs,
     ) -> Dict[str, Any]:
         """
         Compute 2D (raster-based) elevation difference.
 
         This method:
-        1. Creates DEMs from both point clouds
-        2. Creates a RasterPair
-        3. Uses RasterPair.compute_difference() for differencing
+        1. Auto-prepares point clouds if needed (transform, crop, align)
+        2. Creates DEMs from both point clouds
+        3. Creates a RasterPair
+        4. Uses RasterPair.compute_difference() for differencing
+
+        Three transformation tiers based on dem1:
+        - "dtm"/"dsm": Horizontal CRS transform only (skip epoch, skip vertical)
+        - "dtm_transformed"/"dsm_transformed": Full transform (horizontal + vertical + epoch)
+        - "dtm_transformed_aligned"/"dsm_transformed_aligned": Full transform + ICP alignment
 
         Parameters
         ----------
         dem1 : str, optional
             DEM source for compare/older point cloud (pc1). Options:
-            - "dtm" or "dsm": Use original cropped (unaligned) point cloud
-            - "dtm_transformed", "dsm_transformed": Use transformed point cloud
-            - "dtm_aligned", "dsm_aligned": Use aligned point cloud
-            - "dtm_transformed_aligned", "dsm_transformed_aligned": Use fully processed cloud
+            - "dtm" or "dsm": Horizontal-only transformed (Scenario 1)
+            - "dtm_transformed", "dsm_transformed": Fully transformed (Scenario 2)
+            - "dtm_aligned", "dsm_aligned": Aligned point cloud
+            - "dtm_transformed_aligned", "dsm_transformed_aligned": Fully transformed + aligned (Scenario 3)
             If not specified, falls back to dem_type + use_transformed behavior.
         dem2 : str, optional
             DEM source for reference/younger point cloud (pc2). Options:
@@ -2517,9 +2798,18 @@ class PointCloudPair:
         output_dir : str, optional
             Directory for output files
         overwrite : bool
-            Overwrite existing files
+            Overwrite existing files. If False, reuses existing intermediate files.
         verbose : bool
             Print progress messages
+        auto_prepare : bool, default True
+            Automatically prepare point clouds based on dem1 tier:
+            - Run transformations if not already done
+            - Crop to overlap if not already done
+            - Run alignment if needed for aligned tiers
+            Checks for existing files on disk before reprocessing.
+        interior_buffer : float, default 10.0
+            Buffer distance (meters) for cropping compare cloud when using
+            aligned tiers. Only used when auto_prepare=True.
         **dem_kwargs
             Additional arguments for DEM creation
 
@@ -2534,19 +2824,32 @@ class PointCloudPair:
 
         Examples
         --------
-        # Use aligned DTM for compare, DTM for reference (typical workflow)
+        # Scenario 1: Horizontal-only transform (compare CRS-matched to reference)
+        >>> result = pc_pair.compute_2d_difference(
+        ...     dem1="dtm",
+        ...     dem2="dtm",
+        ...     resolution=1.0,
+        ... )
+
+        # Scenario 2: Fully transformed (horizontal + vertical + epoch)
+        >>> result = pc_pair.compute_2d_difference(
+        ...     dem1="dtm_transformed",
+        ...     dem2="dtm",
+        ...     resolution=1.0,
+        ... )
+
+        # Scenario 3: Fully transformed + ICP aligned
         >>> result = pc_pair.compute_2d_difference(
         ...     dem1="dtm_transformed_aligned",
         ...     dem2="dtm",
         ...     resolution=1.0,
         ... )
 
-        # Use unaligned DTM for compare to see raw differences
+        # Reuse existing files from previous run (overwrite=False)
         >>> result = pc_pair.compute_2d_difference(
-        ...     dem1="dtm",
+        ...     dem1="dtm_transformed_aligned",
         ...     dem2="dtm",
-        ...     resolution=1.0,
-        ...     transform_first=False,  # Don't re-align during differencing
+        ...     overwrite=False,  # Will load existing files if found
         ... )
 
         # Legacy usage (deprecated but still supported)
@@ -2561,6 +2864,16 @@ class PointCloudPair:
             print(f"\n{'=' * 60}", file=sys.stderr)
             print("Computing 2D (DEM-based) Difference", file=sys.stderr)
             print(f"{'=' * 60}", file=sys.stderr)
+
+        # Auto-prepare point clouds based on dem1 tier
+        if auto_prepare and dem1 is not None:
+            self._auto_prepare_for_differencing(
+                dem1=dem1,
+                interior_buffer=interior_buffer,
+                output_dir=output_dir,
+                overwrite=overwrite,
+                verbose=verbose,
+            )
 
         # Resolve dem1 and dem2 sources
         if dem1 is not None:
@@ -2838,6 +3151,10 @@ class PointCloudPair:
         """Reset internal state (clear cached transformations)."""
         self._transformation_history = []
         self._pc1_transformed = None
+        self._pc1_horizontal_only = None
+        self._pc1_cropped = None
+        self._pc1_cropped_original = None
+        self._pc2_cropped = None
         self._alignment_result = None
 
     def process_point_cloud_pair(
