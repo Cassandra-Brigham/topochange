@@ -988,9 +988,13 @@ class PointCloudPair:
                 print(f"\n--- Computing true data footprint for reference cloud ---", file=sys.stderr)
             try:
                 from topochange.pointcloud import get_true_extent
-                _, _, pc2_true_poly_4326 = get_true_extent(self.pc2)
+                _, pc2_true_poly_utm, pc2_true_poly_4326 = get_true_extent(self.pc2)
                 if verbose:
                     print(f"True extent computed successfully", file=sys.stderr)
+                    print(f"True extent poly_4326 bounds: {pc2_true_poly_4326.bounds}", file=sys.stderr)
+                    print(f"True extent poly_utm bounds: {pc2_true_poly_utm.bounds}", file=sys.stderr)
+                    print(f"True extent area (utm): {pc2_true_poly_utm.area:,.0f} m²", file=sys.stderr)
+                    print(f"PC2 actual bounds: ({self.pc2.minx:.2f}, {self.pc2.miny:.2f}) to ({self.pc2.maxx:.2f}, {self.pc2.maxy:.2f})", file=sys.stderr)
             except Exception as e:
                 if verbose:
                     print(f"Warning: Could not compute true extent ({e}), using bounding box", file=sys.stderr)
