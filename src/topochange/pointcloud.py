@@ -142,17 +142,22 @@ def _reproject_poly(poly: Polygon, src_epsg: Union[str, int], dst_epsg: Union[st
     return transform(lambda x, y, z=None: tf.transform(x, y), poly)
 
 
-def get_true_extent(pc: "PointCloud") -> Tuple[int, Polygon, Polygon]:
+def get_true_extent(pc: "PointCloud", edge_size: float = 5.0) -> Tuple[int, Polygon, Polygon]:
     """
     Extract point cloud true data boundary using hexbin filter.
 
     This computes the actual data footprint (not just bounding box) by using
     PDAL's hexbin filter which creates a polygon from occupied hex cells.
+    The resulting polygon is shrunk inward by half the edge_size to compensate
+    for hex cells extending beyond actual point locations.
 
     Parameters
     ----------
     pc : PointCloud
         Point cloud object with filename attribute.
+    edge_size : float, default 5.0
+        Size of hexbin cells in meters. Smaller values give more accurate
+        boundaries but take longer to compute.
 
     Returns
     -------
@@ -169,6 +174,7 @@ def get_true_extent(pc: "PointCloud") -> Tuple[int, Polygon, Polygon]:
     import pdal
     from pyproj import CRS as CRS_
     from shapely import wkt
+    from shapely.geometry import Polygon as ShapelyPolygon, MultiPolygon
 
     # Try hexbin approach (streaming-compatible, gives true data polygon)
     try:
@@ -179,7 +185,7 @@ def get_true_extent(pc: "PointCloud") -> Tuple[int, Polygon, Polygon]:
                         {"type": "readers.las", "filename": str(pc.filename)},
                         {
                             "type": "filters.hexbin",
-                            "edge_size": 10,  # 10m hex cells
+                            "edge_size": edge_size,
                             "threshold": 1,   # Include cells with at least 1 point
                         },
                     ]
@@ -201,6 +207,22 @@ def get_true_extent(pc: "PointCloud") -> Tuple[int, Polygon, Polygon]:
             # Parse WKT boundary (in native CRS)
             poly_native = wkt.loads(boundary_wkt)
 
+            # Handle MultiPolygon by taking the largest polygon
+            if isinstance(poly_native, MultiPolygon):
+                poly_native = max(poly_native.geoms, key=lambda p: p.area)
+
+            # Shrink the polygon inward by half the edge_size to compensate for
+            # hex cells extending beyond actual point locations
+            shrink_distance = edge_size / 2.0
+            poly_native_shrunk = poly_native.buffer(-shrink_distance)
+
+            # Handle case where shrinking results in MultiPolygon or empty
+            if poly_native_shrunk.is_empty:
+                # Fall back to original if shrinking made it empty
+                poly_native_shrunk = poly_native
+            elif isinstance(poly_native_shrunk, MultiPolygon):
+                poly_native_shrunk = max(poly_native_shrunk.geoms, key=lambda p: p.area)
+
             # Transform to EPSG:4326
             src_crs_wkt = (
                 getattr(pc, "current_horizontal_crs", None)
@@ -213,9 +235,9 @@ def get_true_extent(pc: "PointCloud") -> Tuple[int, Polygon, Polygon]:
                 src_crs = CRS_.from_user_input(src_crs_wkt)
                 dst_crs = CRS_.from_epsg(4326)
                 tf = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
-                poly_4326 = transform(lambda x, y, z=None: tf.transform(x, y), poly_native)
+                poly_4326 = transform(lambda x, y, z=None: tf.transform(x, y), poly_native_shrunk)
             else:
-                poly_4326 = poly_native
+                poly_4326 = poly_native_shrunk
 
             if not poly_4326.is_empty:
                 epsg_utm = _determine_utm_epsg(poly_4326)

@@ -981,20 +981,20 @@ class PointCloudPair:
             raise ValueError("Point cloud outline polygons not available. Ensure from_file() was called.")
 
         # If interior_buffer is requested and use_true_extent is True, compute true
-        # data footprint for PC2 using hexbin instead of bounding box
+        # data footprint for PC2 using hexbin (captures irregular boundaries)
         pc2_true_poly_4326 = None
         if interior_buffer is not None and interior_buffer > 0 and use_true_extent:
             if verbose:
                 print(f"\n--- Computing true data footprint for reference cloud ---", file=sys.stderr)
             try:
                 from topochange.pointcloud import get_true_extent
-                _, pc2_true_poly_utm, pc2_true_poly_4326 = get_true_extent(self.pc2)
+                # Use smaller hex cells (5m) for more accurate boundary, already shrunk internally
+                _, pc2_true_poly_utm, pc2_true_poly_4326 = get_true_extent(self.pc2, edge_size=5.0)
                 if verbose:
                     print(f"True extent computed successfully", file=sys.stderr)
-                    print(f"True extent poly_4326 bounds: {pc2_true_poly_4326.bounds}", file=sys.stderr)
-                    print(f"True extent poly_utm bounds: {pc2_true_poly_utm.bounds}", file=sys.stderr)
+                    print(f"True extent bounds (utm): {pc2_true_poly_utm.bounds}", file=sys.stderr)
                     print(f"True extent area (utm): {pc2_true_poly_utm.area:,.0f} m²", file=sys.stderr)
-                    print(f"PC2 actual bounds: ({self.pc2.minx:.2f}, {self.pc2.miny:.2f}) to ({self.pc2.maxx:.2f}, {self.pc2.maxy:.2f})", file=sys.stderr)
+                    print(f"PC2 header bounds: ({self.pc2.minx:.2f}, {self.pc2.miny:.2f}) to ({self.pc2.maxx:.2f}, {self.pc2.maxy:.2f})", file=sys.stderr)
             except Exception as e:
                 if verbose:
                     print(f"Warning: Could not compute true extent ({e}), using bounding box", file=sys.stderr)
@@ -1026,6 +1026,7 @@ class PointCloudPair:
         wgs84 = CRS_.from_epsg(4326)
 
         # Transform both polygons from WGS84 to common CRS
+        transformer_to_common = None
         if not common_crs.equals(wgs84):
             transformer_to_common = Transformer.from_crs(wgs84, common_crs, always_xy=True)
             pc1_poly_common = shapely_transform(transformer_to_common.transform, pc1_poly_4326)
@@ -1047,7 +1048,7 @@ class PointCloudPair:
         # Transform true extent polygon to common CRS if available
         pc2_true_poly_common = None
         if pc2_true_poly_4326 is not None:
-            if not common_crs.equals(wgs84):
+            if transformer_to_common is not None:
                 pc2_true_poly_common = shapely_transform(transformer_to_common.transform, pc2_true_poly_4326)
             else:
                 pc2_true_poly_common = pc2_true_poly_4326
