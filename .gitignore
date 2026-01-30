@@ -33,10 +33,7 @@ wheels/
 .ipynb_checkpoints/
 
 # Old notebooks
-my_implementation_option1.ipynb
-my_implementation_option2.ipynb
-my_implementation_option3.ipynb
-my_implementation.ipynb
+/old_versions
 
 # Environment
 .env
