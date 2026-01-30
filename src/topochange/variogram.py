@@ -30,7 +30,630 @@ from shapely.prepared import prep
 import geopandas as gpd
 from rasterio.features import shapes
 from shapely.ops import unary_union
+from .variogram_models import MODEL_REGISTRY, VariogramModelRegistry
+from .composite_variogram import CompositeVariogramModel
+from itertools import combinations_with_replacement
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Tuple
 
+
+@dataclass
+class FittedVariogramModel:
+    """Container for a fitted variogram model with diagnostics.
+    
+    Attributes
+    ----------
+    composite_model : CompositeVariogramModel
+        The fitted composite model.
+    params : ndarray
+        Optimal parameter values.
+    param_cov : ndarray
+        Parameter covariance matrix from curve_fit.
+    rss : float
+        Residual sum of squares.
+    aic : float
+        Akaike Information Criterion.
+    bic : float
+        Bayesian Information Criterion.
+    cv_rmse : float
+        Cross-validation RMSE.
+    param_samples : ndarray or None
+        Bootstrap parameter samples (n_boot × n_params).
+    """
+    composite_model: CompositeVariogramModel
+    params: np.ndarray
+    param_cov: np.ndarray
+    rss: float
+    aic: float
+    bic: float
+    cv_rmse: Optional[float] = None
+    param_samples: Optional[np.ndarray] = None
+    
+    def predict(self, h: np.ndarray) -> np.ndarray:
+        """Evaluate fitted model at lag distances."""
+        return self.composite_model(h)
+    
+    def get_param_percentiles(
+        self, 
+        percentiles: List[float] = [16, 50, 84]
+    ) -> Dict[str, np.ndarray]:
+        """Get parameter percentiles from bootstrap samples.
+        
+        Returns
+        -------
+        percentiles_dict : dict
+            Keys are parameter names, values are arrays of percentiles.
+        """
+        if self.param_samples is None:
+            raise ValueError("No bootstrap samples available.")
+        
+        result = {}
+        for i, name in enumerate(self.composite_model.param_names):
+            result[name] = np.percentile(self.param_samples[:, i], percentiles)
+        
+        return result
+
+
+class VariogramModelSelector:
+    """Select and fit optimal variogram model from candidates.
+    
+    This class implements:
+    - Automatic generation of candidate nested models
+    - Fitting via weighted least squares
+    - Model selection via AIC, BIC, and cross-validation
+    - Bootstrap parameter uncertainty
+    - Bayesian Model Averaging (optional)
+    
+    Parameters
+    ----------
+    lags : ndarray
+        Lag distances from empirical variogram.
+    empirical_variogram : ndarray
+        Empirical semivariance values.
+    weights : ndarray, optional
+        Weights for fitting (e.g., number of pairs per bin).
+    
+    Examples
+    --------
+    >>> selector = VariogramModelSelector(lags, gamma, weights=counts)
+    >>> selector.fit_all_candidates(max_components=2, include_nugget=True)
+    >>> best = selector.select_best(criterion='aic')
+    >>> print(best.composite_model.description())
+    
+    References
+    ----------
+    Webster, R. & McBratney, A.B. (1989). On the Akaike Information Criterion
+    for choosing models for variograms of soil properties. Eur. J. Soil Sci.
+    """
+    
+    # Models to include in candidate generation
+    BOUNDED_MODELS = ['spherical', 'exponential', 'gaussian', 'matern']
+    UNBOUNDED_MODELS = ['power', 'linear']
+    
+    def __init__(
+        self,
+        lags: np.ndarray,
+        empirical_variogram: np.ndarray,
+        weights: Optional[np.ndarray] = None,
+        sigma: Optional[np.ndarray] = None,
+    ):
+        self.lags = np.asarray(lags, dtype=float)
+        self.empirical_variogram = np.asarray(empirical_variogram, dtype=float)
+        
+        # Weights for WLS fitting
+        if weights is not None:
+            self.weights = np.asarray(weights, dtype=float)
+        else:
+            self.weights = np.ones_like(self.lags)
+        
+        # Standard deviation per bin (for likelihood-based criteria)
+        if sigma is not None:
+            self.sigma = np.asarray(sigma, dtype=float)
+            self.sigma = np.where(self.sigma <= 0, np.finfo(float).eps, self.sigma)
+        else:
+            self.sigma = None
+        
+        self.fitted_models: List[FittedVariogramModel] = []
+        self.best_model: Optional[FittedVariogramModel] = None
+        self.model_weights: Optional[np.ndarray] = None  # Akaike weights
+        
+        self._registry = MODEL_REGISTRY
+    
+    def generate_candidates(
+        self,
+        max_components: int = 2,
+        include_nugget: bool = True,
+        include_unbounded: bool = True,
+        bounded_only_combinations: bool = True,
+    ) -> List[CompositeVariogramModel]:
+        """Generate candidate composite models.
+        
+        Parameters
+        ----------
+        max_components : int
+            Maximum number of component models to combine.
+        include_nugget : bool
+            Whether to include nugget in all models.
+        include_unbounded : bool
+            Whether to include unbounded (non-stationary) models.
+        bounded_only_combinations : bool
+            If True, only combine bounded models together.
+            Unbounded models are only tried as single components.
+        
+        Returns
+        -------
+        candidates : List[CompositeVariogramModel]
+            List of candidate composite models.
+        """
+        candidates = []
+        
+        # Get model lists
+        bounded = self.BOUNDED_MODELS
+        unbounded = self.UNBOUNDED_MODELS if include_unbounded else []
+        
+        # Generate bounded-only combinations
+        for n in range(1, max_components + 1):
+            for combo in combinations_with_replacement(bounded, n):
+                try:
+                    model = CompositeVariogramModel(
+                        list(combo), 
+                        include_nugget=include_nugget
+                    )
+                    candidates.append(model)
+                except ValueError:
+                    continue
+        
+        # Add single unbounded models (not in combinations to preserve validity)
+        if include_unbounded:
+            for name in unbounded:
+                try:
+                    model = CompositeVariogramModel(
+                        [name], 
+                        include_nugget=include_nugget
+                    )
+                    candidates.append(model)
+                except ValueError:
+                    continue
+            
+            # Optionally: bounded + unbounded combinations
+            if not bounded_only_combinations:
+                for bounded_name in bounded:
+                    for unbounded_name in unbounded:
+                        try:
+                            model = CompositeVariogramModel(
+                                [bounded_name, unbounded_name],
+                                include_nugget=include_nugget
+                            )
+                            candidates.append(model)
+                        except ValueError:
+                            continue
+        
+        return candidates
+    
+    def fit_model(
+        self,
+        model: CompositeVariogramModel,
+        maxfev: int = 10000,
+        n_restarts: int = 5,
+    ) -> Optional[FittedVariogramModel]:
+        """Fit a single composite model to the empirical variogram.
+        
+        Parameters
+        ----------
+        model : CompositeVariogramModel
+            Model to fit.
+        maxfev : int
+            Maximum function evaluations for optimizer.
+        n_restarts : int
+            Number of random restarts to avoid local minima.
+        
+        Returns
+        -------
+        fitted : FittedVariogramModel or None
+            Fitted model, or None if fitting failed.
+        """
+        # Get initial guess and bounds
+        p0_base = model.default_guess(self.lags, self.empirical_variogram)
+        bounds = model.bounds(self.lags, self.empirical_variogram)
+        
+        # Prepare fitting function
+        def model_func(h, *params):
+            model.set_params(np.array(params))
+            return model(h)
+        
+        best_result = None
+        best_rss = np.inf
+        rng = np.random.default_rng()
+        
+        for restart in range(n_restarts):
+            # Perturb initial guess
+            if restart == 0:
+                p0 = p0_base
+            else:
+                perturbation = 1 + (rng.random(len(p0_base)) - 0.5) * 0.5
+                p0 = np.clip(p0_base * perturbation, bounds[0], bounds[1])
+            
+            try:
+                popt, pcov = curve_fit(
+                    model_func,
+                    self.lags,
+                    self.empirical_variogram,
+                    p0=p0,
+                    sigma=self.sigma,
+                    absolute_sigma=True if self.sigma is not None else False,
+                    bounds=bounds,
+                    maxfev=maxfev,
+                )
+                
+                # Compute RSS
+                model.set_params(popt)
+                residuals = self.empirical_variogram - model(self.lags)
+                rss = np.sum(self.weights * residuals**2)
+                
+                if rss < best_rss:
+                    best_rss = rss
+                    best_result = (popt, pcov, rss)
+                    
+            except RuntimeError:
+                continue
+        
+        if best_result is None:
+            return None
+        
+        popt, pcov, rss = best_result
+        model.set_params(popt)
+        
+        # Compute information criteria
+        n = len(self.lags)
+        k = model.n_params
+        
+        # AIC and BIC
+        if self.sigma is not None:
+            # Log-likelihood based
+            ll = self._log_likelihood(model, popt)
+            aic = 2 * k - 2 * ll
+            bic = k * np.log(n) - 2 * ll
+        else:
+            # RSS-based approximation
+            aic = n * np.log(rss / n) + 2 * k
+            bic = n * np.log(rss / n) + k * np.log(n)
+        
+        return FittedVariogramModel(
+            composite_model=model,
+            params=popt,
+            param_cov=pcov,
+            rss=rss,
+            aic=aic,
+            bic=bic,
+        )
+    
+    def _log_likelihood(
+        self, 
+        model: CompositeVariogramModel, 
+        params: np.ndarray
+    ) -> float:
+        """Compute log-likelihood assuming Gaussian errors."""
+        model.set_params(params)
+        predicted = model(self.lags)
+        residuals = self.empirical_variogram - predicted
+        
+        # Heteroscedastic Gaussian log-likelihood
+        ll = -0.5 * np.sum(
+            np.log(2 * np.pi * self.sigma**2) + 
+            (residuals**2) / (self.sigma**2)
+        )
+        return ll
+    
+    def cross_validate(
+        self,
+        fitted_model: FittedVariogramModel,
+        k: int = 5,
+        seed: Optional[int] = None,
+    ) -> float:
+        """Compute k-fold cross-validation RMSE.
+        
+        Parameters
+        ----------
+        fitted_model : FittedVariogramModel
+            Model to evaluate.
+        k : int
+            Number of folds.
+        seed : int, optional
+            Random seed for fold assignment.
+        
+        Returns
+        -------
+        cv_rmse : float
+            Cross-validation RMSE.
+        """
+        rng = np.random.default_rng(seed)
+        n = len(self.lags)
+        indices = rng.permutation(n)
+        fold_size = max(1, n // k)
+        
+        squared_errors = []
+        
+        for i in range(k):
+            # Split indices
+            val_idx = indices[i * fold_size: min((i + 1) * fold_size, n)]
+            train_idx = np.setdiff1d(indices, val_idx)
+            
+            if len(train_idx) < fitted_model.composite_model.n_params:
+                continue
+            
+            # Fit on training set
+            model_copy = CompositeVariogramModel(
+                fitted_model.composite_model.component_names,
+                fitted_model.composite_model.include_nugget,
+            )
+            
+            def model_func(h, *params):
+                model_copy.set_params(np.array(params))
+                return model_copy(h)
+            
+            try:
+                popt, _ = curve_fit(
+                    model_func,
+                    self.lags[train_idx],
+                    self.empirical_variogram[train_idx],
+                    p0=fitted_model.params,
+                    bounds=model_copy.bounds(self.lags, self.empirical_variogram),
+                    maxfev=5000,
+                )
+                
+                # Predict on validation set
+                model_copy.set_params(popt)
+                predictions = model_copy(self.lags[val_idx])
+                errors = self.empirical_variogram[val_idx] - predictions
+                squared_errors.extend(errors**2)
+                
+            except RuntimeError:
+                continue
+        
+        if not squared_errors:
+            return np.inf
+        
+        return np.sqrt(np.mean(squared_errors))
+    
+    def fit_all_candidates(
+        self,
+        max_components: int = 2,
+        include_nugget: bool = True,
+        include_unbounded: bool = True,
+        compute_cv: bool = True,
+        cv_folds: int = 5,
+        seed: Optional[int] = None,
+    ) -> None:
+        """Fit all candidate models.
+        
+        Parameters
+        ----------
+        max_components : int
+            Maximum number of nested components.
+        include_nugget : bool
+            Include nugget in all models.
+        include_unbounded : bool
+            Include non-stationary models.
+        compute_cv : bool
+            Compute cross-validation scores.
+        cv_folds : int
+            Number of CV folds.
+        seed : int, optional
+            Random seed for CV.
+        """
+        candidates = self.generate_candidates(
+            max_components=max_components,
+            include_nugget=include_nugget,
+            include_unbounded=include_unbounded,
+        )
+        
+        self.fitted_models = []
+        
+        for model in candidates:
+            fitted = self.fit_model(model)
+            if fitted is not None:
+                if compute_cv:
+                    fitted.cv_rmse = self.cross_validate(fitted, k=cv_folds, seed=seed)
+                self.fitted_models.append(fitted)
+        
+        # Compute Akaike weights
+        if self.fitted_models:
+            self._compute_akaike_weights()
+    
+    def _compute_akaike_weights(self) -> None:
+        """Compute Akaike weights for model averaging."""
+        aics = np.array([m.aic for m in self.fitted_models])
+        delta_aic = aics - np.min(aics)
+        
+        # Akaike weights
+        exp_terms = np.exp(-0.5 * delta_aic)
+        self.model_weights = exp_terms / np.sum(exp_terms)
+    
+    def select_best(self, criterion: str = 'aic') -> FittedVariogramModel:
+        """Select best model by criterion.
+        
+        Parameters
+        ----------
+        criterion : str
+            Selection criterion: 'aic', 'bic', or 'cv'.
+        
+        Returns
+        -------
+        best : FittedVariogramModel
+            Best model according to criterion.
+        """
+        if not self.fitted_models:
+            raise ValueError("No fitted models. Call fit_all_candidates() first.")
+        
+        if criterion == 'aic':
+            scores = [m.aic for m in self.fitted_models]
+        elif criterion == 'bic':
+            scores = [m.bic for m in self.fitted_models]
+        elif criterion == 'cv':
+            scores = [m.cv_rmse if m.cv_rmse is not None else np.inf 
+                     for m in self.fitted_models]
+        else:
+            raise ValueError(f"Unknown criterion: {criterion}")
+        
+        best_idx = np.argmin(scores)
+        self.best_model = self.fitted_models[best_idx]
+        return self.best_model
+    
+    def bootstrap_best_model(
+        self,
+        n_boot: int = 500,
+        seed: Optional[int] = None,
+    ) -> np.ndarray:
+        """Bootstrap parameter uncertainty for best model.
+        
+        Parameters
+        ----------
+        n_boot : int
+            Number of bootstrap samples.
+        seed : int, optional
+            Random seed.
+        
+        Returns
+        -------
+        param_samples : ndarray
+            Bootstrap samples, shape (n_boot, n_params).
+        """
+        if self.best_model is None:
+            raise ValueError("No best model selected. Call select_best() first.")
+        
+        rng = np.random.default_rng(seed)
+        model = self.best_model.composite_model
+        p0 = self.best_model.params
+        bounds = model.bounds(self.lags, self.empirical_variogram)
+        
+        # Generate synthetic variograms
+        if self.sigma is not None:
+            noise = rng.normal(
+                loc=self.empirical_variogram,
+                scale=self.sigma,
+                size=(n_boot, len(self.lags))
+            )
+        else:
+            # Use residual-based bootstrap
+            fitted = self.best_model.predict(self.lags)
+            residuals = self.empirical_variogram - fitted
+            noise = fitted + rng.choice(residuals, size=(n_boot, len(self.lags)))
+        
+        param_samples = []
+        
+        def model_func(h, *params):
+            model.set_params(np.array(params))
+            return model(h)
+        
+        for i in range(n_boot):
+            try:
+                popt, _ = curve_fit(
+                    model_func,
+                    self.lags,
+                    noise[i],
+                    p0=p0,
+                    bounds=bounds,
+                    maxfev=5000,
+                )
+                param_samples.append(popt)
+            except RuntimeError:
+                param_samples.append([np.nan] * model.n_params)
+        
+        param_samples = np.array(param_samples)
+        
+        # Remove failed fits
+        valid = ~np.isnan(param_samples).any(axis=1)
+        param_samples = param_samples[valid]
+        
+        self.best_model.param_samples = param_samples
+        return param_samples
+    
+    def get_bma_variogram(self) -> Callable:
+        """Get Bayesian Model Averaged variogram function.
+        
+        Returns
+        -------
+        bma_func : Callable
+            Function γ_BMA(h) = Σ wₖ γₖ(h)
+        """
+        if self.model_weights is None:
+            raise ValueError("No model weights. Call fit_all_candidates() first.")
+        
+        def bma_variogram(h):
+            h = np.asarray(h)
+            result = np.zeros_like(h, dtype=float)
+            for model, weight in zip(self.fitted_models, self.model_weights):
+                result += weight * model.predict(h)
+            return result
+        
+        return bma_variogram
+    
+    def get_bma_variance_at_lag(self, h: float) -> Tuple[float, float, float]:
+        """Get BMA mean and variance at a specific lag.
+        
+        Returns
+        -------
+        mean : float
+            BMA weighted mean γ_BMA(h)
+        within_var : float
+            Within-model variance component
+        between_var : float
+            Between-model variance component
+        """
+        predictions = np.array([m.predict(np.array([h]))[0] for m in self.fitted_models])
+        
+        # BMA mean
+        bma_mean = np.sum(self.model_weights * predictions)
+        
+        # Between-model variance
+        between_var = np.sum(self.model_weights * (predictions - bma_mean)**2)
+        
+        # Within-model variance (would require bootstrap samples from each model)
+        # For now, approximate as 0 or could be computed if needed
+        within_var = 0.0
+        
+        return bma_mean, within_var, between_var
+
+def summary(self) -> str:
+    """Generate summary of fitted models."""
+    if not self.fitted_models:
+        return "No models fitted yet."
+    
+    lines = ["=" * 70]
+    lines.append("VARIOGRAM MODEL SELECTION SUMMARY")
+    lines.append("=" * 70)
+    lines.append(f"{'Model':<30} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10} {'Weight':>8}")
+    lines.append("-" * 70)
+    
+    # Sort by AIC
+    sorted_models = sorted(
+        zip(self.fitted_models, self.model_weights or [0] * len(self.fitted_models)),
+        key=lambda x: x[0].aic
+    )
+    
+    for model, weight in sorted_models:
+        name = "+".join(model.composite_model.component_names)
+        if model.composite_model.include_nugget:
+            name += "+nugget"
+        
+        cv_str = f"{model.cv_rmse:.4f}" if model.cv_rmse else "N/A"
+        lines.append(
+            f"{name:<30} {model.aic:>10.2f} {model.bic:>10.2f} "
+            f"{cv_str:>10} {weight:>8.3f}"
+        )
+    
+    lines.append("=" * 70)
+    
+    if self.best_model:
+        lines.append("\nBEST MODEL DETAILS:")
+        lines.append(self.best_model.composite_model.description())
+        
+        if not self.best_model.composite_model.is_stationary:
+            lines.append("\n⚠️ WARNING: Selected model is NON-STATIONARY.")
+            lines.append("The process has no finite variance.")
+            lines.append("Results are scale-dependent. Consider detrending.")
+    
+    return "\n".join(lines)
 
 class RasterDataHandler:
     """
