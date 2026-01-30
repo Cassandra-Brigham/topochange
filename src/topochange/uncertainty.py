@@ -1,16 +1,27 @@
 """Propagate variogram-based uncertainty to specific regions.
 
-Provides utilities for computing spatial (correlated + uncorrelated)
-uncertainties from variogram parameters and applying them to user-defined areas.
+This module implements model-agnostic uncertainty propagation based on Krige's
+Relation, which guarantees that Monte Carlo integration works for ANY valid
+variogram function (spherical, exponential, Gaussian, Matérn, etc.).
 
-Classes:
-- RegionalUncertaintyEstimator: Propagate uncertainty to polygon regions
+Mathematical Foundation
+-----------------------
+For a second-order stationary random field Z(x) with covariance C(h) = σ² - γ(h),
+the variance of the spatial average over domain A is:
+
+    Var(Z̄_A) = (1/|A|²) ∬_{A×A} C(x-y) dx dy
+
+This integral depends ONLY on the geometry of A and the functional form of γ(h).
+
+References
+----------
+Chilès, J.P. & Delfiner, P. (2012). Geostatistics: Modeling Spatial Uncertainty.
+Hugonnet, R., et al. (2022). IEEE JSTARS, 15, 6456-6472.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Sequence, Optional, Dict, Any
 import numpy as np
 from shapely.geometry import Polygon, MultiPolygon, box, Point
 from shapely.ops import unary_union
@@ -20,9 +31,12 @@ from rasterio.features import shapes
 from shapely.geometry import shape
 from pathlib import Path
 import geopandas as gpd
+from typing import Sequence, Optional, Dict, Any, Callable, Union, List, Tuple
+
 
 # Import variogram classes from variogram module
-from .variogram import RasterDataHandler, VariogramAnalysis
+from .variogram import RasterDataHandler, VariogramAnalysis, FittedVariogramModel
+from .composite_variogram import CompositeVariogramModel
 
 
 
