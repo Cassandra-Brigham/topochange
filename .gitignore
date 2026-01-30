@@ -32,6 +32,12 @@ wheels/
 # Jupyter
 .ipynb_checkpoints/
 
+# Old notebooks
+my_implementation_option1.ipynb
+my_implementation_option2.ipynb
+my_implementation_option3.ipynb
+my_implementation.ipynb
+
 # Environment
 .env
 .venv
@@ -45,3 +51,4 @@ ENV/
 *.swp
 *.swo
 .DS_Store
+
