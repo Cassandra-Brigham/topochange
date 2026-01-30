@@ -1707,6 +1707,35 @@ class VariogramAnalysis:
         self.param_samples = fitted.param_samples
         self.cv_mean_error_best_aic = {'rmse': fitted.cv_rmse} if fitted.cv_rmse else None
 
+    def get_model_comparison_summary(self) -> str:
+        """Get a summary of all fitted models for comparison.
+
+        Returns formatted table with AIC, BIC, CV-RMSE, and Akaike weights.
+        """
+        if not hasattr(self, 'model_selector') or self.model_selector is None:
+            raise RuntimeError("No model comparison available. Call fit_best_model_auto() first.")
+
+        selector = self.model_selector
+        lines = ["=" * 80]
+        lines.append("VARIOGRAM MODEL SELECTION SUMMARY")
+        lines.append("=" * 80)
+        lines.append(f"{'Model':<35} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10} {'Weight':>10}")
+        lines.append("-" * 80)
+
+        weights = selector.model_weights or [0] * len(selector.fitted_models)
+        sorted_models = sorted(zip(selector.fitted_models, weights), key=lambda x: x[0].aic)
+
+        for model, weight in sorted_models:
+            name = "+".join(model.composite_model.component_names)
+            if model.composite_model.include_nugget:
+                name += "+nugget"
+            cv_str = f"{model.cv_rmse:.4f}" if model.cv_rmse else "N/A"
+            marker = " *" if model is selector.best_model else ""
+            lines.append(f"{name:<35} {model.aic:>10.2f} {model.bic:>10.2f} {cv_str:>10} {weight:>10.4f}{marker}")
+
+        lines.append("=" * 80)
+        return "\n".join(lines)
+    
     def plot_best_spherical_model(self):
         """
         Plot mean variogram ± spread and fitted model; also show bar plot of mean pair counts.
