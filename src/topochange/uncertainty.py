@@ -870,3 +870,75 @@ class RegionalUncertaintyEstimator:
                 self.total_mean_uncertainty_raster,
                 self.total_mean_uncertainty_min_raster,
                 self.total_mean_uncertainty_max_raster)
+
+class DerivativeUncertaintyEstimator:
+    """
+    Estimate uncertainty for spatial derivatives (slope, curvature).
+    
+    For a linear filter with kernel K:
+        Var(O) = Σᵢ Σⱼ Kᵢ Kⱼ C(||xᵢ - xⱼ||)
+    
+    where C(h) = σ² - γ(h) is the covariance function.
+    
+    References
+    ----------
+    Heuvelink, G.B.M. (1998). Error Propagation in Environmental Modelling
+    with GIS. Taylor & Francis, Chapter 7.
+    """
+    
+    KERNELS = {
+        'sobel_x': np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]) / 8.0,
+        'sobel_y': np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]]) / 8.0,
+        'laplacian': np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]]),
+    }
+    
+    def __init__(
+        self,
+        gamma_func: Callable[[np.ndarray], np.ndarray],
+        sill: float,
+        resolution: float,
+    ):
+        self.gamma_func = gamma_func
+        self.sill = sill
+        self.resolution = resolution
+    
+    def covariance(self, h: np.ndarray) -> np.ndarray:
+        """C(h) = σ² - γ(h)"""
+        return self.sill - self.gamma_func(np.asarray(h, dtype=float))
+    
+    def kernel_variance(self, kernel: np.ndarray) -> float:
+        """Var(O) = Σᵢ Σⱼ Kᵢ Kⱼ C(||xᵢ - xⱼ||)"""
+        rows, cols = kernel.shape
+        cy, cx = rows // 2, cols // 2
+        
+        # Build positions and weights
+        positions = [(j - cx, i - cy) for i in range(rows) for j in range(cols)]
+        weights = kernel.flatten()
+        n = len(weights)
+        
+        # Sum over all pairs
+        total = 0.0
+        for i in range(n):
+            for j in range(n):
+                dx = (positions[i][0] - positions[j][0]) * self.resolution
+                dy = (positions[i][1] - positions[j][1]) * self.resolution
+                h = np.sqrt(dx**2 + dy**2)
+                total += weights[i] * weights[j] * self.covariance(np.array([h]))[0]
+        
+        return max(0.0, total)
+    
+    def slope_uncertainty(self) -> Tuple[float, float, float]:
+        """
+        Returns (std_dzdx, std_dzdy, std_slope_magnitude).
+        
+        Units: [z_unit / resolution_unit]
+        """
+        var_x = self.kernel_variance(self.KERNELS['sobel_x']) / self.resolution**2
+        var_y = self.kernel_variance(self.KERNELS['sobel_y']) / self.resolution**2
+        
+        return np.sqrt(var_x), np.sqrt(var_y), np.sqrt(var_x + var_y)
+    
+    def curvature_uncertainty(self) -> float:
+        """Returns std(∇²z). Units: [z_unit / resolution_unit²]"""
+        var = self.kernel_variance(self.KERNELS['laplacian']) / self.resolution**4
+        return np.sqrt(var)
