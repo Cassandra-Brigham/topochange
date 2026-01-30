@@ -1,0 +1,660 @@
+"""Variogram model registry and composite model builder.
+
+This module provides:
+- A registry of standard variogram models (spherical, exponential, etc.)
+- Composite model builder for nested structures
+- Validation of positive definiteness constraints
+
+References:
+- Chilès, J.P. & Delfiner, P. (2012). Geostatistics: Modeling Spatial Uncertainty.
+- Webster, R. & Oliver, M.A. (2007). Geostatistics for Environmental Scientists.
+- Stein, M.L. (1999). Interpolation of Spatial Data.
+"""
+
+from __future__ import annotations
+
+import warnings
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Tuple, Union
+import numpy as np
+from scipy.special import gamma as gamma_func, kv as bessel_kv
+
+
+# =============================================================================
+# Model Specifications
+# =============================================================================
+
+@dataclass
+class VariogramModelSpec:
+    """Specification for a single variogram model type.
+    
+    Attributes
+    ----------
+    name : str
+        Model identifier (e.g., 'spherical', 'exponential').
+    func : Callable
+        Function γ(h, *params) returning semivariance at lag h.
+    param_names : List[str]
+        Names of parameters in order expected by func.
+    is_bounded : bool
+        True if model has a finite sill (stationary process).
+    has_sill : bool
+        True if one of the parameters represents a sill.
+    practical_range_factor : float or None
+        Multiplier to get practical range (95% of sill) from range parameter.
+        None for unbounded models.
+    description : str
+        Human-readable description of the model.
+    """
+    name: str
+    func: Callable
+    param_names: List[str]
+    is_bounded: bool
+    has_sill: bool
+    practical_range_factor: Optional[float]
+    description: str
+    
+    # Callables for default guesses and bounds (set after creation)
+    _default_guess: Optional[Callable] = field(default=None, repr=False)
+    _bounds: Optional[Callable] = field(default=None, repr=False)
+    
+    def default_guess(self, lags: np.ndarray, variogram: np.ndarray) -> List[float]:
+        """Generate default initial parameter guess."""
+        if self._default_guess is None:
+            raise NotImplementedError(f"No default guess for {self.name}")
+        return self._default_guess(lags, variogram)
+    
+    def bounds(self, lags: np.ndarray, variogram: np.ndarray) -> Tuple[List[float], List[float]]:
+        """Generate parameter bounds."""
+        if self._bounds is None:
+            raise NotImplementedError(f"No bounds for {self.name}")
+        return self._bounds(lags, variogram)
+
+
+# =============================================================================
+# Individual Model Functions
+# =============================================================================
+
+def spherical(h: np.ndarray, sill: float, range_: float) -> np.ndarray:
+    """Spherical variogram model.
+    
+    γ(h) = C * [1.5(h/a) - 0.5(h/a)³]  for h ≤ a
+         = C                            for h > a
+    
+    Parameters
+    ----------
+    h : array-like
+        Lag distances.
+    sill : float
+        Sill (total variance contribution), C ≥ 0.
+    range_ : float
+        Range parameter, a > 0.
+    
+    Returns
+    -------
+    gamma : ndarray
+        Semivariance values.
+    
+    Notes
+    -----
+    The spherical model reaches its sill exactly at h = a.
+    Practical range equals the range parameter.
+    
+    Physical interpretation: Hard cutoff in correlation, common in
+    sedimentary deposits and soil horizons.
+    """
+    h = np.asarray(h, dtype=float)
+    gamma = np.zeros_like(h)
+    
+    mask = h <= range_
+    ratio = h[mask] / range_
+    gamma[mask] = sill * (1.5 * ratio - 0.5 * ratio**3)
+    gamma[~mask] = sill
+    
+    return gamma
+
+
+def exponential(h: np.ndarray, sill: float, range_: float) -> np.ndarray:
+    """Exponential variogram model.
+    
+    γ(h) = C * [1 - exp(-h/a)]
+    
+    Parameters
+    ----------
+    h : array-like
+        Lag distances.
+    sill : float
+        Sill (asymptotic variance), C ≥ 0.
+    range_ : float
+        Range parameter, a > 0.
+    
+    Returns
+    -------
+    gamma : ndarray
+        Semivariance values.
+    
+    Notes
+    -----
+    Practical range (95% of sill) = 3a.
+    Near origin: γ(h) ≈ (C/a)h (linear).
+    
+    Physical interpretation: Exponential decay of correlation,
+    common in hydrogeology and atmospheric sciences.
+    """
+    h = np.asarray(h, dtype=float)
+    return sill * (1 - np.exp(-h / range_))
+
+
+def gaussian(h: np.ndarray, sill: float, range_: float) -> np.ndarray:
+    """Gaussian variogram model.
+    
+    γ(h) = C * [1 - exp(-h²/a²)]
+    
+    Parameters
+    ----------
+    h : array-like
+        Lag distances.
+    sill : float
+        Sill (asymptotic variance), C ≥ 0.
+    range_ : float
+        Range parameter, a > 0.
+    
+    Returns
+    -------
+    gamma : ndarray
+        Semivariance values.
+    
+    Notes
+    -----
+    Practical range (95% of sill) ≈ 1.73a.
+    Near origin: γ(h) ≈ (C/a²)h² (parabolic).
+    
+    ⚠️ WARNING: The Gaussian model implies infinite differentiability,
+    which can cause numerical instability in kriging. It should typically
+    be combined with a nugget effect.
+    
+    Physical interpretation: Very smooth spatial variation.
+    """
+    h = np.asarray(h, dtype=float)
+    return sill * (1 - np.exp(-(h / range_)**2))
+
+
+def matern(h: np.ndarray, sill: float, range_: float, nu: float) -> np.ndarray:
+    """Matérn variogram model.
+    
+    γ(h) = C * [1 - (2^(1-ν)/Γ(ν)) * (h/a)^ν * K_ν(h/a)]
+    
+    Parameters
+    ----------
+    h : array-like
+        Lag distances.
+    sill : float
+        Sill (asymptotic variance), C ≥ 0.
+    range_ : float
+        Range parameter, a > 0.
+    nu : float
+        Smoothness parameter, ν > 0.
+    
+    Returns
+    -------
+    gamma : ndarray
+        Semivariance values.
+    
+    Notes
+    -----
+    Special cases:
+        ν = 0.5 → Exponential
+        ν = 1.5 → Matérn-3/2 (once differentiable)
+        ν = 2.5 → Matérn-5/2 (twice differentiable)
+        ν → ∞  → Gaussian
+    
+    The smoothness ν controls differentiability of the underlying field.
+    
+    References
+    ----------
+    Stein, M.L. (1999). Interpolation of Spatial Data. Springer.
+    """
+    h = np.asarray(h, dtype=float)
+    gamma = np.zeros_like(h)
+    
+    # Handle h = 0 separately
+    nonzero = h > 0
+    if not np.any(nonzero):
+        return gamma
+    
+    h_nz = h[nonzero]
+    scaled = h_nz / range_
+    
+    # Compute Matérn correlation
+    coef = (2**(1 - nu)) / gamma_func(nu)
+    bessel_term = bessel_kv(nu, scaled)
+    
+    # Handle numerical issues with Bessel function
+    bessel_term = np.where(np.isfinite(bessel_term), bessel_term, 0)
+    
+    correlation = coef * (scaled**nu) * bessel_term
+    correlation = np.clip(correlation, 0, 1)  # Ensure valid range
+    
+    gamma[nonzero] = sill * (1 - correlation)
+    
+    return gamma
+
+
+def hole_effect(h: np.ndarray, sill: float, wavelength: float) -> np.ndarray:
+    """Hole-effect (damped cosine) variogram model.
+    
+    γ(h) = C * [1 - cos(2πh/λ)]
+    
+    Parameters
+    ----------
+    h : array-like
+        Lag distances.
+    sill : float
+        Amplitude parameter, C ≥ 0. Maximum variance is 2C.
+    wavelength : float
+        Wavelength of oscillation, λ > 0.
+    
+    Returns
+    -------
+    gamma : ndarray
+        Semivariance values.
+    
+    Notes
+    -----
+    The hole-effect model oscillates between 0 and 2C.
+    It indicates quasi-periodic structure in the data.
+    
+    ⚠️ WARNING: Can produce negative covariances. Use with caution
+    and typically in combination with other models.
+    
+    Physical interpretation: Layered geological structures,
+    seasonal effects, regular spatial patterns.
+    
+    References
+    ----------
+    Ma, Y.Z. & Jones, T.A. (2001). Modeling hole-effect variograms.
+    Mathematical Geology, 33(5), 631-648.
+    """
+    h = np.asarray(h, dtype=float)
+    return sill * (1 - np.cos(2 * np.pi * h / wavelength))
+
+
+def power(h: np.ndarray, scale: float, exponent: float) -> np.ndarray:
+    """Power variogram model (unbounded/non-stationary).
+    
+    γ(h) = α * h^ω,  where 0 < ω < 2
+    
+    Parameters
+    ----------
+    h : array-like
+        Lag distances.
+    scale : float
+        Scale parameter, α > 0.
+    exponent : float
+        Power exponent, ω ∈ (0, 2).
+    
+    Returns
+    -------
+    gamma : ndarray
+        Semivariance values.
+    
+    Notes
+    -----
+    ⚠️ NON-STATIONARY: This model has no finite sill. The variance
+    increases indefinitely with distance, implying:
+        - Trend in the data that wasn't removed
+        - Process operates at scales larger than your study area
+        - True fractal behavior (rare in practice)
+    
+    The exponent relates to fractal dimension: D = 2 - ω/2 (for 1D).
+    
+    Constraint: ω ∈ (0, 2) is required for conditional negative definiteness.
+    
+    References
+    ----------
+    Chilès, J.P. & Delfiner, P. (2012). Geostatistics, Section 2.5.
+    """
+    h = np.asarray(h, dtype=float)
+    return scale * np.power(h, exponent)
+
+
+def linear(h: np.ndarray, slope: float) -> np.ndarray:
+    """Linear variogram model (unbounded/non-stationary).
+    
+    γ(h) = β * h
+    
+    This is a special case of the power model with exponent = 1.
+    
+    Parameters
+    ----------
+    h : array-like
+        Lag distances.
+    slope : float
+        Slope parameter, β > 0.
+    
+    Returns
+    -------
+    gamma : ndarray
+        Semivariance values.
+    
+    Notes
+    -----
+    ⚠️ NON-STATIONARY: Indicates unresolved trend or drift in the mean.
+    Consider detrending the data before variogram analysis.
+    """
+    h = np.asarray(h, dtype=float)
+    return slope * h
+
+
+def nugget(h: np.ndarray, c0: float) -> np.ndarray:
+    """Pure nugget effect model.
+    
+    γ(h) = 0   for h = 0
+         = C₀  for h > 0
+    
+    Parameters
+    ----------
+    h : array-like
+        Lag distances.
+    c0 : float
+        Nugget variance, C₀ ≥ 0.
+    
+    Returns
+    -------
+    gamma : ndarray
+        Semivariance values.
+    
+    Notes
+    -----
+    The nugget represents:
+        1. Measurement error (instrument precision)
+        2. Microscale variation (below sampling resolution)
+        3. Georeferencing error
+    
+    A large nugget (>50% of total sill) suggests noisy data or
+    strong micro-topographic variation. A small nugget (<10%)
+    indicates smooth variation. Zero nugget is rare in practice.
+    """
+    h = np.asarray(h, dtype=float)
+    return np.where(h > 0, c0, 0.0)
+
+
+# =============================================================================
+# Model Registry
+# =============================================================================
+
+class VariogramModelRegistry:
+    """Registry of available variogram models.
+    
+    This class provides a centralized catalog of valid variogram models
+    with their specifications, default parameters, and validation rules.
+    
+    Examples
+    --------
+    >>> registry = VariogramModelRegistry()
+    >>> spec = registry.get_model('spherical')
+    >>> print(spec.description)
+    
+    >>> # Check if combination is valid
+    >>> valid, msg = registry.validate_combination(['spherical', 'exponential'])
+    """
+    
+    def __init__(self):
+        self._models: Dict[str, VariogramModelSpec] = {}
+        self._register_default_models()
+    
+    def _register_default_models(self):
+        """Register all standard models."""
+        
+        # Helper for default guesses and bounds
+        def _bounded_guess(lags, variogram):
+            max_gamma = np.nanmax(variogram)
+            max_lag = np.nanmax(lags)
+            return [max_gamma * 0.9, max_lag / 3]
+        
+        def _bounded_bounds(lags, variogram):
+            max_gamma = np.nanmax(variogram) * 10
+            max_lag = np.nanmax(lags) * 2
+            return ([0, 1e-6], [max_gamma, max_lag])
+        
+        # Spherical
+        spherical_spec = VariogramModelSpec(
+            name='spherical',
+            func=spherical,
+            param_names=['sill', 'range'],
+            is_bounded=True,
+            has_sill=True,
+            practical_range_factor=1.0,
+            description="Spherical model: reaches sill exactly at range. "
+                       "Common for sedimentary deposits."
+        )
+        spherical_spec._default_guess = _bounded_guess
+        spherical_spec._bounds = _bounded_bounds
+        self._models['spherical'] = spherical_spec
+        
+        # Exponential
+        exp_spec = VariogramModelSpec(
+            name='exponential',
+            func=exponential,
+            param_names=['sill', 'range'],
+            is_bounded=True,
+            has_sill=True,
+            practical_range_factor=3.0,
+            description="Exponential model: asymptotic approach to sill. "
+                       "Practical range = 3 × range parameter."
+        )
+        exp_spec._default_guess = _bounded_guess
+        exp_spec._bounds = _bounded_bounds
+        self._models['exponential'] = exp_spec
+        
+        # Gaussian
+        gauss_spec = VariogramModelSpec(
+            name='gaussian',
+            func=gaussian,
+            param_names=['sill', 'range'],
+            is_bounded=True,
+            has_sill=True,
+            practical_range_factor=1.73,
+            description="Gaussian model: very smooth variation. "
+                       "⚠️ May cause numerical instability without nugget."
+        )
+        gauss_spec._default_guess = _bounded_guess
+        gauss_spec._bounds = _bounded_bounds
+        self._models['gaussian'] = gauss_spec
+        
+        # Matérn
+        def _matern_guess(lags, variogram):
+            max_gamma = np.nanmax(variogram)
+            max_lag = np.nanmax(lags)
+            return [max_gamma * 0.9, max_lag / 3, 1.5]  # Default nu=1.5
+        
+        def _matern_bounds(lags, variogram):
+            max_gamma = np.nanmax(variogram) * 10
+            max_lag = np.nanmax(lags) * 2
+            return ([0, 1e-6, 0.1], [max_gamma, max_lag, 5.0])
+        
+        matern_spec = VariogramModelSpec(
+            name='matern',
+            func=matern,
+            param_names=['sill', 'range', 'nu'],
+            is_bounded=True,
+            has_sill=True,
+            practical_range_factor=None,  # Depends on nu
+            description="Matérn model: flexible smoothness via nu parameter. "
+                       "nu=0.5 → exponential, nu→∞ → Gaussian."
+        )
+        matern_spec._default_guess = _matern_guess
+        matern_spec._bounds = _matern_bounds
+        self._models['matern'] = matern_spec
+        
+        # Hole-effect
+        def _hole_guess(lags, variogram):
+            max_gamma = np.nanmax(variogram)
+            max_lag = np.nanmax(lags)
+            return [max_gamma / 2, max_lag / 2]
+        
+        def _hole_bounds(lags, variogram):
+            max_gamma = np.nanmax(variogram) * 5
+            max_lag = np.nanmax(lags) * 2
+            return ([0, 1e-6], [max_gamma, max_lag])
+        
+        hole_spec = VariogramModelSpec(
+            name='hole_effect',
+            func=hole_effect,
+            param_names=['sill', 'wavelength'],
+            is_bounded=True,
+            has_sill=True,
+            practical_range_factor=0.5,  # Half wavelength to first peak
+            description="Hole-effect model: quasi-periodic variation. "
+                       "⚠️ Can produce negative covariances."
+        )
+        hole_spec._default_guess = _hole_guess
+        hole_spec._bounds = _hole_bounds
+        self._models['hole_effect'] = hole_spec
+        
+        # Power (unbounded)
+        def _power_guess(lags, variogram):
+            # Estimate from log-log regression
+            valid = (lags > 0) & (variogram > 0)
+            if np.sum(valid) < 2:
+                return [0.1, 1.0]
+            log_h = np.log(lags[valid])
+            log_g = np.log(variogram[valid])
+            slope = np.polyfit(log_h, log_g, 1)[0]
+            slope = np.clip(slope, 0.1, 1.9)
+            scale = np.exp(np.mean(log_g - slope * log_h))
+            return [scale, slope]
+        
+        def _power_bounds(lags, variogram):
+            return ([1e-10, 0.01], [100, 1.99])
+        
+        power_spec = VariogramModelSpec(
+            name='power',
+            func=power,
+            param_names=['scale', 'exponent'],
+            is_bounded=False,
+            has_sill=False,
+            practical_range_factor=None,
+            description="Power model: γ(h) = α·h^ω. "
+                       "⚠️ NON-STATIONARY: No finite sill. "
+                       "Implies trend or fractal behavior."
+        )
+        power_spec._default_guess = _power_guess
+        power_spec._bounds = _power_bounds
+        self._models['power'] = power_spec
+        
+        # Linear (unbounded)
+        def _linear_guess(lags, variogram):
+            valid = lags > 0
+            if np.sum(valid) < 2:
+                return [0.1]
+            slope = np.polyfit(lags[valid], variogram[valid], 1)[0]
+            return [max(slope, 1e-6)]
+        
+        def _linear_bounds(lags, variogram):
+            return ([1e-10], [100])
+        
+        linear_spec = VariogramModelSpec(
+            name='linear',
+            func=linear,
+            param_names=['slope'],
+            is_bounded=False,
+            has_sill=False,
+            practical_range_factor=None,
+            description="Linear model: γ(h) = β·h. "
+                       "⚠️ NON-STATIONARY: Indicates trend/drift."
+        )
+        linear_spec._default_guess = _linear_guess
+        linear_spec._bounds = _linear_bounds
+        self._models['linear'] = linear_spec
+    
+    def get_model(self, name: str) -> VariogramModelSpec:
+        """Get model specification by name."""
+        if name not in self._models:
+            raise ValueError(f"Unknown model: {name}. "
+                           f"Available: {list(self._models.keys())}")
+        return self._models[name]
+    
+    def list_models(self) -> List[str]:
+        """List all available model names."""
+        return list(self._models.keys())
+    
+    def list_bounded_models(self) -> List[str]:
+        """List only bounded (stationary) models."""
+        return [name for name, spec in self._models.items() if spec.is_bounded]
+    
+    def list_unbounded_models(self) -> List[str]:
+        """List only unbounded (non-stationary) models."""
+        return [name for name, spec in self._models.items() if not spec.is_bounded]
+    
+    def is_bounded(self, name: str) -> bool:
+        """Check if a model is bounded (stationary)."""
+        return self.get_model(name).is_bounded
+    
+    def validate_combination(
+        self, 
+        model_names: List[str],
+        include_nugget: bool = False
+    ) -> Tuple[bool, str]:
+        """Validate if a combination of models is allowed.
+        
+        Parameters
+        ----------
+        model_names : List[str]
+            Names of models to combine.
+        include_nugget : bool
+            Whether a nugget will be added.
+        
+        Returns
+        -------
+        valid : bool
+            True if combination is valid.
+        message : str
+            Description of validation result or warning.
+        """
+        if not model_names:
+            return False, "At least one model required."
+        
+        # Check all models exist
+        for name in model_names:
+            if name not in self._models:
+                return False, f"Unknown model: {name}"
+        
+        # Count bounded vs unbounded
+        bounded = [n for n in model_names if self._models[n].is_bounded]
+        unbounded = [n for n in model_names if not self._models[n].is_bounded]
+        
+        # Rule: Cannot combine multiple unbounded models
+        if len(unbounded) > 1:
+            return False, (
+                f"Cannot combine multiple unbounded models: {unbounded}. "
+                "This would violate positive definiteness constraints."
+            )
+        
+        # Rule: power + linear specifically forbidden
+        if 'power' in unbounded and 'linear' in unbounded:
+            return False, "Cannot combine power and linear models."
+        
+        # Warning for unbounded models
+        if unbounded:
+            msg = (
+                f"⚠️ NON-STATIONARY combination: includes {unbounded}. "
+                "The process has no finite variance. Results will be scale-dependent. "
+                "Consider detrending your data if this is unexpected."
+            )
+            if bounded:
+                msg += f" Stationary components ({bounded}) will be reported separately."
+            return True, msg
+        
+        # Warning for Gaussian without nugget
+        if 'gaussian' in bounded and not include_nugget:
+            return True, (
+                "⚠️ Gaussian model without nugget may cause numerical instability. "
+                "Consider adding a nugget effect."
+            )
+        
+        return True, "Valid combination."
+
+
+# Global registry instance
+MODEL_REGISTRY = VariogramModelRegistry()
