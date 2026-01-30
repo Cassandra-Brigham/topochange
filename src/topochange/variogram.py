@@ -969,6 +969,8 @@ class VariogramAnalysis:
         self.max_nugget = None
         self.median_nugget = None
         self.best_aic = None
+        self.best_bic = None
+        self.selection_criterion = None 
         self.best_params = None
         self.best_model_config = None
         self.cv_mean_error_best_aic = None
@@ -1355,11 +1357,12 @@ class VariogramAnalysis:
         sigma_type: str = 'std',
         bounds: Optional[tuple] = None,
         method: str = 'trf',
+        criterion: str = 'aic',
         *,
         seed: Optional[int] = None
     ) -> None:
         """
-        Fit spherical variogram models (1–3 components, optional nugget) and select the best by AIC.
+        Fit spherical variogram models (1–3 components, optional nugget) and select the best.
 
         Parameters
         ----------
@@ -1369,6 +1372,10 @@ class VariogramAnalysis:
             Optional (lb, ub) for parameters; if None, internal bounds are used.
         method : str
             curve_fit method (default 'trf').
+        criterion : {'aic', 'bic'}
+            Information criterion for model selection.
+            - 'aic': Akaike Information Criterion (default)
+            - 'bic': Bayesian Information Criterion
         seed : int | None
             RNG seed for randomized initial guesses.
 
@@ -1394,13 +1401,19 @@ class VariogramAnalysis:
             sigma = 1.0 / (1.0 + self.lags ** 2)
         else:
             raise ValueError(f"Unknown sigma_type '{sigma_type}'. Use 'std', 'linear', 'exp', 'sqrt', or 'sq'.")
+        
+        if criterion not in ('aic', 'bic'):
+            raise ValueError(f"criterion must be 'aic' or 'bic', got '{criterion}'")
 
         best_params = None
         best_model = None
         best_func = None
+        best_criterion_value = np.inf
         best_aic = np.inf
+        best_bic = np.inf
         best_bounds = None
         best_guess = None
+        n_obs = len(self.lags)
 
         lag_max = float(np.max(self.lags)) if self.lags is not None and len(self.lags) else 1.0
         for config in (
@@ -1453,9 +1466,14 @@ class VariogramAnalysis:
                 ll = self._weighted_loglike_gaussian(self.mean_variogram, yhat, sigma)
                 k = len(popt)
                 aic = 2 * k - 2 * ll
+                bic = k * np.log(n_obs) - 2 * ll
 
-                if aic < best_aic:
+                current_criterion_value = aic if criterion == 'aic' else bic
+
+                if current_criterion_value < best_criterion_value:
+                    best_criterion_value = current_criterion_value
                     best_aic = aic
+                    best_bic = bic
                     best_params = popt
                     best_model = config
                     best_func = model
@@ -1471,6 +1489,8 @@ class VariogramAnalysis:
         self.best_aic = best_aic
         self.best_bounds = best_bounds
         self.best_guess = best_guess
+        self.best_bic = best_bic
+        self.selection_criterion = criterion
         self.fitted_variogram = (
             self.spherical_model_with_nugget if self.best_model_config['nugget']
             else self.spherical_model
