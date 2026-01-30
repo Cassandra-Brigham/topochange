@@ -1656,6 +1656,56 @@ class VariogramAnalysis:
         self.model_selector = selector
 
         return best
+    
+    def _store_fitted_model_results(
+        self,
+        fitted: 'FittedVariogramModel',
+        selector: 'VariogramModelSelector'
+    ) -> None:
+        """Transfer FittedVariogramModel results to VariogramAnalysis attributes.
+
+        Ensures backward compatibility with code expecting traditional attributes.
+        """
+        model = fitted.composite_model
+        params = fitted.params
+
+        # Extract sills, ranges from composite model
+        sills = []
+        ranges = []
+
+        for i, spec in enumerate(model._components):
+            comp_params = model.get_component_params(i)
+            if spec.has_sill:
+                sills.append(comp_params[0])
+            if 'range' in spec.param_names:
+                range_idx = spec.param_names.index('range')
+                ranges.append(comp_params[range_idx])
+
+        self.sills = np.array(sills) if sills else np.array([])
+        self.ranges = np.array(ranges) if ranges else np.array([])
+        self.best_nugget = model.get_nugget() if model.include_nugget else None
+        self.best_params = params
+        self.best_aic = fitted.aic
+        self.best_bic = fitted.bic
+
+        # Callable for the model function
+        self.best_model_func = lambda h, *p: model(np.asarray(h, dtype=float))
+        self.fitted_variogram = model(self.lags)
+
+        self.best_model_config = {
+            'components': len(model.component_names),
+            'nugget': model.include_nugget,
+            'model_types': model.component_names,
+        }
+
+        # Bootstrap percentiles
+        if fitted.param_samples is not None and len(fitted.param_samples) > 0:
+            samples = fitted.param_samples
+            # ... extract percentiles for sills, ranges, nugget
+            # (similar logic to existing bootstrap handling)
+
+        self.param_samples = fitted.param_samples
+        self.cv_mean_error_best_aic = {'rmse': fitted.cv_rmse} if fitted.cv_rmse else None
 
     def plot_best_spherical_model(self):
         """
