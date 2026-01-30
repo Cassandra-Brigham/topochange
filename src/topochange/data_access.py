@@ -2918,6 +2918,551 @@ class GetDEMs:
                 if value is not None:
                     self._reference_metadata[key] = value
 
+    def pointcloud_download_workflow(
+        self,
+        folder,
+        output_name,
+        API_Key,
+        dataset_type="compare",
+        epoch: Optional[date] = None,
+        filterNoise=True,
+        reclassify=False,
+        pc_resolution=0.1,
+        outCRS="WGS84 UTM",
+    ):
+        """Download point cloud data and save as a single merged LAZ file.
+
+        This workflow downloads point cloud tiles (via OpenTopography S3,
+        USGS EPT, or NOAA EPT), merges them using PDAL streaming, and
+        writes a single LAZ file per dataset.  Unlike
+        :meth:`dem_download_workflow`, it does **not** grid the points
+        into DEM rasters—it stops after producing the merged point cloud
+        so that downstream code can apply CRS transformations, ICP
+        alignment, and DEM creation via the ``PointCloud`` /
+        ``PointCloudPair`` API.
+
+        Parameters
+        ----------
+        folder : str
+            Directory in which to save the downloaded/merged point cloud.
+        output_name : str
+            Base filename used when saving outputs.  The final file will
+            be named ``<output_name>_<dataset_type>.laz``.
+        API_Key : str
+            Enterprise API key for accessing OpenTopography-hosted
+            datasets.
+        dataset_type : {'compare', 'reference'}, default 'compare'
+            Which survey this dataset corresponds to.
+        epoch : datetime.date or None, optional
+            Epoch date to embed in the output CRS.  If omitted the
+            current date is used.
+        filterNoise : bool, default True
+            Remove noise classes 7 and 18 during reprojection.
+        reclassify : bool, default False
+            Apply SMRF ground classification prior to writing.
+        pc_resolution : float, default 0.1
+            Resolution for sampling points from EPT sources.
+        outCRS : str, default 'WGS84 UTM'
+            Output CRS.  ``"WGS84 UTM"`` auto-selects an appropriate
+            UTM zone from the AOI.
+
+        Returns
+        -------
+        str
+            Absolute path to the merged/downloaded LAZ file.
+        """
+
+        # ---- CRS setup (mirrors dem_download_workflow) ----
+        self.initial_compare_dataset_crs = int(self.ot.compare_horizontal_crs)
+        self.initial_reference_dataset_crs = int(self.ot.reference_horizontal_crs)
+
+        self.target_compare_dataset_crs = self.native_utm_crs_from_aoi_bounds(
+            self.da.bounds, "WGS84"
+        ).to_epsg()
+        self.target_reference_dataset_crs = self.native_utm_crs_from_aoi_bounds(
+            self.da.bounds, "WGS84"
+        ).to_epsg()
+
+        self.bounds_polygon_epsg_initial_compare_crs = self.reproject_polygon(
+            self.da.polygon["merged_polygon"], 4326, self.initial_compare_dataset_crs
+        )
+        self.bounds_polygon_epsg_initial_reference_crs = self.reproject_polygon(
+            self.da.polygon["merged_polygon"], 4326, self.initial_reference_dataset_crs
+        )
+
+        if dataset_type == "compare":
+            bounds_polygon_epsg_initial_crs = self.bounds_polygon_epsg_initial_compare_crs
+            data_source_ = self.ot.compare_data_source
+            dataset_id = self.ot.compare_property_id
+            dataset_crs_ = self.target_compare_dataset_crs
+        elif dataset_type == "reference":
+            data_source_ = self.ot.reference_data_source
+            dataset_id = self.ot.reference_property_id
+            bounds_polygon_epsg_initial_crs = self.bounds_polygon_epsg_initial_reference_crs
+            dataset_crs_ = self.target_reference_dataset_crs
+        else:
+            raise ValueError("dataset_type must be either 'compare' or 'reference'")
+
+        if outCRS == "WGS84 UTM":
+            base_crs = CRS.from_epsg(dataset_crs_)
+        else:
+            base_crs = CRS.from_user_input(outCRS)
+
+        # Build output CRS string (with optional epoch)
+        if epoch:
+            try:
+                proj_string = base_crs.to_proj4()
+                decimal_year = epoch.year + (epoch.timetuple().tm_yday - 1) / 365.25
+                final_out_crs_wkt = f"{proj_string} +epoch={decimal_year:.4f}"
+                print(f"Using epoch {epoch} for {dataset_type} dataset via PROJ string.")
+            except Exception as e:
+                warnings.warn(
+                    f"Could not add epoch to PROJ string: {e}. Proceeding without epoch."
+                )
+                final_out_crs_wkt = base_crs.to_wkt()
+        else:
+            final_out_crs_wkt = base_crs.to_wkt()
+            print(f"No epoch provided for {dataset_type} dataset.")
+
+        output_laz = os.path.join(folder, f"{output_name}_{dataset_type}.laz")
+
+        # ---------- OpenTopography S3 ----------
+        if data_source_ == "ot":
+            if not _BOTO3_AVAILABLE:
+                raise ImportError(
+                    "boto3 is required for downloading OpenTopography datasets. "
+                    "Install with: pip install boto3"
+                )
+
+            if dataset_type == "compare":
+                short_name = getattr(self.ot, "compare_short_name", None)
+            else:
+                short_name = getattr(self.ot, "reference_short_name", None)
+
+            if short_name is None or pd.isna(short_name):
+                if dataset_type == "compare":
+                    short_name = getattr(self.ot, "compare_clean_name", None) or dataset_id
+                else:
+                    short_name = getattr(self.ot, "reference_clean_name", None) or dataset_id
+                logger.warning(f"Short name not found in catalog, using: {short_name}")
+
+            logger.info(f"Downloading OpenTopography dataset via S3: {short_name}")
+
+            # Setup S3 client (unsigned access)
+            s3_config = Config(
+                signature_version=UNSIGNED,
+                retries={"max_attempts": 3, "mode": "standard"},
+                s3={"addressing_style": "path"},
+            )
+            s3_client = boto3.client(
+                "s3",
+                endpoint_url="https://opentopography.s3.sdsc.edu",
+                config=s3_config,
+            )
+
+            pc_output_dir = Path(folder) / f"{output_name}_{dataset_type}_tiles"
+            pc_output_dir.mkdir(parents=True, exist_ok=True)
+
+            downloaded_laz_files = []
+
+            try:
+                # Search for tile index files at root level
+                tile_index_candidates = []
+                root_response = s3_client.list_objects_v2(
+                    Bucket="pc-bulk",
+                    Prefix=f"{short_name}/",
+                    Delimiter="/",
+                    MaxKeys=1000,
+                )
+
+                for obj in root_response.get("Contents", []):
+                    key = obj["Key"]
+                    filename = Path(key).name.lower()
+                    if filename.endswith(".zip"):
+                        if any(
+                            p in filename
+                            for p in [
+                                "tileindex", "tile_index", "tiles", "index",
+                                "footprint", "boundary", "extent", "grid",
+                            ]
+                        ):
+                            tile_index_candidates.append(("zip", key))
+                            logger.info(f"Found tile index candidate: {key}")
+                    elif filename.endswith(".shp"):
+                        if any(
+                            p in filename
+                            for p in [
+                                "tileindex", "tile_index", "tiles", "index",
+                                "footprint", "boundary", "extent", "grid",
+                            ]
+                        ):
+                            tile_index_candidates.append(("shp", key))
+                            logger.info(f"Found tile index candidate: {key}")
+
+                subdirs = [
+                    p["Prefix"] for p in root_response.get("CommonPrefixes", [])
+                ]
+                root_files = [
+                    Path(obj["Key"]).name for obj in root_response.get("Contents", [])
+                ]
+                if root_files:
+                    logger.info(f"Root level files: {root_files}")
+
+                aoi_geom = self.da.polygon.get("merged_polygon")
+
+                tile_index_found = False
+                for idx_type, tile_index_key in tile_index_candidates:
+                    if tile_index_found:
+                        break
+                    try:
+                        with tempfile.TemporaryDirectory() as temp_dir:
+                            temp_path = Path(temp_dir)
+                            if idx_type == "zip":
+                                zip_path = temp_path / "tileindex.zip"
+                                logger.info(f"Downloading tile index zip: {tile_index_key}")
+                                s3_client.download_file("pc-bulk", tile_index_key, str(zip_path))
+                                with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                                    zip_ref.extractall(temp_path)
+                                shp_files = list(temp_path.rglob("*.shp"))
+                            else:
+                                logger.info(f"Downloading tile index shapefile: {tile_index_key}")
+                                base_key = tile_index_key[:-4]
+                                for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg"]:
+                                    try:
+                                        s3_client.download_file(
+                                            "pc-bulk",
+                                            base_key + ext,
+                                            str(temp_path / (Path(base_key).name + ext)),
+                                        )
+                                    except Exception:
+                                        pass
+                                shp_files = list(temp_path.glob("*.shp"))
+
+                            if shp_files:
+                                logger.info(f"Reading shapefile: {shp_files[0].name}")
+                                tiles_gdf = gpd.read_file(shp_files[0])
+                                logger.info(f"Tile index columns: {list(tiles_gdf.columns)}")
+                                tiles_gdf = tiles_gdf.to_crs("EPSG:4326")
+                                intersecting_tiles = tiles_gdf[tiles_gdf.intersects(aoi_geom)]
+                                logger.info(
+                                    f"Found {len(intersecting_tiles)} tiles intersecting with AOI "
+                                    f"(out of {len(tiles_gdf)} total)"
+                                )
+
+                                if len(intersecting_tiles) > 0:
+                                    tile_index_found = True
+
+                                    def _download_s3_tile(s3_key, local_path):
+                                        try:
+                                            if local_path.exists():
+                                                logger.info(f"File already exists: {local_path.name}")
+                                                return str(local_path)
+                                            logger.info(f"Downloading: {s3_key}")
+                                            s3_client.download_file("pc-bulk", s3_key, str(local_path))
+                                            return str(local_path)
+                                        except Exception as e:
+                                            logger.error(f"Failed to download {s3_key}: {e}")
+                                            return None
+
+                                    with ThreadPoolExecutor(max_workers=5) as executor:
+                                        futures = []
+                                        for idx, tile in intersecting_tiles.iterrows():
+                                            url_val = None
+                                            tile_filename = None
+                                            s3_key = None
+
+                                            if "URL" in tile.index and pd.notna(tile["URL"]):
+                                                url_val = str(tile["URL"]).strip()
+                                                if "pc-bulk/" in url_val:
+                                                    s3_key = url_val.split("pc-bulk/")[-1]
+                                                    tile_filename = Path(s3_key).name
+                                            elif "url" in tile.index and pd.notna(tile["url"]):
+                                                url_val = str(tile["url"]).strip()
+                                                if "pc-bulk/" in url_val:
+                                                    s3_key = url_val.split("pc-bulk/")[-1]
+                                                    tile_filename = Path(s3_key).name
+
+                                            if not tile_filename:
+                                                for field in ["Filename", "filename"]:
+                                                    if field in tile.index and pd.notna(tile[field]):
+                                                        tile_filename = str(tile[field]).strip()
+                                                        break
+
+                                            if not tile_filename:
+                                                logger.warning(f"No filename found for tile at index {idx}")
+                                                continue
+
+                                            if not tile_filename.lower().endswith((".laz", ".las")):
+                                                continue
+
+                                            if not s3_key:
+                                                root_key = f"{short_name}/{tile_filename}"
+                                                try:
+                                                    s3_client.head_object(Bucket="pc-bulk", Key=root_key)
+                                                    s3_key = root_key
+                                                except Exception:
+                                                    alt = (
+                                                        tile_filename[:-4] + ".laz"
+                                                        if tile_filename.lower().endswith(".las")
+                                                        else tile_filename[:-4] + ".las"
+                                                    )
+                                                    alt_key = f"{short_name}/{alt}"
+                                                    try:
+                                                        s3_client.head_object(Bucket="pc-bulk", Key=alt_key)
+                                                        s3_key = alt_key
+                                                        tile_filename = alt
+                                                    except Exception:
+                                                        for sd in subdirs:
+                                                            for try_fn in [tile_filename, alt]:
+                                                                sd_key = f"{sd}{try_fn}"
+                                                                try:
+                                                                    s3_client.head_object(Bucket="pc-bulk", Key=sd_key)
+                                                                    s3_key = sd_key
+                                                                    tile_filename = try_fn
+                                                                    break
+                                                                except Exception:
+                                                                    continue
+                                                            if s3_key:
+                                                                break
+
+                                            if s3_key:
+                                                out_path = pc_output_dir / tile_filename
+                                                futures.append(
+                                                    executor.submit(_download_s3_tile, s3_key, out_path)
+                                                )
+                                            else:
+                                                logger.warning(f"Could not find {tile_filename} in bucket")
+
+                                        for future in as_completed(futures):
+                                            result = future.result()
+                                            if result:
+                                                downloaded_laz_files.append(result)
+                                else:
+                                    logger.warning(
+                                        f"No tiles intersect AOI in {Path(tile_index_key).name}"
+                                    )
+                            else:
+                                logger.warning(f"No shapefile found in {tile_index_key}")
+                    except Exception as e:
+                        logger.warning(f"Failed to process tile index {tile_index_key}: {e}")
+                        continue
+
+                # Fallback: filename-based filtering
+                if not tile_index_found:
+                    if not tile_index_candidates:
+                        logger.warning(f"No tile index files found for {short_name}")
+
+                    logger.info("Falling back to filename-based tile filtering...")
+                    dataset_epsg = (
+                        self.ot.compare_horizontal_crs
+                        if dataset_type == "compare"
+                        else self.ot.reference_horizontal_crs
+                    )
+                    try:
+                        dataset_epsg_int = int(dataset_epsg) if dataset_epsg else None
+                    except (ValueError, TypeError):
+                        dataset_epsg_int = None
+
+                    if not dataset_epsg_int:
+                        raise RuntimeError(
+                            f"Cannot download OT dataset without valid CRS. EPSG={dataset_epsg}"
+                        )
+
+                    laz_files_in_bucket = []
+                    paginator = s3_client.get_paginator("list_objects_v2")
+                    page_iterator = paginator.paginate(
+                        Bucket="pc-bulk",
+                        Prefix=f"{short_name}/",
+                        PaginationConfig={"MaxItems": 50000},
+                    )
+                    for page in page_iterator:
+                        for obj in page.get("Contents", []):
+                            key = obj["Key"]
+                            if key.lower().endswith((".laz", ".las")):
+                                laz_files_in_bucket.append(key)
+
+                    if not laz_files_in_bucket:
+                        raise RuntimeError(f"No LAZ files found in bucket {short_name}/")
+
+                    transformer = Transformer.from_crs(
+                        "EPSG:4326", f"EPSG:{dataset_epsg_int}", always_xy=True
+                    )
+                    aoi_bounds_4326 = aoi_geom.bounds
+                    aoi_min_t = transformer.transform(aoi_bounds_4326[0], aoi_bounds_4326[1])
+                    aoi_max_t = transformer.transform(aoi_bounds_4326[2], aoi_bounds_4326[3])
+                    aoi_minx = min(aoi_min_t[0], aoi_max_t[0])
+                    aoi_miny = min(aoi_min_t[1], aoi_max_t[1])
+                    aoi_maxx = max(aoi_min_t[0], aoi_max_t[0])
+                    aoi_maxy = max(aoi_min_t[1], aoi_max_t[1])
+
+                    coord_patterns = [
+                        re.compile(r"(\d{6})_(\d{7})\.la[sz]$", re.IGNORECASE),
+                        re.compile(r"_(\d{3})(\d{5})_\d+\.la[sz]$", re.IGNORECASE),
+                        re.compile(r"(\d{5,7})_(\d{5,8})\.la[sz]$", re.IGNORECASE),
+                    ]
+                    matching_files = []
+                    tile_size = 1000
+
+                    for key in laz_files_in_bucket:
+                        fname = Path(key).name
+                        for pattern in coord_patterns:
+                            match = pattern.search(fname)
+                            if match:
+                                try:
+                                    c1 = float(match.group(1))
+                                    c2 = float(match.group(2))
+                                    if c1 < 1000:
+                                        c1 *= 1000
+                                    if c2 < 100000:
+                                        c2 *= 1000
+                                    if (
+                                        c1 + tile_size >= aoi_minx
+                                        and c1 <= aoi_maxx
+                                        and c2 + tile_size >= aoi_miny
+                                        and c2 <= aoi_maxy
+                                    ):
+                                        matching_files.append(key)
+                                        break
+                                except (ValueError, IndexError):
+                                    continue
+
+                    if matching_files:
+                        for key in matching_files:
+                            fname = Path(key).name
+                            out_path = pc_output_dir / fname
+                            try:
+                                if not out_path.exists():
+                                    s3_client.download_file("pc-bulk", key, str(out_path))
+                                downloaded_laz_files.append(str(out_path))
+                            except Exception as e:
+                                logger.error(f"Failed to download {key}: {e}")
+                    else:
+                        raise RuntimeError(
+                            "No tiles found intersecting AOI after coordinate parsing"
+                        )
+
+            except Exception as e:
+                logger.error(f"Error downloading OpenTopography dataset {short_name}: {e}")
+                raise
+
+            if not downloaded_laz_files:
+                raise RuntimeError(
+                    f"No LAZ files downloaded for OpenTopography dataset {short_name}"
+                )
+
+            logger.info(f"Downloaded {len(downloaded_laz_files)} LAZ tiles")
+
+            # Merge tiles (with crop + optional noise filter + reproject) into single LAZ
+            if len(downloaded_laz_files) == 1:
+                # Single tile — still reproject into target CRS
+                single_pipeline = {
+                    "pipeline": self.build_pdal_pipeline_from_file(
+                        downloaded_laz_files[0],
+                        bounds_polygon_epsg_initial_crs,
+                        filterNoise=filterNoise,
+                        reclassify=reclassify,
+                        savePointCloud=True,
+                        outCRS=final_out_crs_wkt,
+                        pc_outName=output_laz.replace(".laz", ""),
+                        pc_outType="laz",
+                    )
+                }
+                pipe = pdal.Pipeline(json.dumps(single_pipeline))
+                pipe.execute_streaming(chunk_size=1000000)
+            else:
+                # Multi-tile: merge then crop/reproject/write
+                merge_pipeline = {
+                    "pipeline": [
+                        {"type": "readers.las", "filename": f}
+                        for f in downloaded_laz_files
+                    ]
+                    + [
+                        {"type": "filters.merge"},
+                        {
+                            "type": "filters.crop",
+                            "polygon": str(bounds_polygon_epsg_initial_crs),
+                        },
+                    ]
+                }
+                if filterNoise:
+                    merge_pipeline["pipeline"].append(
+                        {
+                            "type": "filters.range",
+                            "limits": "Classification![7:7], Classification![18:18]",
+                        }
+                    )
+                if reclassify:
+                    merge_pipeline["pipeline"].extend(
+                        [
+                            {"type": "filters.assign", "value": "Classification = 0"},
+                            {"type": "filters.smrf"},
+                            {"type": "filters.range", "limits": "Classification[2:2]"},
+                        ]
+                    )
+                merge_pipeline["pipeline"].append(
+                    {"type": "filters.reprojection", "out_srs": final_out_crs_wkt}
+                )
+                merge_pipeline["pipeline"].append(
+                    {
+                        "type": "writers.las",
+                        "compression": "laszip",
+                        "filename": output_laz,
+                    }
+                )
+
+                logger.info(
+                    f"Merging {len(downloaded_laz_files)} tiles into {output_laz}"
+                )
+                pipe = pdal.Pipeline(json.dumps(merge_pipeline))
+                pipe.execute_streaming(chunk_size=1000000)
+
+        # ---------- USGS EPT ----------
+        elif data_source_ == "usgs":
+            pc_pipeline = self.build_aws_pdal_pipeline(
+                bounds_polygon_epsg_initial_crs,
+                [dataset_id],
+                pc_resolution,
+                data_source="usgs",
+                filterNoise=filterNoise,
+                reclassify=reclassify,
+                savePointCloud=True,
+                outCRS=final_out_crs_wkt,
+                pc_outName=output_laz.replace(".laz", ""),
+                pc_outType="laz",
+            )
+            pipe = pdal.Pipeline(json.dumps(pc_pipeline))
+            pipe.execute_streaming(chunk_size=1000000)
+
+        # ---------- NOAA EPT ----------
+        elif data_source_ == "noaa":
+            pc_pipeline = self.build_aws_pdal_pipeline(
+                bounds_polygon_epsg_initial_crs,
+                [dataset_id],
+                pc_resolution,
+                data_source="noaa",
+                filterNoise=filterNoise,
+                reclassify=reclassify,
+                savePointCloud=True,
+                outCRS=final_out_crs_wkt,
+                pc_outName=output_laz.replace(".laz", ""),
+                pc_outType="laz",
+            )
+            pipe = pdal.Pipeline(json.dumps(pc_pipeline))
+            pipe.execute_streaming(chunk_size=1000000)
+
+        else:
+            raise ValueError(f"Unknown data source: {data_source_}")
+
+        logger.info(f"Point cloud saved: {output_laz}")
+
+        # Store path on instance for later retrieval
+        if dataset_type == "compare":
+            self.compare_pc_path = output_laz
+        else:
+            self.reference_pc_path = output_laz
+
+        return output_laz
+
     def set_compare_geoid(self, geoid_model: str):
         """
         Override the geoid model for the compare dataset.
