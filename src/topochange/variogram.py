@@ -974,6 +974,7 @@ class VariogramAnalysis:
         self.best_params = None
         self.best_model_config = None
         self.cv_mean_error_best_aic = None
+        self.fitted_model = None
         self.param_samples = None
         self.n_bins = None
         self.sigma_variogram = None
@@ -1568,6 +1569,93 @@ class VariogramAnalysis:
         self.cv_mean_error_best_aic = self.cross_validate_variogram(
             self.best_model_func, self.best_params, self.best_bounds, k=5, seed=seed
         )
+        
+    def fit_best_model_auto(
+        self,
+        model_types: Optional[List[str]] = None,
+        max_components: int = 2,
+        include_nugget: bool = True,
+        criterion: str = 'aic',
+        compute_cv: bool = True,
+        cv_folds: int = 5,
+        n_bootstrap: int = 500,
+        seed: Optional[int] = None,
+    ) -> 'FittedVariogramModel':
+        """
+        Fit multiple variogram model types and automatically select the best.
+
+        Parameters
+        ----------
+        model_types : list of str, optional
+            Model types to consider. Default: ['spherical', 'exponential', 'gaussian', 'matern']
+        max_components : int
+            Maximum number of nested components (default: 2, max: 3).
+        include_nugget : bool
+            Whether to include nugget effect in all candidate models.
+        criterion : {'aic', 'bic', 'cv'}
+            Selection criterion.
+
+        Returns
+        -------
+        FittedVariogramModel
+            Best fitted model with diagnostics.
+
+        Notes
+        -----
+        This method is model-agnostic for uncertainty propagation because
+        Monte Carlo integration works for ANY valid variogram function
+        (Krige's Relation - Chilès & Delfiner, 2012, Chapter 4).
+        """
+        if self.mean_variogram is None:
+            raise RuntimeError("No variogram data. Call calculate_mean_variogram_numba() first.")
+
+        if model_types is None:
+            model_types = ['spherical', 'exponential', 'gaussian', 'matern']
+
+        # Validate model_types
+        available = MODEL_REGISTRY.list_models()
+        for mt in model_types:
+            if mt not in available:
+                raise ValueError(f"Unknown model type '{mt}'. Available: {available}")
+
+        # Create selector
+        selector = VariogramModelSelector(
+            lags=self.lags,
+            empirical_variogram=self.mean_variogram,
+            weights=self.mean_count,
+            sigma=self.sigma_variogram,
+        )
+
+        # Override model lists with user selection
+        selector.BOUNDED_MODELS = [m for m in model_types if MODEL_REGISTRY.is_bounded(m)]
+        selector.UNBOUNDED_MODELS = [m for m in model_types if not MODEL_REGISTRY.is_bounded(m)]
+
+        # Fit all candidates
+        selector.fit_all_candidates(
+            max_components=min(max_components, 3),
+            include_nugget=include_nugget,
+            include_unbounded=bool(selector.UNBOUNDED_MODELS),
+            compute_cv=compute_cv,
+            cv_folds=cv_folds,
+            seed=seed,
+        )
+
+        if not selector.fitted_models:
+            raise RuntimeError("No models successfully fitted. Check input data.")
+
+        # Select best model
+        best = selector.select_best(criterion=criterion)
+
+        # Bootstrap parameter uncertainty
+        if n_bootstrap > 0:
+            selector.bootstrap_best_model(n_boot=n_bootstrap, seed=seed)
+
+        # Store results for compatibility
+        self._store_fitted_model_results(best, selector)
+        self.fitted_model = best
+        self.model_selector = selector
+
+        return best
 
     def plot_best_spherical_model(self):
         """
