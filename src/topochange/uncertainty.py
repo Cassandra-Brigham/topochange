@@ -71,8 +71,11 @@ class RegionalUncertaintyEstimator:
         stable_geoms=None,
         unstable_geoms=None,
         derive_stable_from_unstable: bool = True,
+        fitted_model: Optional['FittedVariogramModel'] = None,
+        use_bma: bool = False,
+        model_selector: Optional['VariogramModelSelector'] = None,
     ):
-        # ------------------------------------------------------------------ #
+            # ------------------------------------------------------------------ #
         # 1. Store handlers and variogram info
         # ------------------------------------------------------------------ #
         self.raster_data_handler = raster_data_handler
