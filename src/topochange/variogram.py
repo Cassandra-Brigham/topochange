@@ -1736,6 +1736,21 @@ class VariogramAnalysis:
         lines.append("=" * 80)
         return "\n".join(lines)
     
+    def get_bma_variogram_function(self) -> Callable:
+        """Get Bayesian Model Averaged variogram function.
+
+        Computes γ_BMA(h) = Σᵢ wᵢ · γᵢ(h) where wᵢ are Akaike weights.
+
+        References
+        ----------
+        Hoeting, J.A., et al. (1999). Bayesian Model Averaging: A Tutorial.
+        Statistical Science, 14(4), 382-417.
+        """
+        if not hasattr(self, 'model_selector') or self.model_selector is None:
+            raise RuntimeError("No model selector available. Call fit_best_model_auto() first.")
+
+        return self.model_selector.get_bma_variogram()
+    
     def plot_best_spherical_model(self):
         """
         Plot mean variogram ± spread and fitted model; also show bar plot of mean pair counts.
