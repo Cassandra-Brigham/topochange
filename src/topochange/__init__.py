@@ -34,8 +34,12 @@ from .variogram import (
     RasterDataHandler,
     StatisticalAnalysis,
     VariogramAnalysis,
+    VariogramModelSelector,
+    FittedVariogramModel,
 )
-from .uncertainty import RegionalUncertaintyEstimator
+from .uncertainty import RegionalUncertaintyEstimator, DerivativeUncertaintyEstimator
+from .variogram_models import MODEL_REGISTRY, VariogramModelRegistry
+from .composite_variogram import CompositeVariogramModel
 
 # Stable area analysis
 from .stable_area_analysis import (
@@ -57,11 +61,18 @@ __all__ = [
     # Point cloud
     "PointCloud",
     "PointCloudPair",
-    # Uncertainty
+    # Variogram analysis
     "RasterDataHandler",
     "StatisticalAnalysis",
     "VariogramAnalysis",
+    "VariogramModelSelector",
+    "FittedVariogramModel",
+    "MODEL_REGISTRY",
+    "VariogramModelRegistry",
+    "CompositeVariogramModel",
+    # Uncertainty propagation
     "RegionalUncertaintyEstimator",
+    "DerivativeUncertaintyEstimator",
     # Stable areas
     "TopoMapInteractor",
     "StableAreaRasterizer",
