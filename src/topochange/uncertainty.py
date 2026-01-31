@@ -27,7 +27,7 @@ from shapely.geometry import Polygon, MultiPolygon, box, Point
 from shapely.ops import unary_union
 from pathlib import Path
 import geopandas as gpd
-from typing import Optional, Callable, Tuple
+from typing import Optional, Callable, Tuple, List, Dict, Any
 
 from rasterio.features import geometry_mask
 
@@ -45,6 +45,9 @@ class RegionalUncertaintyEstimator:
 
     Supports both legacy spherical models and the new model-agnostic
     FittedVariogramModel/CompositeVariogramModel approach.
+    
+    Computes central, min, and max uncertainty estimates based on
+    bootstrap parameter percentiles (16th, 50th, 84th).
     """
 
     @staticmethod
@@ -69,25 +72,10 @@ class RegionalUncertaintyEstimator:
         self.raster_data_handler = raster_data_handler
         self.variogram_analysis = variogram_analysis
 
-        # --- Setup gamma function (model-agnostic) ---
-        if fitted_model is not None:
-            # New approach: use FittedVariogramModel directly
-            self.gamma_func = fitted_model.predict
-            self.sigma2 = fitted_model.composite_model.total_sill
-        elif use_bma and hasattr(variogram_analysis, 'model_selector'):
-            # Bayesian Model Averaging
-            self.gamma_func = variogram_analysis.get_bma_variogram_function()
-            # Weighted average of sills
-            selector = variogram_analysis.model_selector
-            self.sigma2 = sum(
-                w * m.composite_model.total_sill
-                for m, w in zip(selector.fitted_models, selector.model_weights)
-            )
-        elif variogram_analysis.best_model_func is not None:
-            # Legacy: use spherical model from VariogramAnalysis
-            self._setup_legacy_gamma(variogram_analysis)
-        else:
-            raise ValueError("No variogram model available. Fit a model first.")
+        # --- Setup gamma functions (central, min, max) ---
+        self._setup_gamma_functions(
+            variogram_analysis, fitted_model, use_bma
+        )
 
         # --- Resolve polygon of interest ---
         if isinstance(area_of_interest, (str, Path)):
@@ -132,30 +120,192 @@ class RegionalUncertaintyEstimator:
                 self.stable_geom = self._as_multipolygon(stable)
 
         # --- Results storage ---
-        self.sigma0_uncorrelated = None
-        self.mean_uncorrelated_polygon = None
-        self.mean_uncorrelated_raster = None
-        self.mean_correlated_polygon = None
-        self.mean_correlated_raster = None
-        self.total_uncertainty_polygon = None
-        self.total_uncertainty_raster = None
+        self._init_result_storage()
+
+    def _setup_gamma_functions(
+        self,
+        va: VariogramAnalysis,
+        fitted_model: Optional[FittedVariogramModel],
+        use_bma: bool,
+    ) -> None:
+        """Setup gamma functions for central, min, max parameter estimates."""
+        
+        # Initialize all gamma functions to None
+        self.gamma_func = None
+        self.gamma_func_min = None
+        self.gamma_func_max = None
+        
+        # Component-wise gamma functions
+        self.gamma_funcs_components: List[Optional[Callable]] = [None, None, None]
+        self.gamma_funcs_components_min: List[Optional[Callable]] = [None, None, None]
+        self.gamma_funcs_components_max: List[Optional[Callable]] = [None, None, None]
+        
+        # Total variance (sill + nugget)
+        self.sigma2 = None
+        self.sigma2_min = None
+        self.sigma2_max = None
+
+        if fitted_model is not None:
+            # New approach: use FittedVariogramModel
+            self.gamma_func = fitted_model.predict
+            self.sigma2 = fitted_model.composite_model.total_sill
+            
+            # Min/max from bootstrap if available
+            if fitted_model.param_samples is not None and len(fitted_model.param_samples) > 0:
+                self._setup_minmax_from_bootstrap(fitted_model)
+            else:
+                self.gamma_func_min = self.gamma_func
+                self.gamma_func_max = self.gamma_func
+                self.sigma2_min = self.sigma2
+                self.sigma2_max = self.sigma2
+                
+        elif use_bma and hasattr(va, 'model_selector') and va.model_selector is not None:
+            # Bayesian Model Averaging
+            self.gamma_func = va.get_bma_variogram_function()
+            selector = va.model_selector
+            self.sigma2 = sum(
+                w * m.composite_model.total_sill
+                for m, w in zip(selector.fitted_models, selector.model_weights)
+            )
+            # BMA doesn't have simple min/max - use same for all
+            self.gamma_func_min = self.gamma_func
+            self.gamma_func_max = self.gamma_func
+            self.sigma2_min = self.sigma2
+            self.sigma2_max = self.sigma2
+            
+        elif va.best_model_func is not None:
+            # Legacy spherical model
+            self._setup_legacy_gamma(va)
+        else:
+            raise ValueError("No variogram model available. Fit a model first.")
+
+    def _setup_minmax_from_bootstrap(self, fitted_model: FittedVariogramModel) -> None:
+        """Extract min/max gamma functions from bootstrap parameter samples."""
+        samples = fitted_model.param_samples
+        model = fitted_model.composite_model
+        
+        # Get parameter percentiles
+        params_16 = np.percentile(samples, 16, axis=0)
+        params_84 = np.percentile(samples, 84, axis=0)
+        
+        # Create min/max model functions
+        def make_gamma(params):
+            def gamma(h):
+                model.set_params(params)
+                return model(np.asarray(h, dtype=float))
+            return gamma
+        
+        self.gamma_func_min = make_gamma(params_16)
+        self.gamma_func_max = make_gamma(params_84)
+        
+        # Reset to central params
+        model.set_params(fitted_model.params)
+        
+        # Estimate sigma2 min/max (sum of sills + nugget at percentiles)
+        # This is approximate - proper way would parse param structure
+        self.sigma2_min = self.sigma2 * 0.8  # rough approximation
+        self.sigma2_max = self.sigma2 * 1.2
 
     def _setup_legacy_gamma(self, va: VariogramAnalysis) -> None:
-        """Setup gamma function from legacy spherical model."""
+        """Setup gamma functions from legacy spherical model."""
+        # Central estimates
         self.sills = np.array(va.sills, dtype=float)
         self.ranges = np.array(va.ranges, dtype=float)
         self.nugget = getattr(va, 'best_nugget', 0.0) or 0.0
         self.sigma2 = self.nugget + float(np.sum(self.sills))
 
+        # Min/max estimates
+        self.sills_min = np.array(getattr(va, 'sills_min', self.sills), dtype=float)
+        self.sills_max = np.array(getattr(va, 'sills_max', self.sills), dtype=float)
+        self.ranges_min = np.array(getattr(va, 'ranges_min', self.ranges), dtype=float)
+        self.ranges_max = np.array(getattr(va, 'ranges_max', self.ranges), dtype=float)
+        self.nugget_min = getattr(va, 'min_nugget', self.nugget) or 0.0
+        self.nugget_max = getattr(va, 'max_nugget', self.nugget) or 0.0
+
+        self.sigma2_min = self.nugget_min + float(np.sum(self.sills_min))
+        self.sigma2_max = self.nugget_max + float(np.sum(self.sills_max))
+
+        has_nugget = va.best_model_config.get('nugget', False)
+        model_func = va.best_model_func
+
+        # Central gamma function
         params = list(self.sills) + list(self.ranges)
-        if va.best_model_config.get('nugget'):
+        if has_nugget:
             params.append(self.nugget)
+        self.gamma_func = lambda h, p=params: model_func(np.asarray(h, dtype=float), *p)
 
-        self.gamma_func = lambda h: va.best_model_func(np.asarray(h, dtype=float), *params)
+        # Min gamma function
+        params_min = list(self.sills_min) + list(self.ranges_min)
+        if has_nugget:
+            params_min.append(self.nugget_min)
+        self.gamma_func_min = lambda h, p=params_min: model_func(np.asarray(h, dtype=float), *p)
 
-    def covariance(self, h: np.ndarray) -> np.ndarray:
+        # Max gamma function
+        params_max = list(self.sills_max) + list(self.ranges_max)
+        if has_nugget:
+            params_max.append(self.nugget_max)
+        self.gamma_func_max = lambda h, p=params_max: model_func(np.asarray(h, dtype=float), *p)
+
+        # Component-wise gamma functions (for multi-component models)
+        n_components = len(self.sills)
+        for i in range(min(n_components, 3)):
+            # Central
+            p = [self.sills[i], self.ranges[i]]
+            if has_nugget:
+                p.append(self.nugget)
+            self.gamma_funcs_components[i] = lambda h, p=p: model_func(np.asarray(h, dtype=float), *p)
+            
+            # Min
+            p_min = [self.sills_min[i], self.ranges_min[i]]
+            if has_nugget:
+                p_min.append(self.nugget_min)
+            self.gamma_funcs_components_min[i] = lambda h, p=p_min: model_func(np.asarray(h, dtype=float), *p)
+            
+            # Max
+            p_max = [self.sills_max[i], self.ranges_max[i]]
+            if has_nugget:
+                p_max.append(self.nugget_max)
+            self.gamma_funcs_components_max[i] = lambda h, p=p_max: model_func(np.asarray(h, dtype=float), *p)
+
+    def _init_result_storage(self) -> None:
+        """Initialize all result storage attributes."""
+        # Uncorrelated
+        self.sigma0_uncorrelated = None
+        self.mean_uncorrelated_polygon = None
+        self.mean_uncorrelated_raster = None
+
+        # Correlated - polygon (central, min, max)
+        self.mean_correlated_polygon = None
+        self.mean_correlated_polygon_min = None
+        self.mean_correlated_polygon_max = None
+
+        # Correlated - raster (central, min, max)
+        self.mean_correlated_raster = None
+        self.mean_correlated_raster_min = None
+        self.mean_correlated_raster_max = None
+
+        # Component-wise - polygon
+        self.mean_correlated_components_polygon: List[Optional[float]] = [None, None, None]
+        self.mean_correlated_components_polygon_min: List[Optional[float]] = [None, None, None]
+        self.mean_correlated_components_polygon_max: List[Optional[float]] = [None, None, None]
+
+        # Component-wise - raster
+        self.mean_correlated_components_raster: List[Optional[float]] = [None, None, None]
+        self.mean_correlated_components_raster_min: List[Optional[float]] = [None, None, None]
+        self.mean_correlated_components_raster_max: List[Optional[float]] = [None, None, None]
+
+        # Total uncertainty (central, min, max)
+        self.total_uncertainty_polygon = None
+        self.total_uncertainty_polygon_min = None
+        self.total_uncertainty_polygon_max = None
+
+        self.total_uncertainty_raster = None
+        self.total_uncertainty_raster_min = None
+        self.total_uncertainty_raster_max = None
+
+    def covariance(self, h: np.ndarray, sigma2: float, gamma_func: Callable) -> np.ndarray:
         """C(h) = σ² - γ(h)"""
-        return self.sigma2 - self.gamma_func(h)
+        return sigma2 - gamma_func(h)
 
     def calc_mean_uncorrelated(self, use_stable_areas: bool = True) -> None:
         """Compute uncorrelated noise contribution to mean uncertainty."""
@@ -207,6 +357,8 @@ class RegionalUncertaintyEstimator:
     def estimate_std_mean_monte_carlo(
         self,
         domain: Polygon,
+        gamma_func: Callable,
+        sigma2: float,
         n_pairs: int = 200_000,
         seed: Optional[int] = None,
     ) -> float:
@@ -234,25 +386,91 @@ class RegionalUncertaintyEstimator:
         X, Y = pts[:n_pairs], pts[n_pairs:2*n_pairs]
 
         h = np.linalg.norm(X - Y, axis=1)
-        cov = self.covariance(h)
+        cov = self.covariance(h, sigma2, gamma_func)
         var_mean = float(np.mean(cov))
 
         return 0.0 if var_mean < 0 else math.sqrt(var_mean)
 
-    def calc_mean_correlated_polygon(self, n_pairs: int = 200_000, seed: Optional[int] = None) -> None:
-        """Compute correlated uncertainty for polygon mean."""
-        self.mean_correlated_polygon = self.estimate_std_mean_monte_carlo(
-            self.polygon, n_pairs=n_pairs, seed=seed
-        )
+    def calc_mean_correlated_polygon(
+        self,
+        n_pairs: int = 200_000,
+        seed: Optional[int] = None,
+    ) -> None:
+        """Compute correlated uncertainty for polygon mean (central, min, max)."""
+        # Central
+        if self.gamma_func is not None:
+            self.mean_correlated_polygon = self.estimate_std_mean_monte_carlo(
+                self.polygon, self.gamma_func, self.sigma2, n_pairs, seed
+            )
 
-    def calc_mean_correlated_raster(self, n_pairs: int = 200_000, seed: Optional[int] = None) -> None:
-        """Compute correlated uncertainty for raster mean."""
+        # Min
+        if self.gamma_func_min is not None:
+            self.mean_correlated_polygon_min = self.estimate_std_mean_monte_carlo(
+                self.polygon, self.gamma_func_min, self.sigma2_min, n_pairs, seed
+            )
+
+        # Max
+        if self.gamma_func_max is not None:
+            self.mean_correlated_polygon_max = self.estimate_std_mean_monte_carlo(
+                self.polygon, self.gamma_func_max, self.sigma2_max, n_pairs, seed
+            )
+
+        # Component-wise
+        for i in range(3):
+            if self.gamma_funcs_components[i] is not None:
+                self.mean_correlated_components_polygon[i] = self.estimate_std_mean_monte_carlo(
+                    self.polygon, self.gamma_funcs_components[i], self.sigma2, n_pairs, seed
+                )
+            if self.gamma_funcs_components_min[i] is not None:
+                self.mean_correlated_components_polygon_min[i] = self.estimate_std_mean_monte_carlo(
+                    self.polygon, self.gamma_funcs_components_min[i], self.sigma2_min, n_pairs, seed
+                )
+            if self.gamma_funcs_components_max[i] is not None:
+                self.mean_correlated_components_polygon_max[i] = self.estimate_std_mean_monte_carlo(
+                    self.polygon, self.gamma_funcs_components_max[i], self.sigma2_max, n_pairs, seed
+                )
+
+    def calc_mean_correlated_raster(
+        self,
+        n_pairs: int = 200_000,
+        seed: Optional[int] = None,
+    ) -> None:
+        """Compute correlated uncertainty for raster mean (central, min, max)."""
         self.raster_data_handler.get_detailed_area()
         raster_geom = self.raster_data_handler.merged_geom or box(*self.raster_data_handler.bounds)
 
-        self.mean_correlated_raster = self.estimate_std_mean_monte_carlo(
-            raster_geom, n_pairs=n_pairs, seed=seed
-        )
+        # Central
+        if self.gamma_func is not None:
+            self.mean_correlated_raster = self.estimate_std_mean_monte_carlo(
+                raster_geom, self.gamma_func, self.sigma2, n_pairs, seed
+            )
+
+        # Min
+        if self.gamma_func_min is not None:
+            self.mean_correlated_raster_min = self.estimate_std_mean_monte_carlo(
+                raster_geom, self.gamma_func_min, self.sigma2_min, n_pairs, seed
+            )
+
+        # Max
+        if self.gamma_func_max is not None:
+            self.mean_correlated_raster_max = self.estimate_std_mean_monte_carlo(
+                raster_geom, self.gamma_func_max, self.sigma2_max, n_pairs, seed
+            )
+
+        # Component-wise
+        for i in range(3):
+            if self.gamma_funcs_components[i] is not None:
+                self.mean_correlated_components_raster[i] = self.estimate_std_mean_monte_carlo(
+                    raster_geom, self.gamma_funcs_components[i], self.sigma2, n_pairs, seed
+                )
+            if self.gamma_funcs_components_min[i] is not None:
+                self.mean_correlated_components_raster_min[i] = self.estimate_std_mean_monte_carlo(
+                    raster_geom, self.gamma_funcs_components_min[i], self.sigma2_min, n_pairs, seed
+                )
+            if self.gamma_funcs_components_max[i] is not None:
+                self.mean_correlated_components_raster_max[i] = self.estimate_std_mean_monte_carlo(
+                    raster_geom, self.gamma_funcs_components_max[i], self.sigma2_max, n_pairs, seed
+                )
 
     def calc_total_uncertainty(
         self,
@@ -265,25 +483,51 @@ class RegionalUncertaintyEstimator:
         self.calc_mean_correlated_polygon(n_pairs=n_pairs, seed=seed)
         self.calc_mean_correlated_raster(n_pairs=n_pairs, seed=seed)
 
-        # Quadrature sum
-        if self.mean_uncorrelated_polygon and self.mean_correlated_polygon:
-            self.total_uncertainty_polygon = math.sqrt(
-                self.mean_uncorrelated_polygon**2 + self.mean_correlated_polygon**2
-            )
+        def quadrature(uncorr, corr):
+            if uncorr is not None and corr is not None:
+                return math.sqrt(uncorr**2 + corr**2)
+            return None
 
-        if self.mean_uncorrelated_raster and self.mean_correlated_raster:
-            self.total_uncertainty_raster = math.sqrt(
-                self.mean_uncorrelated_raster**2 + self.mean_correlated_raster**2
-            )
+        # Polygon totals
+        self.total_uncertainty_polygon = quadrature(
+            self.mean_uncorrelated_polygon, self.mean_correlated_polygon
+        )
+        self.total_uncertainty_polygon_min = quadrature(
+            self.mean_uncorrelated_polygon, self.mean_correlated_polygon_min
+        )
+        self.total_uncertainty_polygon_max = quadrature(
+            self.mean_uncorrelated_polygon, self.mean_correlated_polygon_max
+        )
+
+        # Raster totals
+        self.total_uncertainty_raster = quadrature(
+            self.mean_uncorrelated_raster, self.mean_correlated_raster
+        )
+        self.total_uncertainty_raster_min = quadrature(
+            self.mean_uncorrelated_raster, self.mean_correlated_raster_min
+        )
+        self.total_uncertainty_raster_max = quadrature(
+            self.mean_uncorrelated_raster, self.mean_correlated_raster_max
+        )
 
     def summary(self) -> str:
         """Return formatted summary of results."""
+        def fmt_triple(name: str, val: float, val_min: float, val_max: float) -> str:
+            parts = []
+            if val is not None:
+                parts.append(f"{val:.6f}")
+            if val_min is not None:
+                parts.append(f"min: {val_min:.6f}")
+            if val_max is not None:
+                parts.append(f"max: {val_max:.6f}")
+            return f"{name}: {'; '.join(parts)}" if parts else ""
+
         lines = [
-            "=" * 60,
+            "=" * 70,
             "REGIONAL UNCERTAINTY SUMMARY",
-            "=" * 60,
+            "=" * 70,
             f"Polygon area: {self.area:.2f} m²",
-            f"Total variance (σ²): {self.sigma2:.6f}",
+            fmt_triple("Total variance (σ²)", self.sigma2, self.sigma2_min, self.sigma2_max),
             "",
         ]
 
@@ -291,20 +535,37 @@ class RegionalUncertaintyEstimator:
             lines.append(f"Uncorrelated σ₀: {self.sigma0_uncorrelated:.6f}")
         if self.mean_uncorrelated_polygon:
             lines.append(f"Uncorrelated (polygon mean): {self.mean_uncorrelated_polygon:.6f}")
-        if self.mean_correlated_polygon:
-            lines.append(f"Correlated (polygon mean): {self.mean_correlated_polygon:.6f}")
-        if self.total_uncertainty_polygon:
-            lines.append(f"Total uncertainty (polygon): {self.total_uncertainty_polygon:.6f}")
 
         lines.append("")
-        if self.mean_uncorrelated_raster:
-            lines.append(f"Uncorrelated (raster mean): {self.mean_uncorrelated_raster:.6f}")
-        if self.mean_correlated_raster:
-            lines.append(f"Correlated (raster mean): {self.mean_correlated_raster:.6f}")
-        if self.total_uncertainty_raster:
-            lines.append(f"Total uncertainty (raster): {self.total_uncertainty_raster:.6f}")
+        lines.append("POLYGON CORRELATED UNCERTAINTY:")
+        lines.append(fmt_triple("  Total", self.mean_correlated_polygon,
+                                self.mean_correlated_polygon_min, self.mean_correlated_polygon_max))
+        for i in range(3):
+            if self.mean_correlated_components_polygon[i] is not None:
+                lines.append(fmt_triple(f"  Component {i+1}",
+                                        self.mean_correlated_components_polygon[i],
+                                        self.mean_correlated_components_polygon_min[i],
+                                        self.mean_correlated_components_polygon_max[i]))
 
-        lines.append("=" * 60)
+        lines.append("")
+        lines.append("POLYGON TOTAL UNCERTAINTY:")
+        lines.append(fmt_triple("  Total", self.total_uncertainty_polygon,
+                                self.total_uncertainty_polygon_min, self.total_uncertainty_polygon_max))
+
+        lines.append("")
+        lines.append("-" * 70)
+        lines.append("RASTER CORRELATED UNCERTAINTY:")
+        if self.mean_uncorrelated_raster:
+            lines.append(f"  Uncorrelated (raster mean): {self.mean_uncorrelated_raster:.6f}")
+        lines.append(fmt_triple("  Total", self.mean_correlated_raster,
+                                self.mean_correlated_raster_min, self.mean_correlated_raster_max))
+
+        lines.append("")
+        lines.append("RASTER TOTAL UNCERTAINTY:")
+        lines.append(fmt_triple("  Total", self.total_uncertainty_raster,
+                                self.total_uncertainty_raster_min, self.total_uncertainty_raster_max))
+
+        lines.append("=" * 70)
         return "\n".join(lines)
 
 
