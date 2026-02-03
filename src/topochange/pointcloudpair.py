@@ -1172,8 +1172,12 @@ class PointCloudPair:
                 suffix_parts.append(f"{target_vertical_kind[:4]}")
             if needs_horizontal:
                 suffix_parts.append("reproj")
-            suffix = "_".join(suffix_parts) if suffix_parts else "transformed"
-            output_path = src_path.with_name(src_path.stem + f"_{suffix}" + src_path.suffix)
+            suffix = "_".join(suffix_parts) if suffix_parts else ""
+            # Always add "_transformed" suffix to indicate this is a transformed point cloud
+            if suffix:
+                output_path = src_path.with_name(src_path.stem + f"_{suffix}_transformed" + src_path.suffix)
+            else:
+                output_path = src_path.with_name(src_path.stem + "_transformed" + src_path.suffix)
             
             current = self.pc1.warp_pointcloud(
                 # Epoch parameters
@@ -1852,7 +1856,8 @@ class PointCloudPair:
 
         if output_path is None:
             src_path = Path(source_pc.filename)
-            output_path = str(src_path.with_name(src_path.stem + "_aligned" + src_path.suffix))
+            # Always add "_transformed" suffix to indicate this is a transformed point cloud
+            output_path = str(src_path.with_name(src_path.stem + "_aligned_transformed" + src_path.suffix))
 
         if os.path.exists(output_path) and not overwrite:
             raise FileExistsError(f"Output file exists and overwrite=False: {output_path}")
@@ -2436,18 +2441,19 @@ class PointCloudPair:
             suffix_parts.append(target_vertical_kind)
         if needs_horizontal:
             suffix_parts.append("reproj")
-        full_transform_suffix = "_".join(suffix_parts) if suffix_parts else "transformed"
+        # Always add "_transformed" suffix to indicate transformation
+        full_transform_suffix = "_".join(suffix_parts) + "_transformed" if suffix_parts else "transformed"
 
         paths = {
             # Horizontal-only transform
-            'horizontal_only': out_dir / (src_path.stem + "_reproj" + src_path.suffix),
+            'horizontal_only': out_dir / (src_path.stem + "_reproj_transformed" + src_path.suffix),
             # Full transformation
             'transformed': out_dir / (src_path.stem + f"_{full_transform_suffix}" + src_path.suffix),
             # Cropped (after transform) - with and without buffer
             'cropped': out_dir / (src_path.stem + f"_{full_transform_suffix}_intersection" + src_path.suffix),
             'cropped_buffered': out_dir / (src_path.stem + f"_{full_transform_suffix}_intersection_buffered" + src_path.suffix),
-            # Aligned
-            'aligned': out_dir / (src_path.stem + f"_{full_transform_suffix}_intersection_buffered_aligned" + src_path.suffix),
+            # Aligned (note: alignment also adds _transformed suffix)
+            'aligned': out_dir / (src_path.stem + f"_{full_transform_suffix}_intersection_buffered_aligned_transformed" + src_path.suffix),
             # Reference cropped
             'pc2_cropped': out_dir / (Path(self.pc2.filename).stem + "_intersection" + Path(self.pc2.filename).suffix),
         }

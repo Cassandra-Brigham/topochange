@@ -2211,7 +2211,8 @@ class PointCloud:
             if dst_horiz_str != src_horiz_str:
                 parts.append("reproj")
             tag = "_".join(parts) if parts else "warped"
-            output_path = src_path.with_name(src_path.stem + f"_{tag}" + src_path.suffix)
+            # Always add "_transformed" suffix to indicate this is a transformed point cloud
+            output_path = src_path.with_name(src_path.stem + f"_{tag}_transformed" + src_path.suffix)
         else:
             output_path = Path(output_path)
         
@@ -2409,7 +2410,8 @@ class PointCloud:
                 and source_geoid_model != target_geoid_model
             ):
                 tag += f"_{source_geoid_model}_to_{target_geoid_model}"
-            output_path = src_path.with_name(src_path.stem + f"_{tag}" + src_path.suffix)
+            # Always add "_transformed" suffix to indicate this is a transformed point cloud
+            output_path = src_path.with_name(src_path.stem + f"_{tag}_transformed" + src_path.suffix)
         else:
             output_path = Path(output_path)
 
@@ -2599,7 +2601,8 @@ class PointCloud:
         src_path = Path(self.filename)
         if output_path is None:
             tag = f"epoch{dst_epoch:.3f}".replace(".", "p")
-            output_path = src_path.with_name(src_path.stem + f"_{tag}" + src_path.suffix)
+            # Always add "_transformed" suffix to indicate this is a transformed point cloud
+            output_path = src_path.with_name(src_path.stem + f"_{tag}_transformed" + src_path.suffix)
         else:
             output_path = Path(output_path)
 
