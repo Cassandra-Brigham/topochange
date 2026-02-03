@@ -2804,3 +2804,363 @@ class PointCloud:
             overwrite=overwrite,
             return_pipeline=return_pipeline,
         )
+
+    def check_transformation_metadata(
+        self,
+        expected_epoch: Optional[float] = None,
+        expected_horizontal_crs: Optional[str] = None,
+        expected_vertical_crs: Optional[str] = None,
+        expected_vertical_kind: Optional[str] = None,
+        expected_geoid_model: Optional[str] = None,
+        verbose: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Check and validate the metadata of a (transformed) point cloud.
+
+        This function inspects the point cloud's CRS, epoch, geoid model, and
+        transformation history to verify that transformations were applied correctly.
+
+        Parameters
+        ----------
+        expected_epoch : float, optional
+            Expected epoch after transformation (decimal year).
+        expected_horizontal_crs : str, optional
+            Expected horizontal CRS (EPSG code like "EPSG:32610" or WKT).
+        expected_vertical_crs : str, optional
+            Expected vertical CRS (EPSG code or WKT).
+        expected_vertical_kind : str, optional
+            Expected vertical datum type ("orthometric" or "ellipsoidal").
+        expected_geoid_model : str, optional
+            Expected geoid model name (e.g., "geoid18").
+        verbose : bool, default True
+            Print detailed report to stderr.
+
+        Returns
+        -------
+        dict
+            Dictionary containing:
+            - 'valid': bool - True if all checks passed
+            - 'errors': list - List of validation error messages
+            - 'warnings': list - List of warning messages
+            - 'metadata': dict - Current metadata values
+            - 'original': dict - Original metadata values
+            - 'transformations': list - List of applied transformations
+            - 'checks': dict - Results of each validation check
+
+        Example
+        -------
+        >>> # Check metadata after epoch transformation
+        >>> result = transformed_pc.check_transformation_metadata(
+        ...     expected_epoch=2018.5,
+        ...     expected_vertical_kind="orthometric",
+        ...     verbose=True
+        ... )
+        >>> if result['valid']:
+        ...     print("Transformation verified!")
+        ... else:
+        ...     print("Errors:", result['errors'])
+        """
+        import sys
+        from pyproj import CRS as CRS_
+
+        errors = []
+        warnings = []
+        checks = {}
+
+        # Helper to safely get CRS EPSG code
+        def _get_epsg(crs_val):
+            if crs_val is None:
+                return None
+            try:
+                crs_obj = _ensure_crs_obj(crs_val)
+                epsg = crs_obj.to_epsg()
+                return f"EPSG:{epsg}" if epsg else crs_obj.to_string()[:50]
+            except Exception:
+                return str(crs_val)[:50] if crs_val else None
+
+        # Helper to compare CRS
+        def _crs_match(crs1, crs2):
+            if crs1 is None or crs2 is None:
+                return crs1 == crs2
+            try:
+                obj1 = _ensure_crs_obj(crs1)
+                obj2 = _ensure_crs_obj(crs2)
+                return obj1.equals(obj2)
+            except Exception:
+                return str(crs1) == str(crs2)
+
+        # Gather current metadata
+        current_metadata = {
+            'filename': str(self.filename),
+            'point_count': getattr(self, 'point_count', None),
+            'epoch': getattr(self, 'epoch', None),
+            'geoid_model': getattr(self, 'geoid_model', None),
+            'is_orthometric': getattr(self, 'is_orthometric', None),
+            'horizontal_crs': _get_epsg(getattr(self, 'current_horizontal_crs', None)),
+            'vertical_crs': _get_epsg(getattr(self, 'current_vertical_crs', None)),
+            'compound_crs': _get_epsg(getattr(self, 'current_compound_crs', None)),
+            'horizontal_unit': str(getattr(self, 'horizontal_unit', None)),
+            'vertical_unit': str(getattr(self, 'vertical_unit', None)),
+        }
+
+        # Gather original metadata
+        original_metadata = {
+            'epoch': getattr(self, 'original_epoch', None) if hasattr(self, 'original_epoch') else None,
+            'geoid_model': getattr(self, 'original_geoid_model', None) if hasattr(self, 'original_geoid_model') else None,
+            'horizontal_crs': _get_epsg(getattr(self, 'original_horizontal_crs', None)),
+            'vertical_crs': _get_epsg(getattr(self, 'original_vertical_crs', None)),
+            'compound_crs': _get_epsg(getattr(self, 'original_compound_crs', None)),
+        }
+
+        # Determine vertical kind from is_orthometric
+        current_vertical_kind = None
+        if current_metadata['is_orthometric'] is True:
+            current_vertical_kind = "orthometric"
+        elif current_metadata['is_orthometric'] is False:
+            current_vertical_kind = "ellipsoidal"
+        current_metadata['vertical_kind'] = current_vertical_kind
+
+        # Get transformation history
+        transformations = []
+        if hasattr(self, 'crs_history') and self.crs_history is not None:
+            try:
+                history_dict = self.crs_history.to_dict()
+                if 'history' in history_dict:
+                    for entry in history_dict['history']:
+                        transformations.append({
+                            'type': entry.get('entry_type', 'unknown'),
+                            'timestamp': entry.get('timestamp', ''),
+                            'note': entry.get('note', ''),
+                        })
+            except Exception:
+                pass
+
+        # =====================================================================
+        # Validation checks
+        # =====================================================================
+
+        # Check 1: Epoch
+        if expected_epoch is not None:
+            actual_epoch = current_metadata['epoch']
+            if actual_epoch is None:
+                errors.append(f"Epoch not set (expected {expected_epoch})")
+                checks['epoch'] = {'status': 'FAIL', 'expected': expected_epoch, 'actual': None}
+            elif abs(actual_epoch - expected_epoch) > 0.01:
+                errors.append(
+                    f"Epoch mismatch: expected {expected_epoch}, got {actual_epoch}"
+                )
+                checks['epoch'] = {'status': 'FAIL', 'expected': expected_epoch, 'actual': actual_epoch}
+            else:
+                checks['epoch'] = {'status': 'PASS', 'expected': expected_epoch, 'actual': actual_epoch}
+        else:
+            if current_metadata['epoch'] is None:
+                warnings.append("Epoch not set on point cloud")
+            checks['epoch'] = {'status': 'SKIP', 'actual': current_metadata['epoch']}
+
+        # Check 2: Horizontal CRS
+        if expected_horizontal_crs is not None:
+            actual_horiz = getattr(self, 'current_horizontal_crs', None)
+            if _crs_match(actual_horiz, expected_horizontal_crs):
+                checks['horizontal_crs'] = {
+                    'status': 'PASS',
+                    'expected': expected_horizontal_crs,
+                    'actual': current_metadata['horizontal_crs']
+                }
+            else:
+                errors.append(
+                    f"Horizontal CRS mismatch: expected {expected_horizontal_crs}, "
+                    f"got {current_metadata['horizontal_crs']}"
+                )
+                checks['horizontal_crs'] = {
+                    'status': 'FAIL',
+                    'expected': expected_horizontal_crs,
+                    'actual': current_metadata['horizontal_crs']
+                }
+        else:
+            checks['horizontal_crs'] = {'status': 'SKIP', 'actual': current_metadata['horizontal_crs']}
+
+        # Check 3: Vertical CRS
+        if expected_vertical_crs is not None:
+            actual_vert = getattr(self, 'current_vertical_crs', None)
+            if _crs_match(actual_vert, expected_vertical_crs):
+                checks['vertical_crs'] = {
+                    'status': 'PASS',
+                    'expected': expected_vertical_crs,
+                    'actual': current_metadata['vertical_crs']
+                }
+            else:
+                errors.append(
+                    f"Vertical CRS mismatch: expected {expected_vertical_crs}, "
+                    f"got {current_metadata['vertical_crs']}"
+                )
+                checks['vertical_crs'] = {
+                    'status': 'FAIL',
+                    'expected': expected_vertical_crs,
+                    'actual': current_metadata['vertical_crs']
+                }
+        else:
+            checks['vertical_crs'] = {'status': 'SKIP', 'actual': current_metadata['vertical_crs']}
+
+        # Check 4: Vertical kind (orthometric/ellipsoidal)
+        if expected_vertical_kind is not None:
+            expected_kind_lower = expected_vertical_kind.lower()
+            if current_vertical_kind is None:
+                errors.append(
+                    f"Vertical kind not determined (expected {expected_vertical_kind})"
+                )
+                checks['vertical_kind'] = {
+                    'status': 'FAIL',
+                    'expected': expected_vertical_kind,
+                    'actual': None
+                }
+            elif current_vertical_kind != expected_kind_lower:
+                errors.append(
+                    f"Vertical kind mismatch: expected {expected_vertical_kind}, "
+                    f"got {current_vertical_kind}"
+                )
+                checks['vertical_kind'] = {
+                    'status': 'FAIL',
+                    'expected': expected_vertical_kind,
+                    'actual': current_vertical_kind
+                }
+            else:
+                checks['vertical_kind'] = {
+                    'status': 'PASS',
+                    'expected': expected_vertical_kind,
+                    'actual': current_vertical_kind
+                }
+        else:
+            checks['vertical_kind'] = {'status': 'SKIP', 'actual': current_vertical_kind}
+
+        # Check 5: Geoid model
+        if expected_geoid_model is not None:
+            actual_geoid = current_metadata['geoid_model']
+            if actual_geoid is None:
+                errors.append(f"Geoid model not set (expected {expected_geoid_model})")
+                checks['geoid_model'] = {
+                    'status': 'FAIL',
+                    'expected': expected_geoid_model,
+                    'actual': None
+                }
+            elif actual_geoid.lower() != expected_geoid_model.lower():
+                errors.append(
+                    f"Geoid model mismatch: expected {expected_geoid_model}, "
+                    f"got {actual_geoid}"
+                )
+                checks['geoid_model'] = {
+                    'status': 'FAIL',
+                    'expected': expected_geoid_model,
+                    'actual': actual_geoid
+                }
+            else:
+                checks['geoid_model'] = {
+                    'status': 'PASS',
+                    'expected': expected_geoid_model,
+                    'actual': actual_geoid
+                }
+        else:
+            checks['geoid_model'] = {'status': 'SKIP', 'actual': current_metadata['geoid_model']}
+
+        # Check 6: Transformation history exists
+        if len(transformations) > 1:  # More than just 'initial' entry
+            checks['has_transformations'] = {'status': 'PASS', 'count': len(transformations)}
+        else:
+            warnings.append("No transformation history recorded")
+            checks['has_transformations'] = {'status': 'WARN', 'count': len(transformations)}
+
+        # Build result
+        is_valid = len(errors) == 0
+        result = {
+            'valid': is_valid,
+            'errors': errors,
+            'warnings': warnings,
+            'metadata': current_metadata,
+            'original': original_metadata,
+            'transformations': transformations,
+            'checks': checks,
+        }
+
+        # Print report if verbose
+        if verbose:
+            print("=" * 70, file=sys.stderr)
+            print("POINT CLOUD TRANSFORMATION METADATA CHECK", file=sys.stderr)
+            print("=" * 70, file=sys.stderr)
+            print(f"File: {current_metadata['filename']}", file=sys.stderr)
+            print(f"Points: {current_metadata['point_count']}", file=sys.stderr)
+            print(file=sys.stderr)
+
+            print("CURRENT METADATA:", file=sys.stderr)
+            print(f"  Epoch:           {current_metadata['epoch']}", file=sys.stderr)
+            print(f"  Horizontal CRS:  {current_metadata['horizontal_crs']}", file=sys.stderr)
+            print(f"  Vertical CRS:    {current_metadata['vertical_crs']}", file=sys.stderr)
+            print(f"  Vertical Kind:   {current_vertical_kind}", file=sys.stderr)
+            print(f"  Geoid Model:     {current_metadata['geoid_model']}", file=sys.stderr)
+            print(f"  Horizontal Unit: {current_metadata['horizontal_unit']}", file=sys.stderr)
+            print(f"  Vertical Unit:   {current_metadata['vertical_unit']}", file=sys.stderr)
+            print(file=sys.stderr)
+
+            print("ORIGINAL METADATA:", file=sys.stderr)
+            print(f"  Epoch:           {original_metadata['epoch']}", file=sys.stderr)
+            print(f"  Horizontal CRS:  {original_metadata['horizontal_crs']}", file=sys.stderr)
+            print(f"  Vertical CRS:    {original_metadata['vertical_crs']}", file=sys.stderr)
+            print(file=sys.stderr)
+
+            print("VALIDATION CHECKS:", file=sys.stderr)
+            for check_name, check_result in checks.items():
+                status = check_result['status']
+                if status == 'PASS':
+                    icon = '✓'
+                elif status == 'FAIL':
+                    icon = '✗'
+                elif status == 'WARN':
+                    icon = '⚠'
+                else:
+                    icon = '-'
+
+                if 'expected' in check_result:
+                    print(f"  {icon} {check_name}: {status} "
+                          f"(expected={check_result.get('expected')}, "
+                          f"actual={check_result.get('actual')})", file=sys.stderr)
+                else:
+                    print(f"  {icon} {check_name}: {status} "
+                          f"(actual={check_result.get('actual', check_result.get('count', 'N/A'))})",
+                          file=sys.stderr)
+            print(file=sys.stderr)
+
+            if transformations:
+                print(f"TRANSFORMATION HISTORY ({len(transformations)} entries):", file=sys.stderr)
+                for i, t in enumerate(transformations):
+                    print(f"  [{i}] {t['type']}: {t['note'][:60]}...", file=sys.stderr)
+                print(file=sys.stderr)
+
+            if errors:
+                print("ERRORS:", file=sys.stderr)
+                for err in errors:
+                    print(f"  ✗ {err}", file=sys.stderr)
+                print(file=sys.stderr)
+
+            if warnings:
+                print("WARNINGS:", file=sys.stderr)
+                for warn in warnings:
+                    print(f"  ⚠ {warn}", file=sys.stderr)
+                print(file=sys.stderr)
+
+            print("=" * 70, file=sys.stderr)
+            if is_valid:
+                print("RESULT: ✓ ALL CHECKS PASSED", file=sys.stderr)
+            else:
+                print(f"RESULT: ✗ VALIDATION FAILED ({len(errors)} errors)", file=sys.stderr)
+            print("=" * 70, file=sys.stderr)
+
+        return result
+
+    def get_metadata_summary(self) -> Dict[str, Any]:
+        """
+        Get a summary of the point cloud's current metadata.
+
+        Returns
+        -------
+        dict
+            Dictionary containing all current metadata values.
+        """
+        return self.check_transformation_metadata(verbose=False)['metadata']
