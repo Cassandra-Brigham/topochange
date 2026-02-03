@@ -4,6 +4,7 @@ pyproject.toml
 requirements.txt
 src/topochange/__init__.py
 src/topochange/alignment.py
+src/topochange/alignment_utils.py
 src/topochange/composite_variogram.py
 src/topochange/crs_history.py
 src/topochange/crs_utils.py
