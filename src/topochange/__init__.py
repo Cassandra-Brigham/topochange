@@ -52,6 +52,23 @@ from .stable_area_analysis import (
 from .crs_history import CRSHistory
 from .pipeline_builder import CRSState, build_vertical_pipeline
 
+# Alignment (ICP registration)
+from .alignment import (
+    LandscapeAligner,
+    RegistrationConfig,
+    RegistrationResult,
+    RegistrationMethod,
+)
+
+# Alignment utilities (shared with PointCloudPair)
+from .alignment_utils import (
+    load_points_from_las,
+    save_transformed_las,
+    compute_alignment_quality,
+    PointCloudPreprocessor,
+    AlignmentQualityMetrics,
+)
+
 __all__ = [
     # Version
     "__version__",
@@ -61,6 +78,16 @@ __all__ = [
     # Point cloud
     "PointCloud",
     "PointCloudPair",
+    # Alignment
+    "LandscapeAligner",
+    "RegistrationConfig",
+    "RegistrationResult",
+    "RegistrationMethod",
+    "PointCloudPreprocessor",
+    "AlignmentQualityMetrics",
+    "load_points_from_las",
+    "save_transformed_las",
+    "compute_alignment_quality",
     # Variogram analysis
     "RasterDataHandler",
     "StatisticalAnalysis",
