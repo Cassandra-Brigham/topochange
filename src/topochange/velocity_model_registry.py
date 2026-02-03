@@ -5,21 +5,24 @@ Enhanced velocity/deformation model registry and selection system.
 Provides:
   1. Loading models from YAML registry
   2. Spatial and temporal filtering
-  3. Auto-download capability
+  3. Auto-download capability with timeout and progress
   4. User custom model support
   5. Integration with PROJ pipelines
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
+import sys
+import time
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Literal
+from typing import Any, Dict, List, Optional, Tuple, Literal, Callable
 import warnings
 
 try:
@@ -28,6 +31,164 @@ except ImportError:
     yaml = None
 
 from pyproj import datadir
+
+
+# ============================================================================
+# Download utilities with timeout and progress
+# ============================================================================
+
+DEFAULT_DOWNLOAD_TIMEOUT = 300  # 5 minutes
+DEFAULT_CHUNK_SIZE = 8192
+
+
+def _download_with_progress(
+    url: str,
+    output_path: Path,
+    timeout: int = DEFAULT_DOWNLOAD_TIMEOUT,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    verbose: bool = True,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> bool:
+    """
+    Download a file with timeout and progress indicator.
+
+    Args:
+        url: URL to download from
+        output_path: Local path to save the file
+        timeout: Connection timeout in seconds (default 300s = 5 minutes)
+        chunk_size: Download chunk size in bytes
+        verbose: Print progress to stderr
+        progress_callback: Optional callback(downloaded_bytes, total_bytes)
+
+    Returns:
+        True if download succeeded, False otherwise
+
+    Raises:
+        urllib.error.URLError: On network errors
+        TimeoutError: If download takes too long
+    """
+    try:
+        # Try using requests if available (better timeout handling)
+        import requests
+        return _download_with_requests(url, output_path, timeout, chunk_size, verbose, progress_callback)
+    except ImportError:
+        # Fall back to urllib
+        return _download_with_urllib(url, output_path, timeout, chunk_size, verbose, progress_callback)
+
+
+def _download_with_requests(
+    url: str,
+    output_path: Path,
+    timeout: int,
+    chunk_size: int,
+    verbose: bool,
+    progress_callback: Optional[Callable[[int, int], None]],
+) -> bool:
+    """Download using requests library (preferred)."""
+    import requests
+
+    start_time = time.time()
+
+    try:
+        response = requests.get(url, stream=True, timeout=(30, timeout))  # (connect, read) timeouts
+        response.raise_for_status()
+
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded = 0
+
+        # Ensure parent directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(output_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    if progress_callback:
+                        progress_callback(downloaded, total_size)
+
+                    if verbose and total_size > 0:
+                        pct = 100 * downloaded / total_size
+                        mb_down = downloaded / (1024 * 1024)
+                        mb_total = total_size / (1024 * 1024)
+                        elapsed = time.time() - start_time
+                        speed = downloaded / elapsed / (1024 * 1024) if elapsed > 0 else 0
+                        print(f"\r  Downloading: {mb_down:.1f}/{mb_total:.1f} MB ({pct:.0f}%) - {speed:.1f} MB/s",
+                              end="", file=sys.stderr)
+
+        if verbose:
+            elapsed = time.time() - start_time
+            print(f"\n  Download complete in {elapsed:.1f}s", file=sys.stderr)
+
+        return True
+
+    except requests.exceptions.Timeout:
+        if verbose:
+            print(f"\n  ERROR: Download timed out after {timeout}s", file=sys.stderr)
+        raise TimeoutError(f"Download timed out after {timeout} seconds")
+    except requests.exceptions.RequestException as e:
+        if verbose:
+            print(f"\n  ERROR: Download failed: {e}", file=sys.stderr)
+        raise
+
+
+def _download_with_urllib(
+    url: str,
+    output_path: Path,
+    timeout: int,
+    chunk_size: int,
+    verbose: bool,
+    progress_callback: Optional[Callable[[int, int], None]],
+) -> bool:
+    """Download using urllib (fallback)."""
+    import socket
+
+    start_time = time.time()
+    old_timeout = socket.getdefaulttimeout()
+
+    try:
+        socket.setdefaulttimeout(timeout)
+
+        # Ensure parent directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with urllib.request.urlopen(url, timeout=min(30, timeout)) as response:
+            total_size = int(response.headers.get('Content-Length', 0))
+            downloaded = 0
+
+            with open(output_path, 'wb') as f:
+                while True:
+                    chunk = response.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    if progress_callback:
+                        progress_callback(downloaded, total_size)
+
+                    if verbose and total_size > 0:
+                        pct = 100 * downloaded / total_size
+                        mb_down = downloaded / (1024 * 1024)
+                        mb_total = total_size / (1024 * 1024)
+                        elapsed = time.time() - start_time
+                        speed = downloaded / elapsed / (1024 * 1024) if elapsed > 0 else 0
+                        print(f"\r  Downloading: {mb_down:.1f}/{mb_total:.1f} MB ({pct:.0f}%) - {speed:.1f} MB/s",
+                              end="", file=sys.stderr)
+
+        if verbose:
+            elapsed = time.time() - start_time
+            print(f"\n  Download complete in {elapsed:.1f}s", file=sys.stderr)
+
+        return True
+
+    except socket.timeout:
+        if verbose:
+            print(f"\n  ERROR: Download timed out after {timeout}s", file=sys.stderr)
+        raise TimeoutError(f"Download timed out after {timeout} seconds")
+    finally:
+        socket.setdefaulttimeout(old_timeout)
 
 
 # ============================================================================
@@ -363,83 +524,96 @@ def download_model(
             print("No writable PROJ data directory found")
         return None
     
+    # Get timeout from download config or use default
+    timeout = model.download.get("timeout", DEFAULT_DOWNLOAD_TIMEOUT)
+
     if method == "cdn_direct":
         urls = model.download.get("urls", [])
         if not urls:
             if verbose:
                 print(f"No URLs specified for '{model.name}'")
             return None
-        
+
         # Try each URL
         for url in urls:
             try:
                 filename = url.split("/")[-1]
                 output_path = target_dir / filename
-                
+
                 if verbose:
-                    print(f"Downloading {url} -> {output_path}")
-                
-                urllib.request.urlretrieve(url, output_path)
-                
+                    print(f"Downloading {model.name} from {url}", file=sys.stderr)
+                    print(f"  Target: {output_path}", file=sys.stderr)
+                    print(f"  Timeout: {timeout}s", file=sys.stderr)
+
+                _download_with_progress(url, output_path, timeout=timeout, verbose=verbose)
+
                 model.local = True
                 model.filepath = str(output_path)
-                
+
                 if verbose:
-                    print(f"Successfully downloaded to {output_path}")
-                
+                    print(f"Successfully downloaded to {output_path}", file=sys.stderr)
+
                 return str(output_path)
-                
+
+            except TimeoutError as e:
+                if verbose:
+                    print(f"Download timed out: {e}", file=sys.stderr)
+                continue
             except Exception as e:
                 if verbose:
-                    print(f"Download failed: {e}")
+                    print(f"Download failed: {e}", file=sys.stderr)
                 continue
-        
+
         return None
     
     elif method == "http_scrape":
         # Scrape webpage for matching files
         base_url = model.download.get("base_url")
         pattern = model.download.get("pattern")
-        
+
         if not base_url or not pattern:
             if verbose:
-                print(f"Missing base_url or pattern for '{model.name}'")
+                print(f"Missing base_url or pattern for '{model.name}'", file=sys.stderr)
             return None
-        
+
         try:
+            if verbose:
+                print(f"Scanning {base_url} for {model.name}...", file=sys.stderr)
+
             with urllib.request.urlopen(base_url, timeout=30) as resp:
                 html = resp.read().decode("utf-8", errors="replace")
-            
+
             # Find all matching hrefs
             pat_re = re.compile(pattern)
             hrefs = re.findall(r'href=["\']([^"\']+)["\']', html)
             matches = [h for h in hrefs if pat_re.search(h)]
-            
+
             if not matches:
                 if verbose:
-                    print(f"No matching files found at {base_url}")
+                    print(f"No matching files found at {base_url}", file=sys.stderr)
                 return None
-            
+
             # Download first match
             file_url = matches[0]
             if not file_url.startswith("http"):
                 file_url = base_url.rstrip("/") + "/" + file_url.lstrip("/")
-            
+
             filename = file_url.split("/")[-1]
             output_path = target_dir / filename
-            
+
             if verbose:
-                print(f"Downloading {file_url} -> {output_path}")
-            
-            urllib.request.urlretrieve(file_url, output_path)
-            
+                print(f"Found: {file_url}", file=sys.stderr)
+                print(f"  Target: {output_path}", file=sys.stderr)
+
+            _download_with_progress(file_url, output_path, timeout=timeout, verbose=verbose)
+
             # Check if it needs extraction
             if model.download.get("extract") and filename.endswith(".zip"):
                 if verbose:
-                    print(f"Extracting {output_path}")
+                    print(f"Extracting {output_path}...", file=sys.stderr)
                 with zipfile.ZipFile(output_path, 'r') as zf:
                     zf.extractall(target_dir)
-                
+
                 # Find the main file after extraction
                 if model.files:
                     for file_pattern in model.files:
@@ -447,18 +621,22 @@ def download_model(
                         if extracted:
                             output_path = extracted[0]
                             break
-            
+
             model.local = True
             model.filepath = str(output_path)
-            
+
             if verbose:
-                print(f"Successfully downloaded to {output_path}")
-            
+                print(f"Successfully downloaded to {output_path}", file=sys.stderr)
+
             return str(output_path)
-            
+
+        except TimeoutError as e:
+            if verbose:
+                print(f"Download timed out: {e}", file=sys.stderr)
+            return None
         except Exception as e:
             if verbose:
-                print(f"Download failed: {e}")
+                print(f"Download failed: {e}", file=sys.stderr)
             return None
     
     elif method == "manual":
@@ -602,6 +780,29 @@ def _bbox_area(bbox: Tuple[float, float, float, float]) -> float:
     return (maxx - minx) * (maxy - miny)
 
 
+def _bbox_contains(
+    outer: Tuple[float, float, float, float],
+    inner: Tuple[float, float, float, float],
+) -> bool:
+    """
+    Check if outer bbox fully contains inner bbox.
+
+    This is stricter than intersection - the model must completely cover the AOI
+    to avoid PROJ errors when transforming points outside model coverage.
+
+    Args:
+        outer: The containing bbox (model coverage)
+        inner: The contained bbox (AOI / data extent)
+
+    Returns:
+        True if outer fully contains inner
+    """
+    o_minx, o_miny, o_maxx, o_maxy = outer
+    i_minx, i_miny, i_maxx, i_maxy = inner
+    return (o_minx <= i_minx and o_miny <= i_miny and
+            o_maxx >= i_maxx and o_maxy >= i_maxy)
+
+
 def filter_models(
     models: List[VelocityModelInfo],
     bbox: Optional[Tuple[float, float, float, float]] = None,
@@ -710,7 +911,17 @@ def select_velocity_model(
             f"No models found covering bbox={bbox_4326} and epochs [{t0}, {t1}]. "
             f"Available models: {[m.name for m in models]}"
         )
-    
+
+    # Cache file existence checks to avoid redundant filesystem operations
+    # This is called multiple times during sorting and later for display
+    file_exists_cache: Dict[str, bool] = {}
+
+    def _check_file_exists_cached(m: VelocityModelInfo) -> bool:
+        """Check if model file exists, with caching."""
+        if m.name not in file_exists_cache:
+            file_exists_cache[m.name] = find_model_file(m, auto_download=False) is not None
+        return file_exists_cache[m.name]
+
     # Manual choice override
     if choice is not None:
         if not (0 <= choice < len(candidates)):
@@ -722,31 +933,44 @@ def select_velocity_model(
     else:
         # Auto-selection scoring
         mid_epoch = 0.5 * (t0 + t1)
-        
+
         def score_model(m: VelocityModelInfo) -> Tuple:
             """Return sort key: lower is better."""
-            # 1. Prefer models with files actually available
-            has_files = find_model_file(m, auto_download=False) is not None
+            # 1. Prefer models with files actually available (cached check)
+            has_files = _check_file_exists_cached(m)
             file_rank = 0 if has_files else 1
-            
-            # 2. Prefer smaller bbox (more specific)
+
+            # 2. Prefer models that fully contain the AOI (not just intersect)
+            # Use containment score: 0 = fully contains, 1 = partial overlap
+            containment = 0 if _bbox_contains(m.bbox, bbox_4326) else 1
+
+            # 3. Prefer smaller bbox (more specific)
             area = _bbox_area(m.bbox)
-            
-            # 3. Prefer requested kind
+
+            # 4. Prefer requested kind
             kind_match = 0 if m.kind == prefer_kind else 1
-            
-            # 4. Prefer central epoch close to midpoint
+
+            # 5. Prefer central epoch close to midpoint
             if m.central_epoch is not None:
                 epoch_dev = abs(m.central_epoch - mid_epoch)
             else:
                 # No central epoch - use midpoint of valid range
                 model_mid = 0.5 * (m.epoch_min + m.epoch_max)
                 epoch_dev = abs(model_mid - mid_epoch)
-            
-            return (file_rank, area, kind_match, epoch_dev)
-        
+
+            return (file_rank, containment, area, kind_match, epoch_dev)
+
         sorted_candidates = sorted(candidates, key=score_model)
         selected = sorted_candidates[0]
+
+        # Warn if selected model doesn't fully contain the AOI
+        if not _bbox_contains(selected.bbox, bbox_4326):
+            warnings.warn(
+                f"Selected model '{selected.name}' only partially covers the AOI. "
+                f"Points outside model coverage may fail or produce incorrect results. "
+                f"Model bbox: {selected.bbox}, AOI bbox: {bbox_4326}"
+            )
+
         reason = "auto-selected best match"
     
     # Ensure file is available
@@ -765,26 +989,28 @@ def select_velocity_model(
     
     # Print selection report
     if verbose:
-        print(f"\nVelocity models for bbox={bbox_4326}, epochs [{t0:.1f}, {t1:.1f}]:")
-        print(f"  Total available: {len(models)}")
-        print(f"  Matching candidates: {len(candidates)}\n")
-        
+        print(f"\nVelocity models for bbox={bbox_4326}, epochs [{t0:.1f}, {t1:.1f}]:", file=sys.stderr)
+        print(f"  Total available: {len(models)}", file=sys.stderr)
+        print(f"  Matching candidates: {len(candidates)}\n", file=sys.stderr)
+
         for i, m in enumerate(candidates):
             is_selected = (m is selected)
-            local_str = "local" if find_model_file(m, auto_download=False) else "remote"
+            # Use cached check to avoid redundant filesystem operations
+            local_str = "local" if _check_file_exists_cached(m) else "remote"
+            contains_aoi = "✓ contains AOI" if _bbox_contains(m.bbox, bbox_4326) else "⚠ partial coverage"
             mark = f"  <== {reason}" if is_selected else ""
-            
-            print(f"  [{i}] {m.name}")
-            print(f"      {m.label}")
-            print(f"      Region: {m.region}")
-            print(f"      Coverage: {m.bbox}")
+
+            print(f"  [{i}] {m.name}", file=sys.stderr)
+            print(f"      {m.label}", file=sys.stderr)
+            print(f"      Region: {m.region}", file=sys.stderr)
+            print(f"      Coverage: {m.bbox} ({contains_aoi})", file=sys.stderr)
             print(f"      Epochs: {m.epoch_min}-{m.epoch_max} "
-                  f"(central: {m.central_epoch or 'N/A'})")
-            print(f"      Kind: {m.kind} | Format: {m.format}")
-            print(f"      Status: {local_str}{mark}")
+                  f"(central: {m.central_epoch or 'N/A'})", file=sys.stderr)
+            print(f"      Kind: {m.kind} | Format: {m.format}", file=sys.stderr)
+            print(f"      Status: {local_str}{mark}", file=sys.stderr)
             if is_selected and m.filepath:
-                print(f"      File: {m.filepath}")
-            print()
+                print(f"      File: {m.filepath}", file=sys.stderr)
+            print(file=sys.stderr)
     
     return selected, candidates
 
@@ -847,6 +1073,125 @@ def create_custom_model(
 
 
 # ============================================================================
+# Pre-download utilities
+# ============================================================================
+
+def ensure_velocity_model_available(
+    bbox_4326: Tuple[float, float, float, float],
+    src_epoch: float,
+    dst_epoch: float,
+    *,
+    timeout: int = DEFAULT_DOWNLOAD_TIMEOUT,
+    verbose: bool = True,
+) -> VelocityModelInfo:
+    """
+    Pre-download velocity model grids before transformation.
+
+    This is useful to separate the (potentially slow) download step from
+    the actual transformation. Call this before warp_dynamic_epoch() to
+    ensure the required velocity model is available locally.
+
+    Args:
+        bbox_4326: Bounding box in EPSG:4326 (min_lon, min_lat, max_lon, max_lat)
+        src_epoch: Source epoch (decimal year)
+        dst_epoch: Destination epoch (decimal year)
+        timeout: Download timeout in seconds (default 300s = 5 minutes)
+        verbose: Print progress messages
+
+    Returns:
+        VelocityModelInfo with resolved filepath
+
+    Raises:
+        ValueError: If no suitable model found
+        TimeoutError: If download times out
+        RuntimeError: If download fails
+
+    Example:
+        >>> # Pre-download before transformation
+        >>> model = ensure_velocity_model_available(
+        ...     bbox_4326=(-122.5, 37.5, -122.0, 38.0),
+        ...     src_epoch=2005.5,
+        ...     dst_epoch=2018.5,
+        ...     verbose=True
+        ... )
+        >>> print(f"Model ready: {model.filepath}")
+        >>> # Now run transformation (won't need to download)
+        >>> pc.warp_dynamic_epoch(target_epoch=2018.5)
+    """
+    if verbose:
+        print(f"Checking velocity model availability...", file=sys.stderr)
+        print(f"  AOI bbox: {bbox_4326}", file=sys.stderr)
+        print(f"  Epoch range: {src_epoch} -> {dst_epoch}", file=sys.stderr)
+
+    # First check if model is already available locally
+    try:
+        model, candidates = select_velocity_model(
+            bbox_4326=bbox_4326,
+            src_epoch=src_epoch,
+            dst_epoch=dst_epoch,
+            auto_download=False,  # Don't download yet
+            verbose=verbose,
+        )
+
+        if model.filepath and Path(model.filepath).exists():
+            if verbose:
+                print(f"\n✓ Model already available locally: {model.filepath}", file=sys.stderr)
+            return model
+
+    except ValueError:
+        # No local model found, will need to download
+        pass
+
+    # Need to download
+    if verbose:
+        print(f"\nModel not available locally, downloading...", file=sys.stderr)
+
+    model, candidates = select_velocity_model(
+        bbox_4326=bbox_4326,
+        src_epoch=src_epoch,
+        dst_epoch=dst_epoch,
+        auto_download=True,  # Enable download
+        verbose=verbose,
+    )
+
+    if not model.filepath or not Path(model.filepath).exists():
+        raise RuntimeError(
+            f"Failed to download velocity model '{model.name}'. "
+            f"Check network connection and try again."
+        )
+
+    if verbose:
+        print(f"\n✓ Model ready: {model.filepath}", file=sys.stderr)
+
+    return model
+
+
+def list_available_models(
+    bbox_4326: Optional[Tuple[float, float, float, float]] = None,
+    epoch_range: Optional[Tuple[float, float]] = None,
+    local_only: bool = False,
+) -> List[VelocityModelInfo]:
+    """
+    List all velocity models, optionally filtered by coverage.
+
+    Args:
+        bbox_4326: Optional geographic bounding box filter
+        epoch_range: Optional time range filter (min_epoch, max_epoch)
+        local_only: Only return models available locally
+
+    Returns:
+        List of matching VelocityModelInfo objects
+    """
+    models = load_registry()
+    return filter_models(
+        models,
+        bbox=bbox_4326,
+        epoch_range=epoch_range,
+        require_local=local_only,
+    )
+
+
+# ============================================================================
 # Convenience exports
 # ============================================================================
 
@@ -859,4 +1204,7 @@ __all__ = [
     "filter_models",
     "select_velocity_model",
     "create_custom_model",
+    "ensure_velocity_model_available",
+    "list_available_models",
+    "DEFAULT_DOWNLOAD_TIMEOUT",
 ]

@@ -498,7 +498,7 @@ def _build_epoch_steps(
     deformation_grids : str
         Path/name of velocity grid for +proj=deformation.
     central_epoch : float, optional
-        Central epoch for dt calculation.
+        Reference epoch of the velocity model (informational only, does not affect dt).
     ellps : str, optional
         Ellipsoid for +proj=cart. Inferred from src.crs if not provided.
 
@@ -513,7 +513,12 @@ def _build_epoch_steps(
     if src.epoch == dst.epoch:
         return ""
 
-    dt = (dst.epoch - src.epoch) if central_epoch is None else (dst.epoch - central_epoch)
+    # CRITICAL: dt must always be the full time difference between source and destination epochs.
+    # The central_epoch parameter is the reference epoch of the velocity model (informational only)
+    # and should NOT affect the dt calculation. The velocity model gives velocities in mm/year,
+    # and we multiply by dt to get the total displacement.
+    # See: https://proj.org/en/stable/operations/transformations/deformation.html
+    dt = dst.epoch - src.epoch
 
     if ellps is None:
         ellps = _ellipsoid_of_crs(src.crs)
@@ -560,8 +565,10 @@ def build_dynamic_epoch_pipeline(
     deformation_grids : str
         Name/path of the velocity grid(s) usable by +proj=deformation.
     central_epoch : float, optional
-        "Mid" epoch for the velocity model. If provided, dt is computed as
-        (dst.epoch - central_epoch) instead of (dst.epoch - src.epoch).
+        Reference epoch of the velocity model (informational only).
+        NOTE: This parameter does NOT affect the dt calculation. The dt is always
+        computed as (dst.epoch - src.epoch), which is the correct time shift
+        to apply to coordinates. The central_epoch is retained for metadata only.
     ellps : str, optional
         Ellipsoid name for +proj=cart. If None, we infer from src.crs.
 
@@ -580,7 +587,9 @@ def build_dynamic_epoch_pipeline(
     if src.epoch == dst.epoch:
         return "+proj=pipeline"
 
-    dt = (dst.epoch - src.epoch) if central_epoch is None else (dst.epoch - central_epoch)
+    # CRITICAL: dt must always be the full time difference between source and destination epochs.
+    # The central_epoch parameter is informational only and should NOT affect the dt calculation.
+    dt = dst.epoch - src.epoch
 
     if ellps is None:
         ellps = _ellipsoid_of_crs(src.crs)
@@ -627,7 +636,7 @@ def build_dynamic_epoch_pipeline_projected(
     deformation_grids : str
         Path/name of velocity grid.
     central_epoch : float, optional
-        Central epoch for dt calculation.
+        Reference epoch of the velocity model (informational only, does not affect dt).
 
     Returns
     -------
