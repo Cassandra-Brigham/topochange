@@ -57,6 +57,24 @@ except ImportError:
     UNKNOWN_UNIT = None
     METER = None
 
+# Import shared alignment utilities
+from .alignment_utils import (
+    load_points_from_las,
+    save_transformed_las,
+    compute_alignment_quality,
+    has_small_gicp,
+    require_small_gicp,
+    PointCloudPreprocessor,
+    AlignmentQualityMetrics,
+)
+
+# Import alignment classes (for type hints and optional direct usage)
+from .alignment import (
+    LandscapeAligner,
+    RegistrationConfig,
+    RegistrationResult,
+)
+
 
 # =============================================================================
 # Utility Functions
@@ -64,11 +82,7 @@ except ImportError:
 
 def _has_small_gicp() -> bool:
     """Check if small_gicp is available."""
-    try:
-        import small_gicp
-        return True
-    except ImportError:
-        return False
+    return has_small_gicp()
 
 
 def _crs_equivalent(crs1: Any, crs2: Any) -> bool:
