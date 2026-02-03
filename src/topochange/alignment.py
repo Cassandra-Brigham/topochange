@@ -1,31 +1,62 @@
 """
 Automatic Point Cloud Registration for Landscape Data
-Integrates with PointCloud and PointCloudPair classes
-Uses small_gicp for registration and PDAL for I/O and filtering
+
+This module provides classes for aligning point clouds using ICP-based
+registration methods. It integrates with PointCloud and PointCloudPair classes
+and uses small_gicp for registration and PDAL for I/O and filtering.
+
+The main classes are:
+- RegistrationConfig: Configuration dataclass for all alignment parameters
+- RegistrationResult: Container for registration results
+- LandscapeAligner: Main alignment class with preprocessing and retry logic
+
+For shared utilities (loading, saving, preprocessing), see alignment_utils.py.
+
+References
+----------
+- Besl, P.J. and McKay, N.D. (1992). A Method for Registration of 3-D Shapes.
+- Koide, K. et al. (2021). Voxelized GICP for Fast and Accurate 3D Point Cloud Registration.
 """
 
 import json
 import numpy as np
+import os
+import tempfile
+import warnings
+import logging
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Optional, Dict, Tuple, List, Union, Any, TYPE_CHECKING
+
+from scipy.spatial import cKDTree
+
+# small_gicp import (optional dependency)
 try:
     import small_gicp
     _HAS_SMALL_GICP = True
 except ImportError:
     small_gicp = None
     _HAS_SMALL_GICP = False
+
 # Use pdal_wrapper for Colab compatibility (falls back to native pdal locally)
 try:
     from .pdal_wrapper import pdal
 except ImportError:
     import pdal
-from typing import Optional, Dict, Tuple, List, Union, Any, TYPE_CHECKING
-from dataclasses import dataclass, field
-from enum import Enum
-import warnings
-from pathlib import Path
-from scipy.spatial import cKDTree
-import logging
-import tempfile
-import os
+
+# Import shared utilities (these can also be used by pointcloudpair.py)
+from .alignment_utils import (
+    run_pdal_pipeline,
+    load_points_from_las,
+    save_transformed_las,
+    compute_alignment_quality,
+    PointCloudPreprocessor,
+    AlignmentQualityMetrics,
+    require_small_gicp as _require_small_gicp_util,
+    has_small_gicp,
+    decompose_transformation,
+)
 
 
 def _require_small_gicp():
@@ -33,7 +64,7 @@ def _require_small_gicp():
     if not _HAS_SMALL_GICP:
         raise ImportError(
             "small_gicp is required for point cloud alignment. "
-            "Install with: pip install topochange[alignment]"
+            "Install with: pip install small_gicp"
         )
 
 if TYPE_CHECKING:
@@ -127,43 +158,121 @@ class RegistrationMethod(Enum):
 
 @dataclass
 class RegistrationConfig:
-    """Configuration for point cloud registration"""
+    """
+    Configuration for point cloud registration.
 
-    # General parameters
+    This configuration class supports all parameters from both LandscapeAligner
+    and PointCloudPair.align_point_clouds() for unified alignment workflows.
+
+    Parameters
+    ----------
+    method : str
+        Registration method: "icp", "plane_icp", "gicp", "vgicp" (default: "gicp")
+    max_correspondence_distance : float, optional
+        Maximum distance for point correspondences. Auto-computed if None.
+    max_iterations : int
+        Maximum ICP iterations (default: 50)
+    transformation_epsilon : float
+        Convergence threshold for transformation change (default: 1e-6)
+    num_threads : int
+        Number of threads for parallel processing (default: 4)
+
+    Examples
+    --------
+    >>> config = RegistrationConfig(method="vgicp", target_points=1_000_000)
+    >>> aligner = LandscapeAligner(config)
+    >>> result = aligner.align("source.laz", "target.laz")
+    """
+
+    # === Core Registration Parameters ===
     method: str = "gicp"  # Registration type: "icp", "plane_icp", "gicp", "vgicp"
     max_correspondence_distance: Optional[float] = None  # Auto-compute if None
     max_iterations: int = 50
+    transformation_epsilon: float = 1e-6  # Convergence threshold
+    num_threads: int = 4  # Parallel threads for small_gicp
 
-    # Centering and cropping parameters
+    # === Centering and Spatial Constraints ===
     center_to_origin: bool = True  # Center both clouds to (0,0,0) before registration
     crop_dimensions: Optional[Tuple[float, float]] = None  # (x, y) crop rectangle centered on origin
+    crop_bounds: Optional[Tuple[float, float, float, float]] = None  # (minx, miny, maxx, maxy) explicit bounds
+    alignment_box_size: Optional[Tuple[float, float]] = None  # Box size centered on overlap centroid
 
-    # Downsampling parameters
-    downsample: bool = False  # Disable downsampling by default (use full point density)
-    voxel_size: Optional[float] = None  # Auto-compute if None (when downsample=True)
-    target_points: int = 100000  # Target number of points after downsampling (when downsample=True)
+    # === Downsampling Parameters ===
+    downsample: bool = False  # Enable/disable downsampling
+    voxel_size: Optional[float] = None  # Fine registration voxel size (auto-compute if None)
+    initial_voxel_size: Optional[float] = None  # Initial load-time voxel size for memory efficiency
+    auto_downsample: bool = False  # Auto-calculate voxel size based on target_points
+    target_points: int = 2_000_000  # Target number of points (increased default for accuracy)
+    max_points: Optional[int] = None  # Hard cap on points per cloud
 
-    # Coarse alignment parameters
-    perform_coarse_alignment: bool = True
-    use_ground_plane_constraint: bool = True  # Constrains rotation for landscape data
+    # === Coarse Alignment Parameters ===
+    perform_coarse_alignment: bool = True  # Enable coarse (centroid) alignment
+    use_ground_plane_constraint: bool = True  # Constrain rotation for landscape data
 
-    # Filtering parameters
-    point_filter: str = "ground"  # "ground" (default), "all", or "custom" (uses classification_filter)
-    use_ground_filter: bool = False  # Use SMRF to classify ground points (for unclassified data)
-    ground_filter_params: Optional[Dict[str, Any]] = None
-    outlier_removal: bool = True
-    outlier_k_neighbors: int = 20
-    outlier_std_multiplier: float = 2.0
-    classification_filter: Optional[Union[List[int], str]] = None  # Custom list when point_filter="custom"
+    # === Point Filtering Parameters ===
+    point_filter: Union[str, List[int]] = "ground"  # "ground", "all", or list of classification codes
+    use_ground_filter: bool = False  # Use SMRF to classify ground points
+    ground_filter_params: Optional[Dict[str, Any]] = None  # SMRF parameters
+    outlier_removal: bool = True  # Enable statistical outlier removal
+    outlier_k_neighbors: int = 20  # Neighbors for outlier detection
+    outlier_std_multiplier: float = 2.0  # Std multiplier for outlier threshold
+    classification_filter: Optional[Union[List[int], str]] = None  # Legacy: use point_filter instead
 
-    # Validation
+    # === Validation Criteria ===
     min_fitness_score: float = 0.3  # Minimum acceptable fitness score
     max_rmse: Optional[float] = None  # Maximum acceptable RMSE (auto if None)
 
-    # Auto-retry parameters
-    enable_auto_retry: bool = True
-    max_retries: int = 3
-    retry_strategies: List[str] = field(default_factory=lambda: ["increase_correspondence", "change_method", "adjust_filtering"])
+    # === Auto-Retry Parameters ===
+    enable_auto_retry: bool = True  # Enable automatic retry on failure
+    max_retries: int = 3  # Maximum retry attempts
+    retry_strategies: List[str] = field(default_factory=lambda: [
+        "increase_correspondence", "change_method", "adjust_filtering"
+    ])
+
+    # === Output Control ===
+    apply_transform: bool = True  # Whether to apply transform and save result
+    output_path: Optional[str] = None  # Output file path (auto-generated if None)
+    overwrite: bool = True  # Overwrite existing output file
+    verbose: bool = True  # Enable verbose output
+
+    def __post_init__(self):
+        """Validate and normalize configuration."""
+        # Normalize point_filter
+        if isinstance(self.point_filter, str):
+            self.point_filter = self.point_filter.lower()
+            if self.point_filter not in ("ground", "all"):
+                raise ValueError(f"Invalid point_filter string: {self.point_filter}")
+
+        # Handle legacy classification_filter
+        if self.classification_filter is not None and self.point_filter == "ground":
+            logger.warning(
+                "classification_filter is deprecated, use point_filter instead. "
+                "Setting point_filter to classification_filter value."
+            )
+            self.point_filter = self.classification_filter
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert config to dictionary for serialization."""
+        return {
+            'method': self.method,
+            'max_correspondence_distance': self.max_correspondence_distance,
+            'max_iterations': self.max_iterations,
+            'transformation_epsilon': self.transformation_epsilon,
+            'num_threads': self.num_threads,
+            'center_to_origin': self.center_to_origin,
+            'downsample': self.downsample,
+            'voxel_size': self.voxel_size,
+            'initial_voxel_size': self.initial_voxel_size,
+            'auto_downsample': self.auto_downsample,
+            'target_points': self.target_points,
+            'max_points': self.max_points,
+            'point_filter': self.point_filter,
+            'outlier_removal': self.outlier_removal,
+            'min_fitness_score': self.min_fitness_score,
+            'max_rmse': self.max_rmse,
+            'enable_auto_retry': self.enable_auto_retry,
+            'verbose': self.verbose,
+        }
 
 
 class PointCloudProcessor:
@@ -348,39 +457,148 @@ class PointCloudProcessor:
 
 
 class RegistrationResult:
-    """Container for registration results"""
+    """
+    Container for registration results.
+
+    This class holds all outputs from a point cloud registration operation,
+    including the transformation matrix, quality metrics, and metadata.
+
+    Attributes
+    ----------
+    transformation : np.ndarray
+        4x4 homogeneous transformation matrix (source to target)
+    rmse : float
+        Root Mean Square Error of correspondence distances
+    fitness : float
+        Ratio of inlier correspondences (0-1)
+    num_inliers : int
+        Number of inlier correspondences
+    converged : bool
+        Whether the registration converged
+    iterations : int
+        Number of iterations performed
+    method_used : str
+        Registration method that was used
+    translation : np.ndarray
+        Translation component of transformation (3,)
+    rotation_angle_deg : float
+        Rotation angle in degrees
+    centroid : np.ndarray, optional
+        Centroid used for centering (for proper transformation application)
+    source_path : str, optional
+        Path to source point cloud file
+    target_path : str, optional
+        Path to target point cloud file
+    output_path : str, optional
+        Path to output aligned point cloud file
+
+    Examples
+    --------
+    >>> result = aligner.align("source.laz", "target.laz")
+    >>> if result.is_valid(config):
+    ...     print(f"RMSE: {result.rmse:.4f}m, Fitness: {result.fitness:.1%}")
+    """
 
     def __init__(self):
+        # Core transformation
         self.transformation: np.ndarray = np.eye(4)
+
+        # Quality metrics
         self.rmse: float = np.inf
         self.fitness: float = 0.0
-        self.num_correspondences: int = 0
+        self.num_inliers: int = 0  # Renamed from num_correspondences for clarity
+        self.num_correspondences: int = 0  # Legacy alias
+
+        # Convergence info
         self.converged: bool = False
         self.iterations: int = 0
         self.scale: float = 1.0
         self.method_used: str = ""
         self.retry_count: int = 0
-        self.centroid: Optional[np.ndarray] = None  # Centroid used for centering (if any)
+
+        # Transformation components (computed on access)
+        self._translation: Optional[np.ndarray] = None
+        self._rotation_angle_deg: Optional[float] = None
+
+        # Context for proper transformation application
+        self.centroid: Optional[np.ndarray] = None
+        self.source_path: Optional[str] = None
+        self.target_path: Optional[str] = None
+        self.output_path: Optional[str] = None
+
+        # Additional metadata
         self.metadata: Dict[str, Any] = {}
-    
+
+    @property
+    def translation(self) -> np.ndarray:
+        """Translation component of the transformation."""
+        if self._translation is None:
+            self._translation = self.transformation[:3, 3].copy()
+        return self._translation
+
+    @property
+    def rotation_angle_deg(self) -> float:
+        """Rotation angle in degrees."""
+        if self._rotation_angle_deg is None:
+            R = self.transformation[:3, :3]
+            trace = np.trace(R)
+            cos_angle = (trace - 1) / 2
+            cos_angle = np.clip(cos_angle, -1, 1)
+            self._rotation_angle_deg = np.degrees(np.arccos(cos_angle))
+        return self._rotation_angle_deg
+
     def is_valid(self, config: RegistrationConfig) -> bool:
-        """Check if registration result meets quality criteria"""
+        """
+        Check if registration result meets quality criteria.
+
+        Parameters
+        ----------
+        config : RegistrationConfig
+            Configuration with validation criteria
+
+        Returns
+        -------
+        bool
+            True if result meets min_fitness_score, max_rmse, and converged
+        """
         max_rmse = config.max_rmse
         if max_rmse is None:
-            # Auto-compute based on typical landscape scale
-            max_rmse = 5.0  # meters, reasonable for landscape data
-        
-        return (self.fitness >= config.min_fitness_score and 
-                self.rmse <= max_rmse and
-                self.converged)
-    
+            max_rmse = 5.0  # Default: 5 meters for landscape data
+
+        return (
+            self.fitness >= config.min_fitness_score and
+            self.rmse <= max_rmse and
+            self.converged
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert result to dictionary for serialization."""
+        return {
+            'transformation': self.transformation.tolist(),
+            'rmse': self.rmse,
+            'fitness': self.fitness,
+            'num_inliers': self.num_inliers,
+            'converged': self.converged,
+            'iterations': self.iterations,
+            'method_used': self.method_used,
+            'retry_count': self.retry_count,
+            'translation': self.translation.tolist(),
+            'rotation_angle_deg': self.rotation_angle_deg,
+            'centroid': self.centroid.tolist() if self.centroid is not None else None,
+            'source_path': self.source_path,
+            'target_path': self.target_path,
+            'output_path': self.output_path,
+        }
+
     def __repr__(self) -> str:
-        return (f"RegistrationResult(method={self.method_used}, "
-                f"rmse={self.rmse:.3f}, "
-                f"fitness={self.fitness:.3f}, "
-                f"converged={self.converged}, "
-                f"iterations={self.iterations}, "
-                f"retries={self.retry_count})")
+        return (
+            f"RegistrationResult(method={self.method_used}, "
+            f"rmse={self.rmse:.3f}, "
+            f"fitness={self.fitness:.3f}, "
+            f"converged={self.converged}, "
+            f"iterations={self.iterations}, "
+            f"retries={self.retry_count})"
+        )
 
 
 class LandscapeAligner:
