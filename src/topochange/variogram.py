@@ -1722,7 +1722,7 @@ class VariogramAnalysis:
         lines.append(f"{'Model':<35} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10} {'Weight':>10}")
         lines.append("-" * 80)
 
-        weights = selector.model_weights or [0] * len(selector.fitted_models)
+        weights = selector.model_weights if selector.model_weights is not None else [0] * len(selector.fitted_models)        
         sorted_models = sorted(zip(selector.fitted_models, weights), key=lambda x: x[0].aic)
 
         for model, weight in sorted_models:
