@@ -148,7 +148,7 @@ class RegionalUncertaintyEstimator:
         if fitted_model is not None:
             # New approach: use FittedVariogramModel
             self.gamma_func = fitted_model.predict
-            self.sigma2 = fitted_model.composite_model.total_sill
+            self.sigma2 = fitted_model.composite_model.get_total_sill()
             
             # Min/max from bootstrap if available
             if fitted_model.param_samples is not None and len(fitted_model.param_samples) > 0:
@@ -164,7 +164,7 @@ class RegionalUncertaintyEstimator:
             self.gamma_func = va.get_bma_variogram_function()
             selector = va.model_selector
             self.sigma2 = sum(
-                w * m.composite_model.total_sill
+                w * m.composite_model.get_total_sill()
                 for m, w in zip(selector.fitted_models, selector.model_weights)
             )
             # BMA doesn't have simple min/max - use same for all
