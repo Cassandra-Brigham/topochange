@@ -1,0 +1,65 @@
+# See https://citation-file-format.github.io/ for the specification.
+
+cff-version: 1.2.0
+title: topochange
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Cassandra
+    family-names: Brigham
+    email: cass.ap.brigham@gmail.com
+    affiliation: School of Earth and Space Exploration, Arizona State University, Tempe, AZ, USA
+  - given-names: Chelsea
+    family-names: Scott
+    affiliation: School of Earth and Space Exploration, Arizona State University, Tempe, AZ, USA
+  - given-names: Ramon
+    family-names: Arrowsmith
+    affiliation: School of Earth and Space Exploration, Arizona State University, Tempe, AZ, USA
+  - given-names: Minh
+    family-names: Phan
+    affiliation: San Diego Supercomputer Center, University of California San Diego, CA, USA
+  - given-names: Jessica
+    family-names: DeWitt
+    affiliation: U.S. Geological Survey, Florence Bascom Geoscience Center, Reston, VA, USA
+  - given-names: Monica
+    family-names: Palaseanu-Lovejoy
+    affiliation: U.S. Geological Survey, GMEG SC, Reston, VA, USA
+  - given-names: Viswanath
+    family-names: Nandigam
+    affiliation: San Diego Supercomputer Center, University of California San Diego, CA, USA
+  - given-names: Jason
+    family-names: Stoker
+    affiliation: U.S. Geological Survey, National Geospatial Program, Menlo Park, CA, USA
+  - given-names: Scott Wallace
+    family-names: Anderson
+    affiliation: U.S. Geological Survey, Washington Water Science Center, Tacoma, WA, USA
+  - given-names: Dean B
+    family-names: Gesch
+    affiliation: U.S. Geological Survey, Earth Resources Observation and Science Center, Sioux Falls, SD, USA
+  - given-names: Christopher J
+    family-names: Crosby
+    affiliation: EarthScope Consortium, Washington, D.C., USA
+  - given-names: Matthew
+    family-names: Beckley
+    affiliation: EarthScope Consortium, Washington, D.C., USA
+repository-code: https://github.com/Cassandra-Brigham/topochange
+abstract: >-
+  Topographic change detection and uncertainty quantification
+  using variogram-based methods. A Python library for comparing
+  raster digital elevation models (DEMs) and point cloud data,
+  performing coordinate reference system transformations,
+  conducting variogram-based uncertainty analysis, and
+  propagating regional uncertainty measurements.
+keywords:
+  - topography
+  - DEM
+  - uncertainty
+  - variogram
+  - geospatial
+  - raster
+  - point-cloud
+  - change-detection
+license: MIT
+version: 0.1.0
