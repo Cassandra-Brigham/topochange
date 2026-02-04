@@ -291,7 +291,8 @@ def load_registry(
         if registry_path is None:
             # Look for default registry in common locations
             search_paths = [
-                Path(__file__).parent / "velocity_models_registry.yaml",
+                Path(__file__).parent / "data" / "velocity_models_registry.yaml",
+                Path(__file__).parent / "velocity_models_registry.yaml",  # Fallback
                 Path.home() / ".config" / "proj" / "velocity_models_registry.yaml",
                 Path("/etc/proj/velocity_models_registry.yaml"),
             ]
@@ -733,7 +734,7 @@ def _convert_model_if_needed(
     
     # Try to import converter
     try:
-        from velocity_model_converters import convert_model
+        from .velocity_model_converters import convert_model
     except ImportError:
         if verbose:
             print(f"WARNING: Model {model.name} requires conversion but "
