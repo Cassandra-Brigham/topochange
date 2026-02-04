@@ -20,7 +20,7 @@ import struct
 import warnings
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -503,61 +503,207 @@ class GSRMConverter(VelocityConverter):
 class EarthScopeConverter(VelocityConverter):
     """
     Convert EarthScope/UNAVCO GNSS point velocities to gridded GeoTIFF.
+
+    Handles the GAGE/PBO velocity file format (.vel files) which contain:
+    - Station coordinates (XYZ and lat/lon)
+    - Cartesian velocities (dX/dt, dY/dt, dZ/dt) in meters/year
     """
-    
+
+    @staticmethod
+    def _xyz_to_enu(vx: np.ndarray, vy: np.ndarray, vz: np.ndarray,
+                    lat: np.ndarray, lon: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Convert Cartesian (ECEF) velocities to local East-North-Up.
+
+        Args:
+            vx, vy, vz: Cartesian velocity components (m/yr)
+            lat, lon: Station positions (degrees)
+
+        Returns:
+            ve, vn, vu: East, North, Up velocity components (m/yr)
+        """
+        lat_rad = np.radians(lat)
+        lon_rad = np.radians(lon)
+
+        # Rotation matrix from ECEF to ENU
+        sin_lat = np.sin(lat_rad)
+        cos_lat = np.cos(lat_rad)
+        sin_lon = np.sin(lon_rad)
+        cos_lon = np.cos(lon_rad)
+
+        # East component: -sin(lon)*vx + cos(lon)*vy
+        ve = -sin_lon * vx + cos_lon * vy
+
+        # North component: -sin(lat)*cos(lon)*vx - sin(lat)*sin(lon)*vy + cos(lat)*vz
+        vn = -sin_lat * cos_lon * vx - sin_lat * sin_lon * vy + cos_lat * vz
+
+        # Up component: cos(lat)*cos(lon)*vx + cos(lat)*sin(lon)*vy + sin(lat)*vz
+        vu = cos_lat * cos_lon * vx + cos_lat * sin_lon * vy + sin_lat * vz
+
+        return ve, vn, vu
+
+    @staticmethod
+    def _parse_vel_file(filepath: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Parse GAGE/PBO .vel file format.
+
+        Returns:
+            lons, lats, ve, vn, vu (velocities in mm/year)
+        """
+        lons = []
+        lats = []
+        vx_list = []
+        vy_list = []
+        vz_list = []
+
+        with open(filepath, 'r') as f:
+            in_data = False
+            for line in f:
+                line = line.strip()
+
+                # Skip empty lines and comments
+                if not line or line.startswith('#') or line.startswith('*'):
+                    # Check for data section start
+                    if 'Dot#' in line or 'dX/dt' in line:
+                        in_data = True
+                    continue
+
+                # Try to parse data line
+                parts = line.split()
+                if len(parts) < 15:
+                    continue
+
+                try:
+                    # Column indices (0-based):
+                    # 0: Dot#, 1: Name, 2: Ref_epoch, 3: Ref_jday
+                    # 4: Ref_X, 5: Ref_Y, 6: Ref_Z
+                    # 7: Ref_Nlat, 8: Ref_Elong, 9: Ref_Up
+                    # 10: dX/dt, 11: dY/dt, 12: dZ/dt
+                    # 13: SXd, 14: SYd, 15: SZd
+
+                    lat = float(parts[7])
+                    lon = float(parts[8])
+                    vx = float(parts[10])  # m/yr
+                    vy = float(parts[11])  # m/yr
+                    vz = float(parts[12])  # m/yr
+
+                    # Validate reasonable values
+                    if -180 <= lon <= 180 and -90 <= lat <= 90:
+                        lons.append(lon)
+                        lats.append(lat)
+                        vx_list.append(vx)
+                        vy_list.append(vy)
+                        vz_list.append(vz)
+
+                except (ValueError, IndexError):
+                    continue
+
+        if not lons:
+            raise ValueError(f"No valid velocity data found in {filepath}")
+
+        lons = np.array(lons)
+        lats = np.array(lats)
+        vx = np.array(vx_list)
+        vy = np.array(vy_list)
+        vz = np.array(vz_list)
+
+        # Convert XYZ to ENU
+        ve, vn, vu = EarthScopeConverter._xyz_to_enu(vx, vy, vz, lats, lons)
+
+        # Convert from m/yr to mm/yr
+        ve *= 1000
+        vn *= 1000
+        vu *= 1000
+
+        return lons, lats, ve, vn, vu
+
     @staticmethod
     def convert(
         input_path: Path,
         output_path: Path,
         resolution: float = 0.1,
         method: str = 'linear',
+        bbox: Optional[Tuple[float, float, float, float]] = None,
         **kwargs,
     ) -> Path:
         """
-        Grid EarthScope point data.
-        
+        Grid EarthScope/GAGE point velocities to GeoTIFF.
+
         Args:
-            input_path: ASCII file with station velocities
+            input_path: ASCII velocity file (.vel format)
             output_path: Output GeoTIFF
-            resolution: Grid spacing in degrees
+            resolution: Grid spacing in degrees (default 0.1°)
             method: Interpolation method ('linear', 'cubic', 'nearest')
+            bbox: Optional bounding box to limit output (min_lon, min_lat, max_lon, max_lat)
         """
         if griddata is None:
             raise ImportError("scipy required for gridding")
         if rasterio is None:
             raise ImportError("rasterio required")
-        
-        # Parse EarthScope format
-        # Typical: lon, lat, ve, vn, vu, [sig_e, sig_n, sig_u], [site_code]
-        data = np.loadtxt(input_path, skiprows=1)
-        
-        lons = data[:, 0]
-        lats = data[:, 1]
-        ve = data[:, 2]
-        vn = data[:, 3]
-        vu = data[:, 4] if data.shape[1] > 4 else np.zeros_like(ve)
-        
+
+        input_path = Path(input_path)
+
+        # Parse the velocity file
+        print(f"Parsing velocity file: {input_path}")
+        lons, lats, ve, vn, vu = EarthScopeConverter._parse_vel_file(input_path)
+
+        print(f"Loaded {len(lons)} GNSS stations")
+        print(f"  Longitude range: {lons.min():.2f} to {lons.max():.2f}")
+        print(f"  Latitude range: {lats.min():.2f} to {lats.max():.2f}")
+        print(f"  East velocity range: {ve.min():.2f} to {ve.max():.2f} mm/yr")
+        print(f"  North velocity range: {vn.min():.2f} to {vn.max():.2f} mm/yr")
+
+        # Determine grid bounds
+        if bbox is not None:
+            lon_min, lat_min, lon_max, lat_max = bbox
+        else:
+            lon_min, lon_max = lons.min(), lons.max()
+            lat_min, lat_max = lats.min(), lats.max()
+
+        # Add small buffer
+        buffer = resolution / 2
+        lon_min -= buffer
+        lon_max += buffer
+        lat_min -= buffer
+        lat_max += buffer
+
         # Create regular grid
-        lon_min, lon_max = lons.min(), lons.max()
-        lat_min, lat_max = lats.min(), lats.max()
-        
         nx = int((lon_max - lon_min) / resolution) + 1
         ny = int((lat_max - lat_min) / resolution) + 1
-        
+
         lon_grid = np.linspace(lon_min, lon_max, nx)
         lat_grid = np.linspace(lat_min, lat_max, ny)
         lon_mesh, lat_mesh = np.meshgrid(lon_grid, lat_grid)
-        
-        print(f"Gridding {len(lons)} GNSS stations → {nx}x{ny} grid")
-        
+
+        print(f"Creating {nx}x{ny} grid ({resolution}° resolution)")
+
         # Interpolate
+        print(f"Interpolating using '{method}' method...")
         ve_grid = griddata((lons, lats), ve, (lon_mesh, lat_mesh), method=method)
         vn_grid = griddata((lons, lats), vn, (lon_mesh, lat_mesh), method=method)
         vu_grid = griddata((lons, lats), vu, (lon_mesh, lat_mesh), method=method)
-        
+
+        # Fill NaN values at edges with nearest neighbor
+        mask = np.isnan(ve_grid)
+        if mask.any():
+            print(f"Filling {mask.sum()} NaN values with nearest neighbor...")
+            ve_nn = griddata((lons, lats), ve, (lon_mesh, lat_mesh), method='nearest')
+            vn_nn = griddata((lons, lats), vn, (lon_mesh, lat_mesh), method='nearest')
+            vu_nn = griddata((lons, lats), vu, (lon_mesh, lat_mesh), method='nearest')
+            ve_grid[mask] = ve_nn[mask]
+            vn_grid[mask] = vn_nn[mask]
+            vu_grid[mask] = vu_nn[mask]
+
         # Write GeoTIFF
+        # Note: rasterio expects data in (rows, cols) = (lat, lon) order
+        # with lat decreasing from top to bottom
         transform = from_bounds(lon_min, lat_min, lon_max, lat_max, nx, ny)
-        
+
+        # Flip latitude axis so north is up
+        ve_grid = np.flipud(ve_grid)
+        vn_grid = np.flipud(vn_grid)
+        vu_grid = np.flipud(vu_grid)
+
         with rasterio.open(
             output_path, 'w',
             driver='GTiff',
@@ -572,21 +718,22 @@ class EarthScopeConverter(VelocityConverter):
             dst.write(ve_grid.astype(np.float32), 1)
             dst.write(vn_grid.astype(np.float32), 2)
             dst.write(vu_grid.astype(np.float32), 3)
-            
+
             dst.set_band_description(1, 'east_velocity')
             dst.set_band_description(2, 'north_velocity')
             dst.set_band_description(3, 'up_velocity')
-            
+
             dst.update_tags(1, units='mm/year')
             dst.update_tags(2, units='mm/year')
             dst.update_tags(3, units='mm/year')
-            
+
             dst.update_tags(
-                source='EarthScope_GNSS',
+                source='EarthScope_GAGE_GNSS',
                 interpolation_method=method,
                 n_stations=len(lons),
+                reference_frame='NAM14',
             )
-        
+
         print(f"Created gridded velocity model: {output_path}")
         return Path(output_path)
 

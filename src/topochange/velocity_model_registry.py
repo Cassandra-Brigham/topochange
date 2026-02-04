@@ -639,13 +639,62 @@ def download_model(
                 print(f"Download failed: {e}", file=sys.stderr)
             return None
     
+    elif method == "http_direct":
+        # Direct HTTP download (similar to cdn_direct but may need conversion)
+        urls = model.download.get("urls", [])
+        fallback_urls = model.download.get("fallback", [])
+        all_urls = urls + fallback_urls
+
+        if not all_urls:
+            if verbose:
+                print(f"No URLs specified for '{model.name}'", file=sys.stderr)
+            return None
+
+        # Use specified raw filename or extract from URL
+        raw_filename = model.download.get("raw_filename")
+
+        for url in all_urls:
+            try:
+                if raw_filename:
+                    filename = raw_filename
+                else:
+                    filename = url.split("/")[-1]
+
+                output_path = target_dir / filename
+
+                if verbose:
+                    print(f"Downloading {model.name} from {url}", file=sys.stderr)
+                    print(f"  Target: {output_path}", file=sys.stderr)
+                    print(f"  Timeout: {timeout}s", file=sys.stderr)
+
+                _download_with_progress(url, output_path, timeout=timeout, verbose=verbose)
+
+                model.local = True
+                model.filepath = str(output_path)
+
+                if verbose:
+                    print(f"Successfully downloaded to {output_path}", file=sys.stderr)
+
+                return str(output_path)
+
+            except TimeoutError as e:
+                if verbose:
+                    print(f"Download timed out: {e}", file=sys.stderr)
+                continue
+            except Exception as e:
+                if verbose:
+                    print(f"Download failed from {url}: {e}", file=sys.stderr)
+                continue
+
+        return None
+
     elif method == "manual":
         if verbose:
             info_url = model.download.get("info_url", "N/A")
             print(f"Model '{model.name}' requires manual download.")
             print(f"See: {info_url}")
         return None
-    
+
     else:
         if verbose:
             print(f"Unknown download method '{method}' for '{model.name}'")

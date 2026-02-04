@@ -381,31 +381,38 @@ models:
   
   earthscope_gage_pbo:
     name: "earthscope_pbo"
-    label: "EarthScope PBO GPS velocity field"
+    label: "EarthScope GAGE GPS velocity field (NAM14)"
     region: "Western US, Alaska"
     bbox: [-165.0, 30.0, -100.0, 70.0]
     epoch_min: 2000.0
-    epoch_max: 2025.0
-    central_epoch: null
+    epoch_max: 2030.0
+    central_epoch: 2020.0  # Reference epoch for NAM14 velocities
     kind: "velocity"
-    format: "ASCII station list / KMZ"
+    format: "ASCII velocity file"
     proj_op: "deformation"  # After gridding
     files: ["earthscope_pbo_velocity.tif"]  # Converted output
     download:
-      method: "manual"
-      info_url: "https://www.unavco.org/data/gps-gnss/derived-products/derived-products.html"
+      method: "http_direct"
+      urls:
+        - "https://gage-data.earthscope.org/archive/gnss/products/velocity/cwu.final_nam14.vel"
+      fallback:
+        - "https://gage-data.earthscope.org/archive/gnss/products/velocity/pbo.final_nam14.vel"
+      raw_filename: "cwu.final_nam14.vel"
       requires_conversion: true
       conversion_options:
         resolution: 0.1  # Grid spacing in degrees
         method: "linear"  # Interpolation method
-    auto_download: false
-    license: "NSF / UNAVCO"
+    auto_download: true
+    license: "NSF / EarthScope / GAGE (CC BY 4.0)"
     citations:
       - "EarthScope / GAGE Facility"
+      - "Herring et al., GAGE GPS Analysis, 2016"
     notes: >
-      Point velocities at GNSS stations. System will automatically grid
-      using scipy interpolation after manual download. Resolution and
-      interpolation method configurable.
+      GPS velocities from ~5000 GNSS stations in Western US in NAM14
+      (North America fixed) reference frame. System will automatically
+      download and grid using scipy interpolation to create PROJ-compatible
+      GeoTIFF. Covers Western US including Rocky Mountains, Great Basin,
+      Pacific Northwest, and California.
 
 # ==============================================================================
 # TEMPLATE FOR ADDING CUSTOM MODELS

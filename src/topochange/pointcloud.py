@@ -2035,12 +2035,19 @@ class PointCloud:
         output_path: Optional[Union[str, Path]] = None,
         overwrite: bool = False,
         return_pipeline: bool = False,
+        velocity_model_path: Optional[Union[str, Path]] = None,
     ):
         """
         Unified warp method that handles horizontal, vertical, and epoch transforms.
-        
+
         When multiple transformation types are requested, they are composed into
         a SINGLE PROJ pipeline for efficiency.
+
+        Parameters
+        ----------
+        velocity_model_path : str or Path, optional
+            Path to a custom velocity model GeoTIFF for epoch transformation.
+            See `warp_dynamic_epoch` docstring for file format requirements.
         """
         from pyproj import CRS as _CRS
         
@@ -2073,8 +2080,9 @@ class PointCloud:
                 output_path=output_path,
                 overwrite=overwrite,
                 return_pipeline=return_pipeline,
+                velocity_model_path=velocity_model_path,
             )
-        
+
         # Single transformation type - use existing specialized methods
         if needs_epoch:
             return self._warp_dynamic_epoch_core(
@@ -2087,6 +2095,7 @@ class PointCloud:
                 output_path=output_path,
                 overwrite=overwrite,
                 return_pipeline=return_pipeline,
+                velocity_model_path=velocity_model_path,
             )
         
         if needs_vertical:
@@ -2145,11 +2154,18 @@ class PointCloud:
         output_path: Optional[Union[str, Path]] = None,
         overwrite: bool = False,
         return_pipeline: bool = False,
+        velocity_model_path: Optional[Union[str, Path]] = None,
     ):
         """
         Combined transformation: epoch + vertical + horizontal in a single PDAL pass.
-        
+
         This is the most efficient path when multiple transformation types are needed.
+
+        Parameters
+        ----------
+        velocity_model_path : str or Path, optional
+            Path to a custom velocity model GeoTIFF. If provided, bypasses
+            automatic model selection for epoch transformation.
         """
         from pyproj import CRS as _CRS
         
@@ -2237,22 +2253,34 @@ class PointCloud:
         deformation_grids = None
         central_epoch = None
         if dst_epoch is not None and src_epoch is not None and abs(dst_epoch - src_epoch) > 0.001:
-            try:
-                bbox_4326 = self.bbox_4326
-            except Exception as e:
-                raise ValueError(
-                    "bbox_4326 not available. Ensure from_file() was called."
-                ) from e
-            
-            vm, _ = select_velocity_model(
-                bbox_4326=bbox_4326,
-                src_epoch=float(src_epoch),
-                dst_epoch=float(dst_epoch),
-                choice=None,
-                verbose=True,
-            )
-            deformation_grids = vm.filepath
-            central_epoch = vm.central_epoch if vm.central_epoch is not None else src_epoch
+            if velocity_model_path is not None:
+                # User provided a custom velocity model
+                velocity_model_path = Path(velocity_model_path)
+                if not velocity_model_path.exists():
+                    raise FileNotFoundError(
+                        f"Custom velocity model not found: {velocity_model_path}"
+                    )
+                deformation_grids = str(velocity_model_path)
+                central_epoch = (src_epoch + dst_epoch) / 2.0
+                print(f"Using custom velocity model: {velocity_model_path}", file=sys.stderr)
+            else:
+                # Automatic velocity model selection
+                try:
+                    bbox_4326 = self.bbox_4326
+                except Exception as e:
+                    raise ValueError(
+                        "bbox_4326 not available. Ensure from_file() was called."
+                    ) from e
+
+                vm, _ = select_velocity_model(
+                    bbox_4326=bbox_4326,
+                    src_epoch=float(src_epoch),
+                    dst_epoch=float(dst_epoch),
+                    choice=None,
+                    verbose=True,
+                )
+                deformation_grids = vm.filepath
+                central_epoch = vm.central_epoch if vm.central_epoch is not None else src_epoch
         
         # Build the combined pipeline
         try:
@@ -2551,6 +2579,7 @@ class PointCloud:
         output_path: Optional[Union[str, Path]],
         overwrite: bool,
         return_pipeline: bool = False,
+        velocity_model_path: Optional[Union[str, Path]] = None,
     ):
         """
         Internal implementation of dynamic epoch transformation.
@@ -2559,12 +2588,20 @@ class PointCloud:
           - Uses PROJ 9 via build_complete_pipeline (no pyproj transforms),
           - Automatically selects a deformation / velocity model based on
             geographic extent (EPSG:4326 bbox) and [src_epoch, dst_epoch],
+            OR uses a user-provided velocity model if velocity_model_path is given,
           - Can combine:
                 * horizontal CRS change,
                 * epoch change,
                 * vertical/geoid change
             into a single PROJ pipeline,
           - Runs the '+proj=pipeline' string with PDAL filters.projpipeline.
+
+        Parameters
+        ----------
+        velocity_model_path : str or Path, optional
+            Path to a custom velocity model GeoTIFF. If provided, bypasses
+            automatic model selection. See warp_dynamic_epoch docstring for
+            required file format (3-band GeoTIFF with E/N/U velocities in mm/yr).
         """
         from pyproj import CRS as _CRS
 
@@ -2618,17 +2655,29 @@ class PointCloud:
                 "and _get_pointcloud_extent stores poly_4326."
             ) from e
 
-        # Automatic velocity / deformation model selection
-        vm, vm_candidates = select_velocity_model(
-            bbox_4326=bbox_4326,
-            src_epoch=float(src_epoch),
-            dst_epoch=float(dst_epoch),
-            choice=None,
-            verbose=True,
-        )
-
-        deformation_grids = vm.filepath
-        central_epoch = vm.central_epoch if vm.central_epoch is not None else src_epoch
+        # Velocity / deformation model selection
+        if velocity_model_path is not None:
+            # User provided a custom velocity model
+            velocity_model_path = Path(velocity_model_path)
+            if not velocity_model_path.exists():
+                raise FileNotFoundError(
+                    f"Custom velocity model not found: {velocity_model_path}"
+                )
+            deformation_grids = str(velocity_model_path)
+            # For custom models, assume central epoch is the midpoint of transformation
+            central_epoch = (src_epoch + dst_epoch) / 2.0
+            print(f"Using custom velocity model: {velocity_model_path}", file=sys.stderr)
+        else:
+            # Automatic velocity model selection from registry
+            vm, vm_candidates = select_velocity_model(
+                bbox_4326=bbox_4326,
+                src_epoch=float(src_epoch),
+                dst_epoch=float(dst_epoch),
+                choice=None,
+                verbose=True,
+            )
+            deformation_grids = vm.filepath
+            central_epoch = vm.central_epoch if vm.central_epoch is not None else src_epoch
 
         # Normalize vertical kind / geoid aliases
         def _norm_kind(k: Optional[str]) -> Optional[str]:
@@ -2789,9 +2838,98 @@ class PointCloud:
         output_path: Optional[Union[str, Path]] = None,
         overwrite: bool = True,
         return_pipeline: bool = False,
+        velocity_model_path: Optional[Union[str, Path]] = None,
     ):
         """
-        Convenience wrapper around warp_pointcloud for dynamic epoch changes.
+        Transform point cloud coordinates from current epoch to target epoch.
+
+        This applies a velocity/deformation model to account for crustal motion
+        between epochs. By default, an appropriate velocity model is automatically
+        selected based on geographic location and time span.
+
+        Parameters
+        ----------
+        target_epoch : float
+            Target epoch as decimal year (e.g., 2020.5 for July 1, 2020).
+        target_crs_proj : CRS or str, optional
+            Target CRS if also changing coordinate reference system.
+        source_vertical_kind : str, optional
+            Source vertical datum type ('orthometric' or 'ellipsoidal').
+        target_vertical_kind : str, optional
+            Target vertical datum type ('orthometric' or 'ellipsoidal').
+        source_geoid_model : str, optional
+            Source geoid model name (e.g., 'geoid18').
+        target_geoid_model : str, optional
+            Target geoid model name.
+        output_path : str or Path, optional
+            Output file path. If None, auto-generated with '_transformed' suffix.
+        overwrite : bool, default True
+            Whether to overwrite existing output file.
+        return_pipeline : bool, default False
+            If True, also return the PROJ pipeline string.
+        velocity_model_path : str or Path, optional
+            Path to a custom velocity model file. If provided, this model is used
+            instead of automatic selection from the registry.
+
+            **Velocity Model File Format:**
+
+            The file must be a GeoTIFF with 3 bands containing velocity components
+            in the local East-North-Up (ENU) coordinate system:
+
+            - **Band 1**: East velocity (positive = eastward motion)
+            - **Band 2**: North velocity (positive = northward motion)
+            - **Band 3**: Up velocity (positive = uplift)
+
+            **Units**: All velocities must be in **millimeters per year (mm/yr)**.
+
+            **Coordinate System**: The GeoTIFF must be georeferenced in **EPSG:4326**
+            (WGS84 geographic coordinates, longitude/latitude in degrees).
+
+            **Coverage**: The grid must cover the full extent of your point cloud.
+            PROJ will fail if the point cloud extends beyond the velocity grid.
+
+            **Example creation with rasterio**::
+
+                import rasterio
+                import numpy as np
+                from rasterio.transform import from_bounds
+
+                # Create velocity grids (example: 0.1 degree resolution)
+                ve = np.zeros((100, 100), dtype=np.float32)  # East velocity (mm/yr)
+                vn = np.zeros((100, 100), dtype=np.float32)  # North velocity (mm/yr)
+                vu = np.zeros((100, 100), dtype=np.float32)  # Up velocity (mm/yr)
+
+                transform = from_bounds(-110, 35, -100, 45, 100, 100)
+
+                with rasterio.open(
+                    'my_velocity_model.tif', 'w',
+                    driver='GTiff',
+                    height=100, width=100,
+                    count=3,
+                    dtype=rasterio.float32,
+                    crs='EPSG:4326',
+                    transform=transform,
+                ) as dst:
+                    dst.write(ve, 1)
+                    dst.write(vn, 2)
+                    dst.write(vu, 3)
+
+        Returns
+        -------
+        PointCloud
+            New PointCloud object with transformed coordinates.
+        tuple
+            If return_pipeline=True, returns (PointCloud, pipeline_string).
+
+        See Also
+        --------
+        warp_pointcloud : Unified transformation method.
+        velocity_model_converters : Tools to create velocity model GeoTIFFs.
+
+        References
+        ----------
+        - PROJ deformation grid format: https://proj.org/operations/transformations/deformation.html
+        - EarthScope/GAGE velocity data: https://www.unavco.org/data/gps-gnss/derived-products/
         """
         return self.warp_pointcloud(
             dynamic_target_epoch=target_epoch,
@@ -2803,6 +2941,7 @@ class PointCloud:
             output_path=output_path,
             overwrite=overwrite,
             return_pipeline=return_pipeline,
+            velocity_model_path=velocity_model_path,
         )
 
     def check_transformation_metadata(

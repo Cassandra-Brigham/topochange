@@ -1090,12 +1090,51 @@ class PointCloudPair:
         skip_units: bool = False,
         overwrite: bool = True,
         verbose: bool = True,
+        velocity_model_path: Optional[Union[str, Path]] = None,
     ) -> PointCloud:
         """
         Transform pc1 (compare) to match pc2 (reference)'s reference frame.
-        
+
         All transformations are composed into a SINGLE PDAL pipeline pass
         for efficiency.
+
+        Parameters
+        ----------
+        skip_epoch : bool, default False
+            Skip epoch transformation even if epochs differ.
+        skip_horizontal : bool, default False
+            Skip horizontal CRS transformation.
+        skip_vertical : bool, default False
+            Skip vertical datum transformation.
+        skip_units : bool, default False
+            Skip unit conversion.
+        overwrite : bool, default True
+            Overwrite existing output file.
+        verbose : bool, default True
+            Print progress messages.
+        velocity_model_path : str or Path, optional
+            Path to a custom velocity model GeoTIFF for epoch transformation.
+            If provided, this model is used instead of automatic selection.
+
+            **Velocity Model File Format:**
+
+            The file must be a GeoTIFF with 3 bands containing velocity components
+            in the local East-North-Up (ENU) coordinate system:
+
+            - Band 1: East velocity (positive = eastward motion)
+            - Band 2: North velocity (positive = northward motion)
+            - Band 3: Up velocity (positive = uplift)
+
+            **Units**: All velocities must be in millimeters per year (mm/yr).
+
+            **Coordinate System**: EPSG:4326 (WGS84 geographic, lon/lat degrees).
+
+            **Coverage**: Must cover the full extent of both point clouds.
+
+        Returns
+        -------
+        PointCloud
+            Transformed point cloud matching reference frame.
         """
         import sys
         
@@ -1182,7 +1221,7 @@ class PointCloudPair:
             current = self.pc1.warp_pointcloud(
                 # Epoch parameters
                 dynamic_target_epoch=target_epoch if needs_epoch else None,
-                # Vertical parameters  
+                # Vertical parameters
                 source_vertical_kind=source_vertical_kind if needs_vertical else None,
                 target_vertical_kind=target_vertical_kind if needs_vertical else None,
                 source_geoid_model=source_geoid if needs_vertical else None,
@@ -1192,6 +1231,8 @@ class PointCloudPair:
                 # Output
                 output_path=output_path,
                 overwrite=overwrite,
+                # Custom velocity model
+                velocity_model_path=velocity_model_path,
             )
             
             self._transformation_history.append({
