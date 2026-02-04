@@ -1182,13 +1182,66 @@ class VariogramAnalysis:
     @staticmethod
     def get_base_initial_guess(n: int, mean_variogram, lags, nugget: bool = False) -> np.ndarray:
         """
-        Naive initial guess: equal sills; ranges spread linearly to max lag; optional nugget (last).
+        Initial guess for variogram parameters with improved nugget estimation.
+
+        For sills: distributes the total sill evenly across components.
+        For ranges: spreads ranges linearly up to half the max lag.
+        For nugget: extrapolates to h=0 using a linear fit to the first few lags,
+                    which provides a more physically meaningful estimate than
+                    using an arbitrary fraction of the max semivariance.
+
+        Parameters
+        ----------
+        n : int
+            Number of variogram components.
+        mean_variogram : array-like
+            Empirical semivariance values.
+        lags : array-like
+            Lag distances.
+        nugget : bool
+            Whether to include a nugget parameter.
+
+        Returns
+        -------
+        p0 : ndarray
+            Initial parameter vector [C1, ..., Cn, a1, ..., an, (nugget)].
         """
-        max_semivariance = np.max(mean_variogram) * 1.5
+        max_semivariance = np.max(mean_variogram)
         half_max_lag = np.max(lags) / 2
-        C = [max_semivariance / n] * n
+
+        # Estimate nugget by extrapolating to h=0 from first few lags
+        if nugget:
+            # Use first 3-5 valid lag points for linear extrapolation
+            n_extrap = min(5, len(lags) // 3, len(lags))
+            n_extrap = max(2, n_extrap)  # Need at least 2 points
+
+            short_lags = lags[:n_extrap]
+            short_gamma = mean_variogram[:n_extrap]
+
+            # Linear fit: γ(h) = nugget + slope * h
+            # Extrapolate to h=0 to get nugget estimate
+            if len(short_lags) >= 2:
+                slope, intercept = np.polyfit(short_lags, short_gamma, 1)
+                nugget_estimate = max(0.0, intercept)  # Nugget can't be negative
+                # Cap nugget at 50% of max semivariance as sanity check
+                nugget_estimate = min(nugget_estimate, max_semivariance * 0.5)
+            else:
+                # Fallback: use smallest lag value as upper bound
+                nugget_estimate = mean_variogram[0] * 0.5
+
+            # Partial sill is what remains after nugget
+            partial_sill_total = max(max_semivariance - nugget_estimate, max_semivariance * 0.5)
+        else:
+            nugget_estimate = 0.0
+            partial_sill_total = max_semivariance
+
+        # Distribute sill across components
+        C = [partial_sill_total / n] * n
+
+        # Spread ranges linearly
         a = [((half_max_lag) / 3) * (i + 1) for i in range(n)]
-        p0 = C + a + ([max_semivariance / 4] if nugget else [])
+
+        p0 = C + a + ([nugget_estimate] if nugget else [])
         return np.array(p0, dtype=float)
 
     @staticmethod
