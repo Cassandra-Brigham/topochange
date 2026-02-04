@@ -1176,7 +1176,7 @@ class PointCloudPair:
         
         # Determine what's actually needed
         needs_epoch = (
-            not skip_epoch and 
+            not skip_epoch and
             'epoch' in comparison['transformations_needed'] and
             target_epoch is not None
         )
@@ -1188,7 +1188,24 @@ class PointCloudPair:
             not skip_horizontal and
             'horizontal_crs' in comparison['transformations_needed']
         )
-        
+        needs_units = (
+            not skip_units and
+            'vertical_units' in comparison['transformations_needed']
+        )
+
+        # Get unit conversion factor if needed
+        unit_conversion_factor = None
+        if needs_units:
+            from .unit_utils import get_conversion_factor, UNKNOWN_UNIT
+            src_vunit = getattr(self.pc1, 'vertical_unit', UNKNOWN_UNIT)
+            dst_vunit = getattr(self.pc2, 'vertical_unit', UNKNOWN_UNIT)
+            if src_vunit.name != "unknown" and dst_vunit.name != "unknown":
+                try:
+                    unit_conversion_factor = get_conversion_factor(src_vunit, dst_vunit)
+                except Exception:
+                    unit_conversion_factor = None
+                    needs_units = False  # Can't convert if factor unknown
+
         if verbose:
             src_epoch = getattr(self.pc1, 'epoch', None)
             if needs_epoch:
@@ -1198,6 +1215,10 @@ class PointCloudPair:
                 print(f"  Geoid: {source_geoid} -> {target_geoid}", file=sys.stderr)
             if needs_horizontal:
                 print(f"  Horizontal CRS reprojection needed", file=sys.stderr)
+            if needs_units and unit_conversion_factor:
+                src_vunit = getattr(self.pc1, 'vertical_unit', UNKNOWN_UNIT)
+                dst_vunit = getattr(self.pc2, 'vertical_unit', UNKNOWN_UNIT)
+                print(f"  Units: {src_vunit.name} -> {dst_vunit.name} (factor: {unit_conversion_factor:.6f})", file=sys.stderr)
 
         # SINGLE warp_pointcloud call with ALL parameters
         if needs_epoch or needs_vertical or needs_horizontal:
@@ -1251,9 +1272,59 @@ class PointCloudPair:
                 print(f"  Combined transformation [done]", file=sys.stderr)
         else:
             current = self.pc1
-            if verbose:
+            if verbose and not needs_units:
                 print(f"No transformations needed.", file=sys.stderr)
-        
+            elif verbose:
+                print(f"No CRS transformations needed (unit conversion still pending).", file=sys.stderr)
+
+        # Apply unit conversion if needed (separate step after CRS transformation)
+        if needs_units and unit_conversion_factor is not None and abs(unit_conversion_factor - 1.0) > 1e-9:
+            import json
+            import pdal
+
+            src_path = Path(current.filename)
+            unit_output_path = src_path.with_name(src_path.stem + "_units" + src_path.suffix)
+
+            # Use PDAL filters.assign to scale Z values
+            pipeline_spec = {
+                "pipeline": [
+                    {
+                        "type": "readers.las",
+                        "filename": str(current.filename),
+                    },
+                    {
+                        "type": "filters.assign",
+                        "value": f"Z = Z * {unit_conversion_factor}",
+                    },
+                    {
+                        "type": "writers.las",
+                        "filename": str(unit_output_path),
+                    },
+                ]
+            }
+
+            pipe = pdal.Pipeline(json.dumps(pipeline_spec))
+            pipe.execute_streaming(chunk_size=1000000)
+
+            # Load converted point cloud
+            current = PointCloud(str(unit_output_path))
+            current.from_file()
+
+            # Update unit metadata
+            dst_vunit = getattr(self.pc2, 'vertical_unit', None)
+            if dst_vunit:
+                current.vertical_unit = dst_vunit
+                current.vertical_units = dst_vunit.display_name
+
+            self._transformation_history.append({
+                'step': 'unit_conversion',
+                'factor': unit_conversion_factor,
+                'output_file': str(unit_output_path),
+            })
+
+            if verbose:
+                print(f"  Unit conversion [done]", file=sys.stderr)
+
         # Update metadata to match reference (only update fields that were transformed)
         current.add_metadata(
             horizontal_CRS=target_horiz_crs if needs_horizontal else None,
@@ -1261,7 +1332,19 @@ class PointCloudPair:
             geoid_model=target_geoid if needs_vertical else None,
             epoch=target_epoch if needs_epoch else None,
         )
-        
+
+        # Ensure unit metadata is propagated (from source if not converted, from reference if converted)
+        if not needs_units:
+            # Units weren't converted - preserve source units
+            src_hunit = getattr(self.pc1, 'horizontal_unit', None)
+            src_vunit = getattr(self.pc1, 'vertical_unit', None)
+            if src_hunit and src_hunit.name != "unknown":
+                current.horizontal_unit = src_hunit
+                current.horizontal_units = src_hunit.display_name
+            if src_vunit and src_vunit.name != "unknown":
+                current.vertical_unit = src_vunit
+                current.vertical_units = src_vunit.display_name
+
         # Cache result
         self._pc1_transformed = current
         

@@ -2017,16 +2017,30 @@ class PointCloud:
         if hasattr(self, 'is_orthometric') and not hasattr(target_pc, 'is_orthometric'):
             target_pc.is_orthometric = self.is_orthometric
         
-        # Preserve unit info objects - copy from source if target has unknown units
-        # or if source has known units (source is authoritative for most transformations)
+        # Preserve unit info objects - source is authoritative for transformations
+        # that don't explicitly change units. Always copy if source has known units.
         if hasattr(self, 'horizontal_unit') and self.horizontal_unit.name != "unknown":
-            if target_pc.horizontal_unit.name == "unknown":
-                target_pc.horizontal_unit = self.horizontal_unit
-                target_pc.horizontal_units = self.horizontal_unit.display_name
+            target_pc.horizontal_unit = self.horizontal_unit
+            target_pc.horizontal_units = self.horizontal_unit.display_name
         if hasattr(self, 'vertical_unit') and self.vertical_unit.name != "unknown":
-            if target_pc.vertical_unit.name == "unknown":
-                target_pc.vertical_unit = self.vertical_unit
-                target_pc.vertical_units = self.vertical_unit.display_name
+            target_pc.vertical_unit = self.vertical_unit
+            target_pc.vertical_units = self.vertical_unit.display_name
+
+        # Preserve CRS attributes if not set on target (fallback for metadata propagation)
+        # Only copy if source has a valid value and target doesn't
+        def _has_valid_crs(obj, attr):
+            val = getattr(obj, attr, None)
+            return val is not None and (not isinstance(val, str) or val.strip())
+
+        crs_attrs = [
+            'current_vertical_crs', 'original_vertical_crs',
+            'current_horizontal_crs', 'original_horizontal_crs',
+            'current_compound_crs', 'original_compound_crs',
+            'geoid_model',
+        ]
+        for attr in crs_attrs:
+            if _has_valid_crs(self, attr) and not _has_valid_crs(target_pc, attr):
+                setattr(target_pc, attr, getattr(self, attr))
 
     def warp_pointcloud(
         self,
@@ -2380,16 +2394,24 @@ class PointCloud:
         out_pc = PointCloud(str(output_path))
         out_pc.from_file()
         
+        # Propagate CRS metadata to output
+        # Use source vertical CRS if no vertical transformation was done
+        src_vert_crs = (
+            getattr(self, 'current_vertical_crs', None) or
+            getattr(self, 'original_vertical_crs', None)
+        )
+
         out_pc.add_metadata(
-            compound_CRS=dst_horiz_str,
+            horizontal_CRS=dst_horiz_str,
+            vertical_CRS=src_vert_crs,  # Preserve source vertical CRS
             epoch=dst_epoch,
             geoid_model=dst_geoid,
         )
-        
+
         # Update vertical kind tracking
         if dst_vertical_kind:
             out_pc.is_orthometric = (dst_vertical_kind.lower() == "orthometric")
-        
+
         self._copy_metadata_attributes(out_pc)
         
         # Record in CRS history
@@ -2573,9 +2595,22 @@ class PointCloud:
         # Load transformed file and update metadata
         out_pc = PointCloud(str(output_path))
         out_pc.from_file()
-        out_pc.current_horizontal_crs = dst_crs_str
-        out_pc.current_vertical_kind = target_kind
-        
+
+        # Propagate CRS metadata - preserve source vertical CRS
+        src_vert_crs = (
+            getattr(self, 'current_vertical_crs', None) or
+            getattr(self, 'original_vertical_crs', None)
+        )
+
+        out_pc.add_metadata(
+            horizontal_CRS=dst_crs_str,
+            vertical_CRS=src_vert_crs,
+            geoid_model=target_geoid_model,
+        )
+
+        # Update vertical kind tracking
+        out_pc.is_orthometric = (target_kind.lower() == "orthometric")
+
         self._copy_metadata_attributes(out_pc)
 
         if return_pipeline:
@@ -2799,12 +2834,19 @@ class PointCloud:
 
         final_geoid = dst_state.geoid_alias
 
+        # Propagate CRS metadata - preserve source vertical CRS
+        src_vert_crs = (
+            getattr(self, 'current_vertical_crs', None) or
+            getattr(self, 'original_vertical_crs', None)
+        )
+
         out_pc.add_metadata(
             compound_CRS=dst_crs_str,
+            vertical_CRS=src_vert_crs,  # Preserve vertical CRS through epoch transform
             epoch=dst_epoch,
             geoid_model=final_geoid,
         )
-        
+
         self._copy_metadata_attributes(out_pc)
 
         # CRSHistory entry
