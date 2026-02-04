@@ -1206,7 +1206,15 @@ class PointCloud:
         # -------------------------------
         # 2. Interpret compound_CRS, if any
         # -------------------------------
-        if compound_CRS is not None:
+        # Helper to check if value is meaningful (not None, not empty string)
+        def _is_valid_crs_input(val: Any) -> bool:
+            if val is None:
+                return False
+            if isinstance(val, str) and not val.strip():
+                return False
+            return True
+
+        if _is_valid_crs_input(compound_CRS):
             comp = _ensure_crs_obj(compound_CRS)
 
             if comp.is_compound:
@@ -1245,12 +1253,12 @@ class PointCloud:
         # -------------------------------
         # 3. Explicit horizontal / vertical overrides
         # -------------------------------
-        if horizontal_CRS is not None:
+        if _is_valid_crs_input(horizontal_CRS):
             new_horiz = _ensure_crs_obj(horizontal_CRS)
             new_comp = None
             crs_changed = True
 
-        if vertical_CRS is not None:
+        if _is_valid_crs_input(vertical_CRS):
             vert_candidate = _ensure_crs_obj(vertical_CRS)
             
             # Check if user passed a 3D geographic CRS (e.g., EPSG:4979) as vertical
