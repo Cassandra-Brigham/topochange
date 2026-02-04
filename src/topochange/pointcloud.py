@@ -2111,9 +2111,15 @@ class PointCloud:
             )
         
         if needs_horizontal:
-            # ... existing horizontal-only logic ...
-            pass
-        
+            # Route horizontal-only transforms through _warp_combined
+            return self._warp_combined(
+                target_horizontal_crs=target_horizontal_crs,
+                target_compound_crs=target_compound_crs,
+                output_path=output_path,
+                overwrite=overwrite,
+                return_pipeline=return_pipeline,
+            )
+
         # No transformation needed
         return self
 
