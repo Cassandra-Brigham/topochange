@@ -19,6 +19,8 @@ from typing import Sequence, Optional, Dict, Any, Callable
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
 from scipy import stats
 from scipy.optimize import curve_fit
 import rasterio
@@ -590,7 +592,7 @@ class VariogramModelSelector:
     
     def get_bma_variance_at_lag(self, h: float) -> Tuple[float, float, float]:
         """Get BMA mean and variance at a specific lag.
-        
+
         Returns
         -------
         mean : float
@@ -601,18 +603,271 @@ class VariogramModelSelector:
             Between-model variance component
         """
         predictions = np.array([m.predict(np.array([h]))[0] for m in self.fitted_models])
-        
+
         # BMA mean
         bma_mean = np.sum(self.model_weights * predictions)
-        
+
         # Between-model variance
         between_var = np.sum(self.model_weights * (predictions - bma_mean)**2)
-        
+
         # Within-model variance (would require bootstrap samples from each model)
         # For now, approximate as 0 or could be computed if needed
         within_var = 0.0
-        
+
         return bma_mean, within_var, between_var
+
+    def bootstrap_all_models(
+        self,
+        n_boot: int = 500,
+        seed: Optional[int] = None,
+    ) -> None:
+        """Bootstrap parameter uncertainty for ALL fitted models.
+
+        This enables full BMA uncertainty quantification by propagating
+        both model uncertainty (Akaike weights) and parameter uncertainty
+        (bootstrap distributions) for each candidate model.
+
+        Parameters
+        ----------
+        n_boot : int
+            Number of bootstrap samples per model.
+        seed : int, optional
+            Random seed for reproducibility.
+
+        References
+        ----------
+        Hoeting, J.A., et al. (1999). Bayesian Model Averaging: A Tutorial.
+        Statistical Science, 14(4), 382-417.
+        """
+        if not self.fitted_models:
+            raise ValueError("No fitted models. Call fit_all_candidates() first.")
+
+        rng = np.random.default_rng(seed)
+
+        for i, fitted in enumerate(self.fitted_models):
+            model = fitted.composite_model
+            p0 = fitted.params
+            bounds = model.bounds(self.lags, self.empirical_variogram)
+
+            # Generate synthetic variograms with noise
+            if self.sigma is not None:
+                noise = rng.normal(
+                    loc=self.empirical_variogram,
+                    scale=self.sigma,
+                    size=(n_boot, len(self.lags))
+                )
+            else:
+                # Residual-based bootstrap
+                predicted = fitted.predict(self.lags)
+                residuals = self.empirical_variogram - predicted
+                noise = predicted + rng.choice(residuals, size=(n_boot, len(self.lags)))
+
+            param_samples = []
+
+            def model_func(h, *params):
+                model.set_params(np.array(params))
+                return model(h)
+
+            for j in range(n_boot):
+                try:
+                    popt, _ = curve_fit(
+                        model_func,
+                        self.lags,
+                        noise[j],
+                        p0=p0,
+                        bounds=bounds,
+                        maxfev=5000,
+                    )
+                    param_samples.append(popt)
+                except RuntimeError:
+                    param_samples.append([np.nan] * model.n_params)
+
+            param_samples = np.array(param_samples)
+            valid = ~np.isnan(param_samples).any(axis=1)
+            fitted.param_samples = param_samples[valid]
+
+    def sample_bma_parameters(
+        self,
+        n_samples: int = 1000,
+        seed: Optional[int] = None,
+    ) -> Dict[str, np.ndarray]:
+        """Sample parameters from full BMA posterior.
+
+        This implements proper BMA sampling that accounts for both:
+        1. Model uncertainty: sample model index ~ Categorical(Akaike weights)
+        2. Parameter uncertainty: sample params ~ Bootstrap distribution of chosen model
+
+        The result is a set of (effective_sill, effective_range, nugget) samples
+        that reflect the combined uncertainty from both sources.
+
+        Parameters
+        ----------
+        n_samples : int
+            Number of samples to draw from the BMA posterior.
+        seed : int, optional
+            Random seed.
+
+        Returns
+        -------
+        samples : dict
+            Dictionary with keys:
+            - 'total_sill': array of total sill samples (sum of component sills + nugget)
+            - 'effective_range': array of effective range samples (max component range)
+            - 'nugget': array of nugget samples
+            - 'model_indices': which model each sample came from
+
+        Notes
+        -----
+        Different variogram models have different parameterizations. This method
+        extracts "effective" parameters that are comparable across model types:
+
+        - Total sill: Sum of all component sills + nugget (for stationary models)
+        - Effective range: Maximum range among components (approximates correlation length)
+        - Nugget: Nugget parameter if present, else 0
+
+        For non-stationary models (e.g., power model), total_sill is set to NaN.
+
+        References
+        ----------
+        Hoeting, J.A., et al. (1999). Bayesian Model Averaging. Statistical Science.
+        """
+        if self.model_weights is None:
+            raise ValueError("No model weights. Call fit_all_candidates() first.")
+
+        # Check that all models have bootstrap samples
+        for fitted in self.fitted_models:
+            if fitted.param_samples is None or len(fitted.param_samples) == 0:
+                raise ValueError(
+                    "Not all models have bootstrap samples. "
+                    "Call bootstrap_all_models() first."
+                )
+
+        rng = np.random.default_rng(seed)
+
+        # Sample model indices according to Akaike weights
+        model_indices = rng.choice(
+            len(self.fitted_models),
+            size=n_samples,
+            p=self.model_weights
+        )
+
+        total_sills = np.zeros(n_samples)
+        effective_ranges = np.zeros(n_samples)
+        nuggets = np.zeros(n_samples)
+
+        for i, model_idx in enumerate(model_indices):
+            fitted = self.fitted_models[model_idx]
+            model = fitted.composite_model
+
+            # Sample a parameter vector from this model's bootstrap distribution
+            boot_idx = rng.integers(0, len(fitted.param_samples))
+            params = fitted.param_samples[boot_idx]
+
+            # Set params to extract effective values
+            model.set_params(params)
+
+            # Extract nugget
+            nuggets[i] = model.get_nugget() if model.include_nugget else 0.0
+
+            # Extract total sill (NaN for non-stationary)
+            if model.is_stationary:
+                total_sills[i] = model.get_total_sill()
+            else:
+                total_sills[i] = np.nan
+
+            # Extract effective range (max range across components)
+            # Uses practical_range_factor from model spec when available
+            max_range = 0.0
+            for comp_idx, spec in enumerate(model._components):
+                if 'range' in spec.param_names:
+                    comp_params = model.get_component_params(comp_idx)
+                    range_idx = spec.param_names.index('range')
+                    comp_range = comp_params[range_idx]
+
+                    # Apply practical range factor if available
+                    if spec.practical_range_factor is not None:
+                        comp_range *= spec.practical_range_factor
+                    elif spec.name == 'matern':
+                        # For Matérn, practical range depends on nu
+                        if 'nu' in spec.param_names:
+                            nu_idx = spec.param_names.index('nu')
+                            nu = comp_params[nu_idx]
+                            comp_range *= np.sqrt(8 * nu)
+
+                    max_range = max(max_range, comp_range)
+
+            effective_ranges[i] = max_range
+
+        return {
+            'total_sill': total_sills,
+            'effective_range': effective_ranges,
+            'nugget': nuggets,
+            'model_indices': model_indices,
+        }
+
+    def get_bma_param_percentiles(
+        self,
+        percentiles: List[float] = [16, 50, 84],
+        n_samples: int = 2000,
+        seed: Optional[int] = None,
+    ) -> Dict[str, Dict[str, float]]:
+        """Get parameter percentiles from full BMA posterior.
+
+        This provides uncertainty bounds on variogram parameters that account
+        for BOTH model selection uncertainty and parameter estimation uncertainty.
+
+        Parameters
+        ----------
+        percentiles : list of float
+            Percentiles to compute (default: 16, 50, 84 for ±1σ equivalent).
+        n_samples : int
+            Number of BMA samples to draw for percentile estimation.
+        seed : int, optional
+            Random seed.
+
+        Returns
+        -------
+        result : dict
+            Dictionary with structure:
+            {
+                'total_sill': {'p16': ..., 'p50': ..., 'p84': ...},
+                'effective_range': {'p16': ..., 'p50': ..., 'p84': ...},
+                'nugget': {'p16': ..., 'p50': ..., 'p84': ...},
+            }
+
+        Notes
+        -----
+        The returned percentiles integrate over the full BMA posterior:
+
+            p(θ | data) = Σₖ p(Mₖ | data) · p(θ | Mₖ, data)
+
+        where p(Mₖ | data) are the Akaike weights and p(θ | Mₖ, data) is
+        approximated by the bootstrap distribution for model k.
+
+        This properly accounts for the additional uncertainty from not knowing
+        which model is "correct", resulting in wider (more honest) intervals
+        than single-model bootstrap alone.
+        """
+        samples = self.sample_bma_parameters(n_samples=n_samples, seed=seed)
+
+        result = {}
+
+        for key in ['total_sill', 'effective_range', 'nugget']:
+            values = samples[key]
+            # Handle NaN for non-stationary sills
+            valid_values = values[~np.isnan(values)]
+
+            if len(valid_values) > 0:
+                pcts = np.percentile(valid_values, percentiles)
+                result[key] = {f'p{int(p)}': val for p, val in zip(percentiles, pcts)}
+            else:
+                result[key] = {f'p{int(p)}': np.nan for p in percentiles}
+
+        # Also store proportion of non-stationary samples
+        n_nonstationary = np.sum(np.isnan(samples['total_sill']))
+        result['nonstationary_fraction'] = n_nonstationary / n_samples
+
+        return result
 
 def summary(self) -> str:
     """Generate summary of fitted models."""
@@ -1803,10 +2058,185 @@ class VariogramAnalysis:
             raise RuntimeError("No model selector available. Call fit_best_model_auto() first.")
 
         return self.model_selector.get_bma_variogram()
-    
-    def plot_best_spherical_model(self):
+
+    def compute_bma_uncertainty(
+        self,
+        n_bootstrap: int = 500,
+        n_bma_samples: int = 2000,
+        percentiles: List[float] = [16, 50, 84],
+        seed: Optional[int] = None,
+    ) -> Dict[str, Dict[str, float]]:
+        """Compute parameter uncertainty using full Bayesian Model Averaging.
+
+        This method propagates BOTH sources of uncertainty:
+        1. Model uncertainty: Which variogram model is correct?
+        2. Parameter uncertainty: Given a model, what are the true parameters?
+
+        The algorithm:
+        1. Bootstrap ALL candidate models (not just the best)
+        2. Sample model indices according to Akaike weights
+        3. For each sampled model, sample parameters from its bootstrap distribution
+        4. Extract effective sill/range/nugget from each combined sample
+        5. Compute percentiles across all samples
+
+        Parameters
+        ----------
+        n_bootstrap : int
+            Number of bootstrap samples per model (default: 500).
+        n_bma_samples : int
+            Number of samples from the BMA posterior (default: 2000).
+        percentiles : list of float
+            Percentiles to compute (default: [16, 50, 84]).
+        seed : int, optional
+            Random seed for reproducibility.
+
+        Returns
+        -------
+        bma_percentiles : dict
+            Dictionary with structure:
+            {
+                'total_sill': {'p16': ..., 'p50': ..., 'p84': ...},
+                'effective_range': {'p16': ..., 'p50': ..., 'p84': ...},
+                'nugget': {'p16': ..., 'p50': ..., 'p84': ...},
+                'nonstationary_fraction': float,
+            }
+
+        Notes
+        -----
+        The key insight is that single-model bootstrap underestimates uncertainty
+        because it ignores the possibility that a different model might be correct.
+        BMA provides more honest (wider) uncertainty intervals.
+
+        After calling this method, the BMA percentiles are also stored in:
+        - self.bma_sill_percentiles
+        - self.bma_range_percentiles
+        - self.bma_nugget_percentiles
+
+        And for compatibility with existing plotting code:
+        - self.sills_min, self.sills_max (from BMA)
+        - self.ranges_min, self.ranges_max (from BMA)
+        - self.min_nugget, self.max_nugget (from BMA)
+
+        References
+        ----------
+        Hoeting, J.A., et al. (1999). Bayesian Model Averaging: A Tutorial.
+        Statistical Science, 14(4), 382-417.
+
+        Examples
+        --------
+        >>> va = VariogramAnalysis(handler)
+        >>> va.calculate_mean_variogram_numba(...)
+        >>> va.fit_best_model_auto(n_bootstrap=0)  # Skip single-model bootstrap
+        >>> bma = va.compute_bma_uncertainty(n_bootstrap=500, seed=42)
+        >>> print(f"Effective range: {bma['effective_range']['p50']:.1f} "
+        ...       f"[{bma['effective_range']['p16']:.1f}, {bma['effective_range']['p84']:.1f}]")
         """
-        Plot mean variogram ± spread and fitted model; also show bar plot of mean pair counts.
+        if not hasattr(self, 'model_selector') or self.model_selector is None:
+            raise RuntimeError(
+                "No model selector available. Call fit_best_model_auto() first."
+            )
+
+        selector = self.model_selector
+
+        # Step 1: Bootstrap ALL models
+        selector.bootstrap_all_models(n_boot=n_bootstrap, seed=seed)
+
+        # Step 2-4: Sample from BMA posterior and compute percentiles
+        bma_percentiles = selector.get_bma_param_percentiles(
+            percentiles=percentiles,
+            n_samples=n_bma_samples,
+            seed=seed,
+        )
+
+        # Store for later access
+        self.bma_sill_percentiles = bma_percentiles['total_sill']
+        self.bma_range_percentiles = bma_percentiles['effective_range']
+        self.bma_nugget_percentiles = bma_percentiles['nugget']
+        self.bma_nonstationary_fraction = bma_percentiles['nonstationary_fraction']
+
+        # Update compatibility attributes with BMA values
+        # (overwrites single-model bootstrap values)
+        self.sills_min = np.array([bma_percentiles['total_sill']['p16']])
+        self.sills_max = np.array([bma_percentiles['total_sill']['p84']])
+        self.sills_median = np.array([bma_percentiles['total_sill']['p50']])
+
+        self.ranges_min = np.array([bma_percentiles['effective_range']['p16']])
+        self.ranges_max = np.array([bma_percentiles['effective_range']['p84']])
+        self.ranges_median = np.array([bma_percentiles['effective_range']['p50']])
+
+        self.min_nugget = bma_percentiles['nugget']['p16']
+        self.max_nugget = bma_percentiles['nugget']['p84']
+        self.median_nugget = bma_percentiles['nugget']['p50']
+
+        return bma_percentiles
+
+    def get_bma_samples(
+        self,
+        n_samples: int = 1000,
+        seed: Optional[int] = None,
+    ) -> Dict[str, np.ndarray]:
+        """Get raw samples from the BMA posterior for custom analysis.
+
+        This is useful for propagating uncertainty through downstream calculations
+        (e.g., regional uncertainty estimation) where you need the full distribution
+        rather than just percentiles.
+
+        Parameters
+        ----------
+        n_samples : int
+            Number of samples to draw.
+        seed : int, optional
+            Random seed.
+
+        Returns
+        -------
+        samples : dict
+            Dictionary with arrays:
+            - 'total_sill': (n_samples,) total sill values
+            - 'effective_range': (n_samples,) effective range values
+            - 'nugget': (n_samples,) nugget values
+            - 'model_indices': (n_samples,) which model each sample came from
+
+        Raises
+        ------
+        RuntimeError
+            If bootstrap_all_models hasn't been run yet.
+        """
+        if not hasattr(self, 'model_selector') or self.model_selector is None:
+            raise RuntimeError("No model selector. Call fit_best_model_auto() first.")
+
+        # Check if bootstrap has been run
+        for fitted in self.model_selector.fitted_models:
+            if fitted.param_samples is None:
+                raise RuntimeError(
+                    "Bootstrap not run on all models. "
+                    "Call compute_bma_uncertainty() first."
+                )
+
+        return self.model_selector.sample_bma_parameters(
+            n_samples=n_samples, seed=seed
+        )
+
+    def plot_best_spherical_model(self, show_bma_info: bool = True):
+        """
+        Plot mean variogram ± spread and fitted model with uncertainty bands.
+
+        Includes:
+        - Two-panel layout: pair counts (top) and variogram (bottom)
+        - Full range shading (alpha=0.1) for min/max bounds
+        - 1-sigma range shading (alpha=0.3) for p16/p84 bounds (if BMA computed)
+        - Optimal parameter values as dashed lines
+        - BMA/AIC model information (if available)
+
+        Parameters
+        ----------
+        show_bma_info : bool
+            If True and BMA has been computed, show model weights and selection info.
+
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+            The generated figure.
         """
         if any(attr is None for attr in (self.mean_variogram, self.err_variogram, self.mean_count, self.lags, self.fitted_variogram)):
             raise RuntimeError("Missing variogram data. Call calculate_mean_variogram_numba() and fit_best_spherical_model() first.")
@@ -1824,41 +2254,306 @@ class VariogramAnalysis:
 
         fig, axs = plt.subplots(2, 1, gridspec_kw={'height_ratios': [1, 3]}, figsize=(10, 8), sharex=True)
 
-        # guard single-bin bar width
+        # Top panel: pair counts
         if len(lags) > 1:
             bar_width = (lags[1] - lags[0]) * 0.9
         else:
             bar_width = (lags[0] if len(lags) else 1.0) * 0.9
-        axs[0].bar(count_lags, count_vals, width=bar_width, color='orange', alpha=0.5)
-        axs[0].set_ylabel('Mean Count')
+        axs[0].bar(count_lags, count_vals, width=bar_width, color='steelblue', alpha=0.6)
+        axs[0].set_ylabel('Pair Count')
         axs[0].tick_params(labelbottom=False)
+        axs[0].set_title('Empirical Variogram with Fitted Model')
 
-        axs[1].errorbar(lags, gamma, yerr=errs, fmt='o-', color='blue', label='Mean Variogram ± spread')
-        axs[1].plot(lags, model, 'r-', label='Fitted Model')
+        # Bottom panel: variogram
+        axs[1].errorbar(lags, gamma, yerr=errs, fmt='o', color='blue',
+                       markersize=5, capsize=3, label='Empirical ± σ')
+        axs[1].plot(lags, model, 'k-', linewidth=2, label='Fitted Model')
 
-        colors = ['red', 'green', 'blue']
+        # Get y-axis limits for shading
+        ylim = axs[1].get_ylim()
+
+        # Check for BMA percentiles
+        has_bma = hasattr(self, 'bma_range_percentiles') and self.bma_range_percentiles is not None
+
+        # Colors for range components
+        range_colors = ['red', 'green', 'blue']
+        nugget_color = 'orange'
+
+        # Build legend elements
+        legend_elements = [
+            Line2D([0], [0], marker='o', color='blue', linestyle='', markersize=5, label='Empirical'),
+            Line2D([0], [0], color='k', linewidth=2, label='Fitted Model'),
+        ]
+
+        # Plot range uncertainty bands
         if self.ranges is not None and self.ranges_min is not None and self.ranges_max is not None:
-            ylim = axs[1].get_ylim()
             for i, (r, rmin, rmax) in enumerate(zip(self.ranges, self.ranges_min, self.ranges_max)):
-                c = colors[i % len(colors)]
-                axs[1].axvline(r, color=c, linestyle='--', linewidth=1, label=f'Range {i + 1}')
-                axs[1].fill_betweenx(ylim, rmin, rmax, color=c, alpha=0.2)
+                c = range_colors[i % len(range_colors)]
 
+                # Full range shading (min/max) - light alpha
+                axs[1].fill_betweenx(ylim, rmin, rmax, color=c, alpha=0.1)
+
+                # Check for p16/p84 percentiles from BMA
+                if has_bma:
+                    r_p16 = self.bma_range_percentiles.get('p16', rmin)
+                    r_p84 = self.bma_range_percentiles.get('p84', rmax)
+                    # 1-sigma range shading (p16/p84) - darker alpha
+                    axs[1].fill_betweenx(ylim, r_p16, r_p84, color=c, alpha=0.3)
+
+                # Optimal value as dashed line
+                axs[1].axvline(r, color=c, linestyle='--', linewidth=1.5)
+
+                # Add to legend
+                legend_elements.append(
+                    Line2D([0], [0], color=c, linestyle='--', linewidth=1.5,
+                           label=f'Range {i+1}: {r:.1f}')
+                )
+                legend_elements.append(
+                    Patch(facecolor=c, alpha=0.3 if has_bma else 0.2,
+                          label=f'Range {i+1} ±1σ' if has_bma else f'Range {i+1} bounds')
+                )
+                if has_bma:
+                    legend_elements.append(
+                        Patch(facecolor=c, alpha=0.1, label=f'Range {i+1} min/max')
+                    )
+
+        # Plot nugget uncertainty bands
         if self.best_nugget is not None and self.min_nugget is not None and self.max_nugget is not None:
-            axs[1].axhline(self.best_nugget, color='black', linestyle='--', linewidth=1, label='Nugget')
-            axs[1].fill_between(lags, [self.min_nugget] * len(lags), [self.max_nugget] * len(lags), color='gray', alpha=0.2)
+            # Full range shading for nugget (min/max) - light alpha
+            axs[1].fill_between(lags, [self.min_nugget] * len(lags),
+                               [self.max_nugget] * len(lags),
+                               color=nugget_color, alpha=0.1)
 
-        axs[1].set_xlabel('Lag Distance')
+            # Check for p16/p84 percentiles from BMA
+            if has_bma and hasattr(self, 'bma_nugget_percentiles') and self.bma_nugget_percentiles is not None:
+                nug_p16 = self.bma_nugget_percentiles.get('p16', self.min_nugget)
+                nug_p84 = self.bma_nugget_percentiles.get('p84', self.max_nugget)
+                # 1-sigma shading (p16/p84) - darker alpha
+                axs[1].fill_between(lags, [nug_p16] * len(lags), [nug_p84] * len(lags),
+                                   color=nugget_color, alpha=0.3)
+
+            # Optimal nugget as dashed line
+            axs[1].axhline(self.best_nugget, color=nugget_color, linestyle='--', linewidth=1.5)
+
+            # Add to legend
+            legend_elements.append(
+                Line2D([0], [0], color=nugget_color, linestyle='--', linewidth=1.5,
+                       label=f'Nugget: {self.best_nugget:.4f}')
+            )
+            legend_elements.append(
+                Patch(facecolor=nugget_color, alpha=0.3 if has_bma else 0.2,
+                      label='Nugget ±1σ' if has_bma else 'Nugget bounds')
+            )
+            if has_bma:
+                legend_elements.append(
+                    Patch(facecolor=nugget_color, alpha=0.1, label='Nugget min/max')
+                )
+
+        axs[1].set_xlabel('Lag Distance (m)')
         axs[1].set_ylabel('Semivariance')
-        axs[1].legend(loc='upper right')
+        axs[1].set_ylim(ylim)  # Restore y-limits after fill_betweenx
+        axs[1].legend(handles=legend_elements, loc='lower right', fontsize=8,
+                     framealpha=0.9, ncol=2)
 
-        rmse_str = ""
+        # Add model/fit info as text
+        info_lines = []
+
+        # RMSE from cross-validation
         if isinstance(self.cv_mean_error_best_aic, dict):
             rmse = self.cv_mean_error_best_aic.get('rmse', None)
             if rmse is not None:
-                rmse_str = f'RMSE (CV): {rmse:.4f}'
-        axs[1].set_title(rmse_str)
+                info_lines.append(f'CV-RMSE: {rmse:.4f}')
+
+        # Best model info
+        if self.best_model_config is not None:
+            model_name = self.best_model_config.get('model_type', 'Unknown')
+            info_lines.append(f'Best model: {model_name}')
+
+        # AIC/BIC
+        if self.best_aic is not None:
+            info_lines.append(f'AIC: {self.best_aic:.1f}')
+        if self.best_bic is not None:
+            info_lines.append(f'BIC: {self.best_bic:.1f}')
+
+        # BMA info
+        if show_bma_info and has_bma:
+            if hasattr(self, 'bma_nonstationary_fraction'):
+                ns_frac = self.bma_nonstationary_fraction
+                if ns_frac > 0:
+                    info_lines.append(f'Non-stationary fraction: {ns_frac:.1%}')
+
+            # Show Akaike weights if model selector available
+            if hasattr(self, 'model_selector') and self.model_selector is not None:
+                weights = self.model_selector.akaike_weights
+                if weights is not None:
+                    models = self.model_selector.fitted_models
+                    top_models = sorted(zip(weights, models), reverse=True)[:3]
+                    weight_strs = [f'{m.composite_model.component_names[0]}: {w:.1%}'
+                                  for w, m in top_models if w > 0.01]
+                    if weight_strs:
+                        info_lines.append('Model weights: ' + ', '.join(weight_strs))
+
+        if info_lines:
+            info_text = '\n'.join(info_lines)
+            axs[1].text(0.02, 0.98, info_text, transform=axs[1].transAxes,
+                       fontsize=8, verticalalignment='top',
+                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
         plt.setp(axs[0].get_xticklabels(), visible=False)
+        plt.tight_layout()
+        return fig
+
+    def plot_model_comparison(self, figsize: tuple = (12, 5)):
+        """
+        Plot BMA model comparison: Akaike weights bar chart and model fits overlay.
+
+        Creates a two-panel figure showing:
+        - Left: Bar chart of Akaike weights for all candidate models
+        - Right: Overlay of all fitted models with line width proportional to weight
+
+        Parameters
+        ----------
+        figsize : tuple
+            Figure size (width, height).
+
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+            The generated figure.
+
+        Raises
+        ------
+        RuntimeError
+            If model selector is not available.
+        """
+        if not hasattr(self, 'model_selector') or self.model_selector is None:
+            raise RuntimeError("No model selector available. Call fit_best_model_auto() first.")
+
+        selector = self.model_selector
+        weights = selector.akaike_weights
+        models = selector.fitted_models
+
+        if weights is None or models is None:
+            raise RuntimeError("Akaike weights not computed. Fit models first.")
+
+        fig, axs = plt.subplots(1, 2, figsize=figsize)
+
+        # Left panel: Akaike weights bar chart
+        model_names = []
+        for m in models:
+            components = m.composite_model.component_names
+            has_nugget = m.composite_model.include_nugget
+            name = '+'.join(components)
+            if has_nugget:
+                name += '+nug'
+            model_names.append(name)
+
+        colors = plt.cm.Set3(np.linspace(0, 1, len(models)))
+        bars = axs[0].barh(range(len(models)), weights, color=colors)
+        axs[0].set_yticks(range(len(models)))
+        axs[0].set_yticklabels(model_names, fontsize=9)
+        axs[0].set_xlabel('Akaike Weight')
+        axs[0].set_title('Model Selection (BMA Weights)')
+        axs[0].set_xlim(0, 1)
+
+        # Add weight values on bars
+        for i, (bar, w) in enumerate(zip(bars, weights)):
+            if w > 0.01:
+                axs[0].text(w + 0.02, i, f'{w:.1%}', va='center', fontsize=8)
+
+        # Right panel: Model fits overlay
+        n = min(len(self.lags), len(self.mean_variogram), len(self.err_variogram))
+        lags = self.lags[:n]
+        gamma = self.mean_variogram[:n]
+        errs = self.err_variogram[:n]
+
+        # Plot empirical variogram
+        axs[1].errorbar(lags, gamma, yerr=errs, fmt='o', color='black',
+                       markersize=4, capsize=2, alpha=0.7, label='Empirical', zorder=10)
+
+        # Plot each model with alpha/linewidth proportional to weight
+        dense_lags = np.linspace(0, lags.max(), 200)
+        for i, (m, w, c) in enumerate(zip(models, weights, colors)):
+            if w > 0.001:  # Only plot models with non-trivial weight
+                try:
+                    m.composite_model.set_params(m.params)
+                    model_fit = m.composite_model(dense_lags)
+                    alpha = max(0.3, min(1.0, w * 3))  # Scale alpha by weight
+                    linewidth = max(0.5, min(3.0, w * 5))
+                    axs[1].plot(dense_lags, model_fit, color=c, alpha=alpha,
+                               linewidth=linewidth, label=f'{model_names[i]} ({w:.1%})')
+                except Exception:
+                    pass  # Skip if model evaluation fails
+
+        axs[1].set_xlabel('Lag Distance (m)')
+        axs[1].set_ylabel('Semivariance')
+        axs[1].set_title('All Candidate Model Fits')
+        axs[1].legend(loc='lower right', fontsize=7, ncol=2)
+
+        plt.tight_layout()
+        return fig
+
+    def plot_bma_parameter_distributions(self, n_samples: int = 2000, seed: int = None,
+                                         figsize: tuple = (12, 4)):
+        """
+        Plot posterior distributions of BMA parameters.
+
+        Creates a three-panel figure showing kernel density estimates of:
+        - Total sill distribution
+        - Effective range distribution
+        - Nugget distribution
+
+        These distributions integrate over both model and parameter uncertainty.
+
+        Parameters
+        ----------
+        n_samples : int
+            Number of BMA samples for distribution estimation.
+        seed : int, optional
+            Random seed.
+        figsize : tuple
+            Figure size (width, height).
+
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+            The generated figure.
+        """
+        if not hasattr(self, 'model_selector') or self.model_selector is None:
+            raise RuntimeError("No model selector available. Call fit_best_model_auto() first.")
+
+        # Get BMA samples
+        samples = self.get_bma_samples(n_samples=n_samples, seed=seed)
+
+        fig, axs = plt.subplots(1, 3, figsize=figsize)
+
+        param_info = [
+            ('total_sill', 'Total Sill', 'steelblue'),
+            ('effective_range', 'Effective Range (m)', 'forestgreen'),
+            ('nugget', 'Nugget', 'darkorange'),
+        ]
+
+        for ax, (key, label, color) in zip(axs, param_info):
+            data = samples[key]
+
+            # Kernel density estimate
+            kde = stats.gaussian_kde(data)
+            x_range = np.linspace(data.min(), data.max(), 200)
+            ax.fill_between(x_range, kde(x_range), alpha=0.3, color=color)
+            ax.plot(x_range, kde(x_range), color=color, linewidth=2)
+
+            # Add percentile lines
+            p16, p50, p84 = np.percentile(data, [16, 50, 84])
+            ax.axvline(p50, color=color, linestyle='-', linewidth=2, label=f'Median: {p50:.3f}')
+            ax.axvline(p16, color=color, linestyle='--', alpha=0.7, label=f'16%: {p16:.3f}')
+            ax.axvline(p84, color=color, linestyle='--', alpha=0.7, label=f'84%: {p84:.3f}')
+
+            ax.set_xlabel(label)
+            ax.set_ylabel('Density')
+            ax.legend(fontsize=8)
+            ax.set_title(f'{label.split()[0]} Distribution')
+
+        plt.suptitle('BMA Posterior Parameter Distributions', y=1.02)
         plt.tight_layout()
         return fig
 
