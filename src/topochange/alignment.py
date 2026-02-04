@@ -618,7 +618,9 @@ class LandscapeAligner:
              source: Union[str, 'PointCloud', np.ndarray],
              target: Union[str, 'PointCloud', np.ndarray],
              method: Optional[RegistrationMethod] = None,
-             initial_transform: Optional[np.ndarray] = None) -> RegistrationResult:
+             initial_transform: Optional[np.ndarray] = None,
+             apply_transform: bool = False,
+             output_path: Optional[Union[str, Path]] = None) -> RegistrationResult:
         """
         Align source point cloud to target with automatic retry on failure
 
@@ -627,9 +629,12 @@ class LandscapeAligner:
             target: Target point cloud (file path, PointCloud object, or Nx3 array)
             method: Registration method to use. If None, uses config.method.
             initial_transform: Optional initial transformation
+            apply_transform: If True, apply transformation to source and save to file
+            output_path: Output path for transformed file. If None and apply_transform=True,
+                        auto-generates path with '_aligned' suffix.
 
         Returns:
-            Registration result
+            Registration result (with output_path set if apply_transform=True)
         """
         # Use config.method if method not specified
         if method is None:
@@ -648,17 +653,41 @@ class LandscapeAligner:
         # Main registration with retry logic
         if self.config.enable_auto_retry:
             result = self._align_with_retry(
-                source_path, target_path, 
+                source_path, target_path,
                 source_meta, target_meta,
                 method, initial_transform
             )
         else:
             result = self._align_single_attempt(
                 source_path, target_path,
-                source_meta, target_meta, 
+                source_meta, target_meta,
                 method, initial_transform
             )
-        
+
+        # Apply transformation and save if requested
+        if apply_transform and result.converged:
+            from .alignment_utils import save_transformed_las
+
+            # Generate output path if not provided
+            if output_path is None:
+                src_path = Path(source_path)
+                output_path = src_path.with_name(
+                    src_path.stem + "_aligned" + src_path.suffix
+                )
+            else:
+                output_path = Path(output_path)
+
+            # Save transformed point cloud
+            save_transformed_las(
+                source_filename=source_path,
+                output_filename=output_path,
+                transformation_matrix=result.transformation,
+                centroid=result.centroid,
+            )
+
+            result.output_path = str(output_path)
+            logger.info(f"Saved aligned point cloud to: {output_path}")
+
         return result
     
     def _extract_path_and_metadata(self, 
