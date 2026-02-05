@@ -123,15 +123,29 @@ class CompositeVariogramModel:
     
     def set_params(self, params: np.ndarray) -> None:
         """Set parameter values.
-        
+
         Parameters
         ----------
         params : array-like
             Parameter values in order: [comp1_params..., comp2_params..., nugget]
+
+        Raises
+        ------
+        ValueError
+            If wrong number of parameters or parameters fail validation.
         """
         params = np.asarray(params, dtype=float)
         if len(params) != self.n_params:
             raise ValueError(f"Expected {self.n_params} parameters, got {len(params)}")
+
+        # Validate parameters for each component before accepting
+        idx = 0
+        for i, spec in enumerate(self._components):
+            n_params = len(spec.param_names)
+            component_params = params[idx:idx + n_params]
+            spec.validate(list(component_params))  # Raises if invalid
+            idx += n_params
+
         self._params = params
     
     def get_component_params(self, component_idx: int) -> np.ndarray:

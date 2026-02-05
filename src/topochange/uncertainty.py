@@ -146,6 +146,16 @@ class RegionalUncertaintyEstimator:
         self.sigma2_max = None
 
         if fitted_model is not None:
+            # Validate model is suitable for uncertainty propagation
+            if not fitted_model.composite_model.is_stationary:
+                unbounded = fitted_model.composite_model.unbounded_components
+                raise ValueError(
+                    f"Non-stationary variogram models ({unbounded}) cannot be used "
+                    f"for uncertainty propagation because they have infinite variance. "
+                    f"Consider detrending your data or using a bounded model "
+                    f"(spherical, exponential, gaussian, matern, damped_hole_effect)."
+                )
+
             # New approach: use FittedVariogramModel
             self.gamma_func = fitted_model.predict
             self.sigma2 = fitted_model.composite_model.get_total_sill()
@@ -160,9 +170,19 @@ class RegionalUncertaintyEstimator:
                 self.sigma2_max = self.sigma2
                 
         elif use_bma and hasattr(va, 'model_selector') and va.model_selector is not None:
+            # Validate BMA models are all stationary
+            selector = va.model_selector
+            for m in selector.fitted_models:
+                if not m.composite_model.is_stationary:
+                    unbounded = m.composite_model.unbounded_components
+                    raise ValueError(
+                        f"BMA ensemble contains non-stationary model ({unbounded}). "
+                        f"Non-stationary models cannot be used for uncertainty propagation. "
+                        f"Exclude non-stationary models from the ensemble."
+                    )
+
             # Bayesian Model Averaging
             self.gamma_func = va.get_bma_variogram_function()
-            selector = va.model_selector
             self.sigma2 = sum(
                 w * m.composite_model.get_total_sill()
                 for m, w in zip(selector.fitted_models, selector.model_weights)

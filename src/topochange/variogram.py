@@ -1935,7 +1935,7 @@ class VariogramAnalysis:
         params = fitted.params
 
         # Extract sills, ranges from composite model
-        # Note: 'wavelength' (hole_effect) is treated as a range-like parameter
+        # Note: 'wavelength' (damped_hole_effect) is treated as a range-like parameter
         sills = []
         ranges = []
         sill_indices = []

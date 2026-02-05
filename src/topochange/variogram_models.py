@@ -54,9 +54,10 @@ class VariogramModelSpec:
     practical_range_factor: Optional[float]
     description: str
     
-    # Callables for default guesses and bounds (set after creation)
+    # Callables for default guesses, bounds, and validation (set after creation)
     _default_guess: Optional[Callable] = field(default=None, repr=False)
     _bounds: Optional[Callable] = field(default=None, repr=False)
+    _validate: Optional[Callable] = field(default=None, repr=False)
     
     def default_guess(self, lags: np.ndarray, variogram: np.ndarray) -> List[float]:
         """Generate default initial parameter guess."""
@@ -69,6 +70,11 @@ class VariogramModelSpec:
         if self._bounds is None:
             raise NotImplementedError(f"No bounds for {self.name}")
         return self._bounds(lags, variogram)
+
+    def validate(self, params: List[float]) -> None:
+        """Validate parameters (raises ValueError if invalid)."""
+        if self._validate is not None:
+            self._validate(params)
 
 
 # =============================================================================
@@ -240,43 +246,53 @@ def matern(h: np.ndarray, sill: float, range_: float, nu: float) -> np.ndarray:
     return gamma
 
 
-def hole_effect(h: np.ndarray, sill: float, wavelength: float) -> np.ndarray:
-    """Hole-effect (damped cosine) variogram model.
-    
-    γ(h) = C * [1 - cos(2πh/λ)]
-    
+def damped_hole_effect(h: np.ndarray, sill: float, range_: float,
+                       wavelength: float) -> np.ndarray:
+    """Damped hole-effect variogram model.
+
+    γ(h) = C × [1 - exp(-h/r) × cos(2πh/λ)]
+
     Parameters
     ----------
     h : array-like
         Lag distances.
     sill : float
-        Amplitude parameter, C ≥ 0. Maximum variance is 2C.
+        Sill (asymptotic variance), C ≥ 0.
+    range_ : float
+        Damping range, r > 0. Controls exponential decay of oscillations.
     wavelength : float
         Wavelength of oscillation, λ > 0.
-    
+
     Returns
     -------
     gamma : ndarray
         Semivariance values.
-    
+
     Notes
     -----
-    The hole-effect model oscillates between 0 and 2C.
-    It indicates quasi-periodic structure in the data.
-    
-    ⚠️ WARNING: Can produce negative covariances. Use with caution
-    and typically in combination with other models.
-    
-    Physical interpretation: Layered geological structures,
-    seasonal effects, regular spatial patterns.
-    
+    VALIDITY CONSTRAINT: For positive definiteness in 3D, requires
+    approximately 2πr/λ > 1. Parameters violating this will raise
+    an error during model fitting.
+
+    The variogram can temporarily exceed the sill when the cosine
+    term is negative—this represents anti-correlation (the "hole")
+    and is physically meaningful for quasi-periodic phenomena.
+
+    Physical interpretation: Layered structures (sedimentary sequences,
+    weathering horizons) where correlation alternates but weakens with
+    distance.
+
     References
     ----------
+    Chilès, J.P. & Delfiner, P. (2012). Geostatistics, Section 2.6.3.
     Ma, Y.Z. & Jones, T.A. (2001). Modeling hole-effect variograms.
-    Mathematical Geology, 33(5), 631-648.
+        Mathematical Geology, 33(5), 631-648.
+        https://doi.org/10.1023/A:1011001029880
     """
     h = np.asarray(h, dtype=float)
-    return sill * (1 - np.cos(2 * np.pi * h / wavelength))
+    damping = np.exp(-h / range_)
+    oscillation = np.cos(2 * np.pi * h / wavelength)
+    return sill * (1 - damping * oscillation)
 
 
 def power(h: np.ndarray, scale: float, exponent: float) -> np.ndarray:
@@ -487,30 +503,48 @@ class VariogramModelRegistry:
         matern_spec._bounds = _matern_bounds
         self._models['matern'] = matern_spec
         
-        # Hole-effect
-        def _hole_guess(lags, variogram):
+        # Damped hole-effect
+        def _damped_hole_guess(lags, variogram):
             max_gamma = np.nanmax(variogram)
             max_lag = np.nanmax(lags)
-            return [max_gamma / 2, max_lag / 2]
-        
-        def _hole_bounds(lags, variogram):
+            # Estimate: sill from max variance, range = max_lag/4, wavelength = max_lag/3
+            # This default ensures 2πr/λ ≈ 2.36 > 1 (valid)
+            return [max_gamma * 0.9, max_lag / 4, max_lag / 3]
+
+        def _damped_hole_bounds(lags, variogram):
             max_gamma = np.nanmax(variogram) * 5
             max_lag = np.nanmax(lags) * 2
-            return ([0, 1e-6], [max_gamma, max_lag])
-        
-        hole_spec = VariogramModelSpec(
-            name='hole_effect',
-            func=hole_effect,
-            param_names=['sill', 'wavelength'],
+            return ([0, 1e-6, 1e-6], [max_gamma, max_lag, max_lag])
+
+        def _damped_hole_validate(params):
+            """Validate positive definiteness constraint for damped hole effect.
+
+            Raises ValueError if 2πr/λ < 1, which violates positive definiteness
+            in 3D and causes unreliable uncertainty propagation.
+            """
+            sill, range_, wavelength = params
+            ratio = 2 * np.pi * range_ / wavelength
+            if ratio < 1.0:
+                raise ValueError(
+                    f"Damped hole effect parameters violate positive definiteness: "
+                    f"2πr/λ = {ratio:.2f} < 1. Increase 'range' or decrease 'wavelength' "
+                    f"so the damping is sufficient (2πr/λ > 1)."
+                )
+
+        damped_hole_spec = VariogramModelSpec(
+            name='damped_hole_effect',
+            func=damped_hole_effect,
+            param_names=['sill', 'range', 'wavelength'],
             is_bounded=True,
             has_sill=True,
-            practical_range_factor=0.5,  # Half wavelength to first peak
-            description="Hole-effect model: quasi-periodic variation. "
-                       "⚠️ Can produce negative covariances."
+            practical_range_factor=3.0,  # Similar to exponential
+            description="Damped hole-effect: quasi-periodic variation with "
+                       "exponential decay. Valid in 3D if 2πr/λ > 1."
         )
-        hole_spec._default_guess = _hole_guess
-        hole_spec._bounds = _hole_bounds
-        self._models['hole_effect'] = hole_spec
+        damped_hole_spec._default_guess = _damped_hole_guess
+        damped_hole_spec._bounds = _damped_hole_bounds
+        damped_hole_spec._validate = _damped_hole_validate
+        self._models['damped_hole_effect'] = damped_hole_spec
         
         # Power (unbounded)
         def _power_guess(lags, variogram):
