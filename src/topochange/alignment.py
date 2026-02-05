@@ -29,6 +29,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, Dict, Tuple, List, Union, Any, TYPE_CHECKING
 
+from concurrent.futures import ThreadPoolExecutor
 from scipy.spatial import cKDTree
 
 # small_gicp import (optional dependency)
@@ -189,7 +190,7 @@ class RegistrationConfig:
     max_correspondence_distance: Optional[float] = None  # Auto-compute if None
     max_iterations: int = 50
     transformation_epsilon: float = 1e-6  # Convergence threshold
-    num_threads: int = 4  # Parallel threads for small_gicp
+    num_threads: int = field(default_factory=lambda: min(os.cpu_count() or 4, 8))  # Use up to 8 cores
 
     # === Centering and Spatial Constraints ===
     center_to_origin: bool = True  # Center both clouds to (0,0,0) before registration
@@ -1085,7 +1086,7 @@ class LandscapeAligner:
             logger.info(f"Running {method.value} registration...")
 
             max_corr_dist = self.config.max_correspondence_distance or 1.0
-            num_threads = 4
+            num_threads = self.config.num_threads
 
             # Methods requiring preprocessing (normals/covariances)
             needs_preprocessing = method in [
@@ -1112,12 +1113,16 @@ class LandscapeAligner:
                         "Preprocessing (covariance estimation, no downsampling)..."
                     )
 
-                target_cloud, target_tree = small_gicp.preprocess_points(
-                    target, **preprocess_kwargs
-                )
-                source_cloud, source_tree = small_gicp.preprocess_points(
-                    source, **preprocess_kwargs
-                )
+                # Preprocess source and target in parallel (independent operations)
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    target_future = executor.submit(
+                        small_gicp.preprocess_points, target, **preprocess_kwargs
+                    )
+                    source_future = executor.submit(
+                        small_gicp.preprocess_points, source, **preprocess_kwargs
+                    )
+                    target_cloud, target_tree = target_future.result()
+                    source_cloud, source_tree = source_future.result()
 
                 logger.info(
                     f"After preprocessing: {source_cloud.size()} source, "

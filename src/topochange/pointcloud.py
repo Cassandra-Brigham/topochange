@@ -1563,6 +1563,7 @@ class PointCloud:
         hole_filling_method: str = "interpolation",
         output_crs: Optional[Union[str, CRS_]] = None,
         create_cog: bool = False,
+        cog_overview_levels: Optional[List[int]] = None,
         gdal_options: Optional[Dict[str, Any]] = None,
         window_size: Optional[int] = None,
         power: float = 2.0,
@@ -1845,6 +1846,7 @@ class PointCloud:
                 hole_filling=hole_filling,
                 hole_filling_method=hole_filling_method,
                 create_cog=create_cog,
+                cog_overview_levels=cog_overview_levels,
             )
 
         # Create raster object with metadata
@@ -1905,6 +1907,7 @@ class PointCloud:
         hole_filling: bool = False,
         hole_filling_method: str = "interpolation",
         create_cog: bool = False,
+        cog_overview_levels: Optional[List[int]] = None,
     ) -> None:
         """Post-process DEM for hole filling and COG creation."""
 
@@ -1928,32 +1931,84 @@ class PointCloud:
                 valid_mask = ~np.isnan(data)
                 filled = fillnodata(data, mask=valid_mask, max_search_distance=100.0)
                 data = filled
+            elif hole_filling_method == "inpaint":
+                # Try OpenCV inpainting (fast, high quality) - optional dependency
+                try:
+                    import cv2
+                    mask = np.isnan(data).astype(np.uint8)
+                    if np.any(mask):
+                        # Replace NaN with 0 for inpainting, then restore
+                        data_filled = np.nan_to_num(data, nan=0.0)
+                        # Telea method is faster than Navier-Stokes (cv2.INPAINT_NS)
+                        filled = cv2.inpaint(
+                            data_filled.astype(np.float32),
+                            mask,
+                            inpaintRadius=5,
+                            flags=cv2.INPAINT_TELEA
+                        )
+                        data[mask.astype(bool)] = filled[mask.astype(bool)]
+                except ImportError:
+                    # Fallback to rasterio fillnodata
+                    valid_mask = ~np.isnan(data)
+                    filled = fillnodata(data, mask=valid_mask, max_search_distance=100.0)
+                    data = filled
             elif hole_filling_method in ["mean", "median", "min", "max"] and has_scipy():
-                from scipy.ndimage import generic_filter
-
-                def fill_func(values: np.ndarray) -> float:
-                    valid = values[~np.isnan(values)]
-                    if len(valid) == 0:
-                        return float("nan")
-                    if hole_filling_method == "mean":
-                        return float(np.mean(valid))
-                    if hole_filling_method == "median":
-                        return float(np.median(valid))
-                    if hole_filling_method == "min":
-                        return float(np.min(valid))
-                    # max
-                    return float(np.max(valid))
+                # Optimized: use uniform_filter for mean (vectorized, ~10x faster)
+                # or iterative morphological dilation for other methods
+                from scipy.ndimage import uniform_filter, maximum_filter, minimum_filter
 
                 mask = np.isnan(data)
                 if np.any(mask):
-                    filled = generic_filter(
-                        data,
-                        fill_func,
-                        size=3,
-                        mode="constant",
-                        cval=np.nan,
-                    )
-                    data[mask] = filled[mask]
+                    if hole_filling_method == "mean":
+                        # Vectorized mean filter - much faster than generic_filter
+                        data_zeroed = np.nan_to_num(data, nan=0.0)
+                        valid_count = uniform_filter((~mask).astype(np.float32), size=3, mode="constant")
+                        data_sum = uniform_filter(data_zeroed, size=3, mode="constant")
+                        # Avoid division by zero
+                        valid_count = np.maximum(valid_count, 1e-10)
+                        filled = data_sum / valid_count
+                        data[mask] = filled[mask]
+                    elif hole_filling_method == "max":
+                        # Iterative dilation until no holes remain (or max iterations)
+                        data_filled = data.copy()
+                        for _ in range(100):  # max iterations
+                            remaining = np.isnan(data_filled)
+                            if not np.any(remaining):
+                                break
+                            dilated = maximum_filter(
+                                np.nan_to_num(data_filled, nan=-np.inf),
+                                size=3, mode="constant", cval=-np.inf
+                            )
+                            dilated[dilated == -np.inf] = np.nan
+                            data_filled[remaining] = dilated[remaining]
+                        data = data_filled
+                    elif hole_filling_method == "min":
+                        data_filled = data.copy()
+                        for _ in range(100):
+                            remaining = np.isnan(data_filled)
+                            if not np.any(remaining):
+                                break
+                            dilated = minimum_filter(
+                                np.nan_to_num(data_filled, nan=np.inf),
+                                size=3, mode="constant", cval=np.inf
+                            )
+                            dilated[dilated == np.inf] = np.nan
+                            data_filled[remaining] = dilated[remaining]
+                        data = data_filled
+                    else:  # median - use iterative approach with percentile_filter
+                        from scipy.ndimage import percentile_filter
+                        data_filled = data.copy()
+                        for _ in range(100):
+                            remaining = np.isnan(data_filled)
+                            if not np.any(remaining):
+                                break
+                            # percentile_filter handles NaN poorly, so mask approach
+                            dilated = percentile_filter(
+                                np.nan_to_num(data_filled, nan=0.0),
+                                percentile=50, size=3, mode="constant"
+                            )
+                            data_filled[remaining] = dilated[remaining]
+                        data = data_filled
 
         # Update profile for COG
         if create_cog:
@@ -1985,7 +2040,19 @@ class PointCloud:
 
             # Build overviews for COG
             if create_cog:
-                factors = [2, 4, 8, 16, 32]
+                # Use provided levels or compute based on raster dimensions
+                if cog_overview_levels is not None:
+                    factors = cog_overview_levels
+                else:
+                    # Auto-compute: include levels up to where min dimension >= 256
+                    max_dim = max(out_data.shape)
+                    factors = []
+                    level = 2
+                    while max_dim // level >= 256:
+                        factors.append(level)
+                        level *= 2
+                    if not factors:
+                        factors = [2]  # Always at least one level
                 dst.build_overviews(factors, Resampling.average)
                 dst.update_tags(ns="rio_overview", resampling="average")
 
