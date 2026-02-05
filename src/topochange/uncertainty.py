@@ -22,6 +22,7 @@ Hugonnet, R., et al. (2022). IEEE JSTARS, 15, 6456-6472.
 from __future__ import annotations
 
 import math
+import warnings
 import numpy as np
 from shapely.geometry import Polygon, MultiPolygon, box, Point
 from shapely.ops import unary_union
@@ -154,6 +155,20 @@ class RegionalUncertaintyEstimator:
                     f"for uncertainty propagation because they have infinite variance. "
                     f"Consider detrending your data or using a bounded model "
                     f"(spherical, exponential, gaussian, matern, damped_hole_effect)."
+                )
+
+            # Warn about gaussian without nugget (numerical instability risk)
+            cm = fitted_model.composite_model
+            has_gaussian = 'gaussian' in cm.component_names
+            has_nugget = cm.include_nugget and cm.get_nugget() > 0
+            if has_gaussian and not has_nugget:
+                warnings.warn(
+                    "Gaussian variogram model without nugget may cause numerical "
+                    "instability. The model implies infinite differentiability at h=0, "
+                    "which can lead to ill-conditioned covariance matrices. Consider "
+                    "adding a small nugget effect.",
+                    UserWarning,
+                    stacklevel=2
                 )
 
             # New approach: use FittedVariogramModel
