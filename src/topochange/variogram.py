@@ -1467,8 +1467,20 @@ class VariogramAnalysis:
             sigma = 1.0 / np.sqrt(1.0 + self.lags)
         elif sigma_type == 'sq':
             sigma = 1.0 / (1.0 + self.lags ** 2)
+        elif sigma_type == 'nugget_focus':
+            #Weight short lags heavily for better nugget estimation
+            # Uses exponential decay with characteristic length = 20% of max lag
+            char_length = np.max(self.lags) * 0.2
+            sigma = np.exp(-self.lags / char_length)
+            # Normalize so first bin has sigma=1
+            sigma = sigma / sigma[0]
+        elif sigma_type == 'cressie':
+            # Cressie's robust weighting: N_h / gamma(h)^2
+            # Downweights large semivariance values which are more variable
+            sigma = self.mean_variogram**2 / np.maximum(self.mean_count, 1)
+            sigma = np.sqrt(sigma)  # curve_fit expects std dev
         else:
-            raise ValueError(f"Unknown sigma_type '{sigma_type}'. Use 'std', 'linear', 'exp', 'sqrt', or 'sq'.")
+            raise ValueError(f"Unknown sigma_type '{sigma_type}'. Use 'std', 'linear', 'exp', 'sqrt', 'sq', 'nugget_focus', or 'cressie'.")
         
         if criterion not in ('aic', 'bic'):
             raise ValueError(f"criterion must be 'aic' or 'bic', got '{criterion}'")
@@ -1500,9 +1512,15 @@ class VariogramAnalysis:
                 p0s = [np.array([np.max(self.mean_variogram)])]
             else:
                 model = self.spherical_model_with_nugget if nugget else self.spherical_model
-                
+
+                # Constrain nugget upper bound to prevent overestimation
+                # Nugget > 50% of total sill is unusual and often indicates
+                # fitting problems rather than true micro-scale variation
+                max_gamma = float(np.max(self.mean_variogram))
+                nugget_upper = max_gamma * 0.5  # Cap nugget at 50% of observed max
+
                 lb = [0.0] * n + [1e-6] * n + ([0.0] if nugget else [])
-                ub = [np.inf] * n + [2.0 * lag_max] * n + ([np.inf] if nugget else [])
+                ub = [np.inf] * n + [2.0 * lag_max] * n + ([nugget_upper] if nugget else [])
                 auto_bounds = (lb, ub)
 
                 base = self.get_base_initial_guess(n, self.mean_variogram, self.lags, nugget)
@@ -1576,11 +1594,14 @@ class VariogramAnalysis:
             self.best_nugget = None
 
         # Prepare bounds for bootstrap consistent with nugget-last convention
+        max_gamma = float(np.max(self.mean_variogram))
+        nugget_upper = max_gamma * 0.5  # Same constraint as fitting
+
         if n == 0:
-            bounds_boot = ([0.0], [np.inf])
+            bounds_boot = ([0.0], [max_gamma * 1.5])
         else:
             lb = [0.0] * n + [1e-6] * n + ([0.0] if self.best_model_config['nugget'] else [])
-            ub = [np.inf] * n + [2.0 * lag_max] * n + ([np.inf] if self.best_model_config['nugget'] else [])
+            ub = [np.inf] * n + [2.0 * lag_max] * n + ([nugget_upper] if self.best_model_config['nugget'] else [])
             bounds_boot = (lb, ub)
 
         # Parametric bootstrap using per-bin sigma (std across runs)
@@ -1661,7 +1682,158 @@ class VariogramAnalysis:
         self.cv_mean_error_best_aic = self.cross_validate_variogram(
             self.best_model_func, self.best_params, self.best_bounds, k=5, seed=seed
         )
-        
+
+    def estimate_nugget_from_short_lags(
+        self,
+        n_lags: int = 5,
+        method: str = 'linear_extrap'
+    ) -> float:
+        """
+        Estimate nugget independently from short-lag behavior.
+
+        This two-stage approach first estimates the nugget from the y-intercept
+        region, then can be used to constrain full model fitting. This prevents
+        the optimizer from trading off sill for nugget inappropriately.
+
+        Think of it like this: the nugget represents instantaneous variance
+        (measurement error + micro-scale variation), which is only "visible"
+        at the shortest lags. By extrapolating to h=0 from short lags, we get
+        a more physically meaningful estimate.
+
+        Parameters
+        ----------
+        n_lags : int
+            Number of short-lag bins to use for estimation (default: 5).
+        method : str
+            Estimation method:
+            - 'linear_extrap': Linear regression extrapolated to h=0
+            - 'quadratic_extrap': Quadratic fit extrapolated to h=0
+            - 'first_lag': Use first lag value directly (conservative upper bound)
+
+        Returns
+        -------
+        float
+            Estimated nugget value.
+
+        Notes
+        -----
+        The linear extrapolation method assumes γ(h) ≈ C₀ + bh near the origin,
+        which is valid for models with a nugget (discontinuity at origin).
+
+        References
+        ----------
+        Cressie, N. (1985). Fitting variogram models by weighted least squares.
+        Journal of the International Association for Mathematical Geology, 17(5).
+        """
+        if self.mean_variogram is None:
+            raise RuntimeError("No variogram data. Call calculate_mean_variogram_numba() first.")
+
+        n_fit = min(n_lags, len(self.lags))
+        lags_short = self.lags[:n_fit]
+        gamma_short = self.mean_variogram[:n_fit]
+
+        if method == 'linear_extrap':
+            # γ(h) ≈ C₀ + bh → intercept is nugget estimate
+            slope, intercept = np.polyfit(lags_short, gamma_short, 1)
+            nugget_est = max(intercept, 0.0)
+
+        elif method == 'quadratic_extrap':
+            # γ(h) ≈ C₀ + bh + ch² → allows for curvature near origin
+            if n_fit >= 3:
+                coeffs = np.polyfit(lags_short, gamma_short, 2)
+                nugget_est = max(coeffs[2], 0.0)  # Constant term
+            else:
+                # Fall back to linear if not enough points
+                slope, intercept = np.polyfit(lags_short, gamma_short, 1)
+                nugget_est = max(intercept, 0.0)
+
+        elif method == 'first_lag':
+            # Conservative: first lag value is upper bound on nugget
+            # (γ(h) at small h includes both nugget and some spatial correlation)
+            nugget_est = gamma_short[0] * 0.5  # Assume ~half is nugget
+
+        else:
+            raise ValueError(f"Unknown method '{method}'. Use 'linear_extrap', 'quadratic_extrap', or 'first_lag'.")
+
+        # Sanity check: nugget shouldn't exceed observed semivariance
+        max_gamma = np.max(self.mean_variogram)
+        if nugget_est > max_gamma * 0.5:
+            import warnings
+            warnings.warn(
+                f"Estimated nugget ({nugget_est:.4f}) exceeds 50% of max semivariance "
+                f"({max_gamma:.4f}). This may indicate measurement issues or that the "
+                "variogram doesn't have a true nugget. Capping at 50%.",
+                UserWarning
+            )
+            nugget_est = max_gamma * 0.5
+
+        return nugget_est
+
+    def fit_model_two_stage(
+        self,
+        n_components: int = 1,
+        nugget_method: str = 'linear_extrap',
+        nugget_tolerance: float = 0.2,
+        sigma_type: str = 'nugget_focus',
+        criterion: str = 'aic',
+        seed: Optional[int] = None,
+    ) -> None:
+        """
+        Option 4: Two-stage fitting with pre-estimated nugget.
+
+        Stage 1: Estimate nugget from short-lag extrapolation
+        Stage 2: Fit full model with nugget constrained near Stage 1 estimate
+
+        This approach prevents the common problem of the optimizer
+        overestimating the nugget by trading off with the sill.
+
+        Parameters
+        ----------
+        n_components : int
+            Number of spherical components (default: 1).
+        nugget_method : str
+            Method for Stage 1 nugget estimation (see estimate_nugget_from_short_lags).
+        nugget_tolerance : float
+            Fractional tolerance around Stage 1 estimate for Stage 2 bounds.
+            E.g., 0.2 means nugget constrained to [0.8*est, 1.2*est].
+        sigma_type : str
+            Weighting scheme for fitting (default: 'nugget_focus' for better
+            short-lag fitting).
+        criterion : str
+            Selection criterion ('aic' or 'bic').
+        seed : int, optional
+            Random seed.
+
+        Notes
+        -----
+        This method stores results in the same attributes as fit_model() for
+        compatibility with downstream analysis.
+        """
+        # Stage 1: Estimate nugget
+        nugget_est = self.estimate_nugget_from_short_lags(method=nugget_method)
+
+        # Stage 2: Fit with constrained nugget
+        lag_max = float(np.max(self.lags))
+        nugget_lb = max(0.0, nugget_est * (1 - nugget_tolerance))
+        nugget_ub = nugget_est * (1 + nugget_tolerance)
+
+        # Build bounds with constrained nugget
+        n = n_components
+        lb = [0.0] * n + [1e-6] * n + [nugget_lb]
+        ub = [np.inf] * n + [2.0 * lag_max] * n + [nugget_ub]
+        constrained_bounds = (lb, ub)
+
+        # Now call fit_model with the constrained bounds
+        self.fit_model(
+            criterion=criterion,
+            sigma_type=sigma_type,
+            bounds=constrained_bounds,
+            seed=seed,
+        )
+
+        # Store the Stage 1 estimate for reference
+        self.stage1_nugget_estimate = nugget_est
+
     def fit_best_model_auto(
         self,
         model_types: Optional[List[str]] = None,
