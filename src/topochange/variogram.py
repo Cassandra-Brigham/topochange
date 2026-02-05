@@ -956,21 +956,35 @@ class VariogramAnalysis:
         self.rmse = None
         self.sills = None
         self.ranges = None
+        # Full range percentiles (2.5th to 97.5th)
         self.ranges_min = None
         self.ranges_max = None
         self.ranges_median = None
+        # 1σ range percentiles (16th to 84th)
+        self.ranges_p16 = None
+        self.ranges_p84 = None
         self.err_sills = None
         self.err_ranges = None
+        # Full range percentiles for sills
         self.sills_min = None
         self.sills_max = None
         self.sills_median = None
+        # 1σ range percentiles for sills
+        self.sills_p16 = None
+        self.sills_p84 = None
+        # Nugget parameters
         self.best_nugget = None
+        # Full range percentiles for nugget
         self.min_nugget = None
         self.max_nugget = None
         self.median_nugget = None
+        # 1σ range percentiles for nugget
+        self.nugget_p16 = None
+        self.nugget_p84 = None
+        # Model selection attributes
         self.best_aic = None
         self.best_bic = None
-        self.selection_criterion = None 
+        self.selection_criterion = None
         self.best_params = None
         self.best_model_config = None
         self.cv_mean_error_best_aic = None
@@ -1584,6 +1598,8 @@ class VariogramAnalysis:
         self.param_samples = samples
 
         # Percentiles of parameters
+        # Full range: 2.5th to 97.5th percentiles (min/max for plotting)
+        # 1σ range: 16th to 84th percentiles (darker shading)
         if samples.size:
             if self.best_model_config['nugget']:
                 nug_samps = samples[:, -1]
@@ -1595,28 +1611,47 @@ class VariogramAnalysis:
             sill_samps = samp[:, :n]
             range_samps = samp[:, n:2 * n]
 
-            self.sills_min = np.percentile(sill_samps, 16, axis=0)
-            self.sills_max = np.percentile(sill_samps, 84, axis=0)
+            # Full range (2.5th to 97.5th percentiles)
+            self.sills_min = np.percentile(sill_samps, 2.5, axis=0)
+            self.sills_max = np.percentile(sill_samps, 97.5, axis=0)
             self.sills_median = np.percentile(sill_samps, 50, axis=0)
 
-            self.ranges_min = np.percentile(range_samps, 16, axis=0)
-            self.ranges_max = np.percentile(range_samps, 84, axis=0)
+            # 1σ range (16th to 84th percentiles)
+            self.sills_p16 = np.percentile(sill_samps, 16, axis=0)
+            self.sills_p84 = np.percentile(sill_samps, 84, axis=0)
+
+            # Full range for ranges
+            self.ranges_min = np.percentile(range_samps, 2.5, axis=0)
+            self.ranges_max = np.percentile(range_samps, 97.5, axis=0)
             self.ranges_median = np.percentile(range_samps, 50, axis=0)
 
+            # 1σ range for ranges
+            self.ranges_p16 = np.percentile(range_samps, 16, axis=0)
+            self.ranges_p84 = np.percentile(range_samps, 84, axis=0)
+
             if nug_samps is not None:
-                self.min_nugget = float(np.percentile(nug_samps, 16))
-                self.max_nugget = float(np.percentile(nug_samps, 84))
+                # Full range for nugget
+                self.min_nugget = float(np.percentile(nug_samps, 2.5))
+                self.max_nugget = float(np.percentile(nug_samps, 97.5))
                 self.median_nugget = float(np.percentile(nug_samps, 50))
+                # 1σ range for nugget
+                self.nugget_p16 = float(np.percentile(nug_samps, 16))
+                self.nugget_p84 = float(np.percentile(nug_samps, 84))
             else:
                 self.min_nugget = self.max_nugget = self.median_nugget = None
+                self.nugget_p16 = self.nugget_p84 = None
         else:
             # fallback to point estimates
             self.sills_min = self.sills_max = self.sills_median = np.array(self.sills)
+            self.sills_p16 = self.sills_p84 = np.array(self.sills)
             self.ranges_min = self.ranges_max = self.ranges_median = np.array(self.ranges)
+            self.ranges_p16 = self.ranges_p84 = np.array(self.ranges)
             if self.best_model_config['nugget']:
                 self.min_nugget = self.max_nugget = self.median_nugget = self.best_nugget
+                self.nugget_p16 = self.nugget_p84 = self.best_nugget
             else:
                 self.min_nugget = self.max_nugget = self.median_nugget = None
+                self.nugget_p16 = self.nugget_p84 = None
 
         # Compute and store cross-validation metrics on best model
         self.cv_mean_error_best_aic = self.cross_validate_variogram(
@@ -1718,6 +1753,7 @@ class VariogramAnalysis:
         """Transfer FittedVariogramModel results to VariogramAnalysis attributes.
 
         Ensures backward compatibility with code expecting traditional attributes.
+        Stores both full range (2.5th/97.5th) and 1σ range (16th/84th) percentiles.
         """
         model = fitted.composite_model
         params = fitted.params
@@ -1725,14 +1761,20 @@ class VariogramAnalysis:
         # Extract sills, ranges from composite model
         sills = []
         ranges = []
+        sill_indices = []
+        range_indices = []
+        param_offset = 0
 
         for i, spec in enumerate(model._components):
             comp_params = model.get_component_params(i)
             if spec.has_sill:
                 sills.append(comp_params[0])
+                sill_indices.append(param_offset)
             if 'range' in spec.param_names:
                 range_idx = spec.param_names.index('range')
                 ranges.append(comp_params[range_idx])
+                range_indices.append(param_offset + range_idx)
+            param_offset += spec.n_params
 
         self.sills = np.array(sills) if sills else np.array([])
         self.ranges = np.array(ranges) if ranges else np.array([])
@@ -1752,12 +1794,65 @@ class VariogramAnalysis:
         }
 
         # Bootstrap percentiles
+        self.param_samples = fitted.param_samples
         if fitted.param_samples is not None and len(fitted.param_samples) > 0:
             samples = fitted.param_samples
-            # ... extract percentiles for sills, ranges, nugget
-            # (similar logic to existing bootstrap handling)
 
-        self.param_samples = fitted.param_samples
+            # Extract sill percentiles
+            if sill_indices:
+                sill_samps = samples[:, sill_indices]
+                # Full range (2.5th to 97.5th)
+                self.sills_min = np.percentile(sill_samps, 2.5, axis=0)
+                self.sills_max = np.percentile(sill_samps, 97.5, axis=0)
+                self.sills_median = np.percentile(sill_samps, 50, axis=0)
+                # 1σ range (16th to 84th)
+                self.sills_p16 = np.percentile(sill_samps, 16, axis=0)
+                self.sills_p84 = np.percentile(sill_samps, 84, axis=0)
+            else:
+                self.sills_min = self.sills_max = self.sills_median = np.array([])
+                self.sills_p16 = self.sills_p84 = np.array([])
+
+            # Extract range percentiles
+            if range_indices:
+                range_samps = samples[:, range_indices]
+                # Full range (2.5th to 97.5th)
+                self.ranges_min = np.percentile(range_samps, 2.5, axis=0)
+                self.ranges_max = np.percentile(range_samps, 97.5, axis=0)
+                self.ranges_median = np.percentile(range_samps, 50, axis=0)
+                # 1σ range (16th to 84th)
+                self.ranges_p16 = np.percentile(range_samps, 16, axis=0)
+                self.ranges_p84 = np.percentile(range_samps, 84, axis=0)
+            else:
+                self.ranges_min = self.ranges_max = self.ranges_median = np.array([])
+                self.ranges_p16 = self.ranges_p84 = np.array([])
+
+            # Extract nugget percentiles
+            if model.include_nugget:
+                nugget_idx = model.n_params - 1  # Nugget is always last
+                nug_samps = samples[:, nugget_idx]
+                # Full range
+                self.min_nugget = float(np.percentile(nug_samps, 2.5))
+                self.max_nugget = float(np.percentile(nug_samps, 97.5))
+                self.median_nugget = float(np.percentile(nug_samps, 50))
+                # 1σ range
+                self.nugget_p16 = float(np.percentile(nug_samps, 16))
+                self.nugget_p84 = float(np.percentile(nug_samps, 84))
+            else:
+                self.min_nugget = self.max_nugget = self.median_nugget = None
+                self.nugget_p16 = self.nugget_p84 = None
+        else:
+            # Fallback to point estimates when no bootstrap samples
+            self.sills_min = self.sills_max = self.sills_median = self.sills
+            self.sills_p16 = self.sills_p84 = self.sills
+            self.ranges_min = self.ranges_max = self.ranges_median = self.ranges
+            self.ranges_p16 = self.ranges_p84 = self.ranges
+            if model.include_nugget:
+                self.min_nugget = self.max_nugget = self.median_nugget = self.best_nugget
+                self.nugget_p16 = self.nugget_p84 = self.best_nugget
+            else:
+                self.min_nugget = self.max_nugget = self.median_nugget = None
+                self.nugget_p16 = self.nugget_p84 = None
+
         self.cv_mean_error_best_aic = {'rmse': fitted.cv_rmse} if fitted.cv_rmse else None
 
     def get_model_comparison_summary(self) -> str:
@@ -1804,12 +1899,20 @@ class VariogramAnalysis:
 
         return self.model_selector.get_bma_variogram()
     
-    def plot_best_spherical_model(self):
+    def plot_best_model(self):
         """
         Plot mean variogram ± spread and fitted model; also show bar plot of mean pair counts.
+
+        Uses two-level uncertainty shading:
+        - Full range (very light shading, α=0.1): 2.5th to 97.5th percentiles
+        - 1σ range (darker shading, α=0.3): 16th to 84th percentiles
+        - Optimal value: dashed line
         """
+        from matplotlib.patches import Patch
+        from matplotlib.lines import Line2D
+
         if any(attr is None for attr in (self.mean_variogram, self.err_variogram, self.mean_count, self.lags, self.fitted_variogram)):
-            raise RuntimeError("Missing variogram data. Call calculate_mean_variogram_numba() and fit_best_spherical_model() first.")
+            raise RuntimeError("Missing variogram data. Call calculate_mean_variogram_numba() and fit method first.")
 
         n = min(len(self.lags), len(self.mean_variogram), len(self.err_variogram), len(self.fitted_variogram))
         lags = self.lags[:n]
@@ -1824,7 +1927,7 @@ class VariogramAnalysis:
 
         fig, axs = plt.subplots(2, 1, gridspec_kw={'height_ratios': [1, 3]}, figsize=(10, 8), sharex=True)
 
-        # guard single-bin bar width
+        # Guard single-bin bar width
         if len(lags) > 1:
             bar_width = (lags[1] - lags[0]) * 0.9
         else:
@@ -1833,25 +1936,58 @@ class VariogramAnalysis:
         axs[0].set_ylabel('Mean Count')
         axs[0].tick_params(labelbottom=False)
 
+        # Plot empirical variogram and fitted model
         axs[1].errorbar(lags, gamma, yerr=errs, fmt='o-', color='blue', label='Mean Variogram ± spread')
         axs[1].plot(lags, model, 'r-', label='Fitted Model')
 
+        # Range uncertainty shading (vertical bands)
         colors = ['red', 'green', 'blue']
         if self.ranges is not None and self.ranges_min is not None and self.ranges_max is not None:
             ylim = axs[1].get_ylim()
             for i, (r, rmin, rmax) in enumerate(zip(self.ranges, self.ranges_min, self.ranges_max)):
                 c = colors[i % len(colors)]
-                axs[1].axvline(r, color=c, linestyle='--', linewidth=1, label=f'Range {i + 1}')
-                axs[1].fill_betweenx(ylim, rmin, rmax, color=c, alpha=0.2)
+                # Full range (very light shading)
+                axs[1].fill_betweenx(ylim, rmin, rmax, color=c, alpha=0.1)
+                # 1σ range (darker shading) if available
+                if hasattr(self, 'ranges_p16') and self.ranges_p16 is not None:
+                    r_p16 = self.ranges_p16[i]
+                    r_p84 = self.ranges_p84[i]
+                    axs[1].fill_betweenx(ylim, r_p16, r_p84, color=c, alpha=0.3)
+                # Optimal value (dashed line)
+                axs[1].axvline(r, color=c, linestyle='--', linewidth=1.5)
 
+        # Nugget uncertainty shading (horizontal bands)
         if self.best_nugget is not None and self.min_nugget is not None and self.max_nugget is not None:
-            axs[1].axhline(self.best_nugget, color='black', linestyle='--', linewidth=1, label='Nugget')
-            axs[1].fill_between(lags, [self.min_nugget] * len(lags), [self.max_nugget] * len(lags), color='gray', alpha=0.2)
+            # Full range (very light shading)
+            axs[1].fill_between(lags, [self.min_nugget] * len(lags), [self.max_nugget] * len(lags), color='orange', alpha=0.1)
+            # 1σ range (darker shading) if available
+            if hasattr(self, 'nugget_p16') and self.nugget_p16 is not None:
+                axs[1].fill_between(lags, [self.nugget_p16] * len(lags), [self.nugget_p84] * len(lags), color='orange', alpha=0.3)
+            # Optimal value (dashed line)
+            axs[1].axhline(self.best_nugget, color='orange', linestyle='--', linewidth=1.5)
+
+        # Build custom legend
+        legend_elements = [
+            Line2D([0], [0], marker='o', color='blue', label='Mean Variogram ± spread', linestyle='-'),
+            Line2D([0], [0], color='r', linestyle='-', label='Fitted Model'),
+            Patch(facecolor='gray', alpha=0.1, label='Full range (95%)'),
+            Patch(facecolor='gray', alpha=0.4, label='1σ range (68%)'),
+            Line2D([0], [0], color='black', linestyle='--', linewidth=1.5, label='Optimal'),
+        ]
+        # Add color swatches for each range
+        if self.ranges is not None:
+            for i in range(len(self.ranges)):
+                c = colors[i % len(colors)]
+                legend_elements.append(Patch(facecolor=c, alpha=0.5, label=f'Range {i + 1}'))
+        # Add nugget to legend if present
+        if self.best_nugget is not None:
+            legend_elements.append(Patch(facecolor='orange', alpha=0.5, label='Nugget'))
 
         axs[1].set_xlabel('Lag Distance')
         axs[1].set_ylabel('Semivariance')
-        axs[1].legend(loc='upper right')
+        axs[1].legend(handles=legend_elements, loc='upper right')
 
+        # Add model info to title
         rmse_str = ""
         if isinstance(self.cv_mean_error_best_aic, dict):
             rmse = self.cv_mean_error_best_aic.get('rmse', None)
@@ -1861,6 +1997,11 @@ class VariogramAnalysis:
         plt.setp(axs[0].get_xticklabels(), visible=False)
         plt.tight_layout()
         return fig
+
+    # Alias for backward compatibility
+    def plot_best_spherical_model(self):
+        """Alias for plot_best_model() for backward compatibility."""
+        return self.plot_best_model()
 
 
 #class RegionalUncertaintyEstimator:
