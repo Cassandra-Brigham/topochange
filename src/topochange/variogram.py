@@ -1763,10 +1763,12 @@ class VariogramAnalysis:
         params = fitted.params
 
         # Extract sills, ranges from composite model
+        # Note: 'wavelength' (hole_effect) is treated as a range-like parameter
         sills = []
         ranges = []
         sill_indices = []
         range_indices = []
+        range_labels = []  # Track whether each range is 'range' or 'wavelength'
         param_offset = 0
 
         for i, spec in enumerate(model._components):
@@ -1774,14 +1776,18 @@ class VariogramAnalysis:
             if spec.has_sill:
                 sills.append(comp_params[0])
                 sill_indices.append(param_offset)
-            if 'range' in spec.param_names:
-                range_idx = spec.param_names.index('range')
-                ranges.append(comp_params[range_idx])
-                range_indices.append(param_offset + range_idx)
+            for range_key in ('range', 'wavelength'):
+                if range_key in spec.param_names:
+                    range_idx = spec.param_names.index(range_key)
+                    ranges.append(comp_params[range_idx])
+                    range_indices.append(param_offset + range_idx)
+                    range_labels.append(range_key)
+                    break
             param_offset += len(spec.param_names)
 
         self.sills = np.array(sills) if sills else np.array([])
         self.ranges = np.array(ranges) if ranges else np.array([])
+        self.range_labels = range_labels  # 'range' or 'wavelength' per entry
         self.best_nugget = model.get_nugget() if model.include_nugget else None
         self.best_params = params
         self.best_aic = fitted.aic
@@ -1982,11 +1988,14 @@ class VariogramAnalysis:
             Patch(facecolor='gray', alpha=0.4, label='1σ range (68%)'),
             Line2D([0], [0], color='black', linestyle='--', linewidth=1.5, label='Optimal'),
         ]
-        # Add color swatches for each range
+        # Add color swatches for each range/wavelength
         if self.ranges is not None:
             for i in range(len(self.ranges)):
                 c = colors[i % len(colors)]
-                legend_elements.append(Patch(facecolor=c, alpha=0.5, label=f'Range {i + 1}'))
+                lbl = 'Wavelength' if (hasattr(self, 'range_labels') and
+                    i < len(self.range_labels) and
+                    self.range_labels[i] == 'wavelength') else 'Range'
+                legend_elements.append(Patch(facecolor=c, alpha=0.5, label=f'{lbl} {i + 1}'))
         # Add nugget to legend if present
         if self.best_nugget is not None:
             legend_elements.append(Patch(facecolor='orange', alpha=0.5, label='Nugget'))
