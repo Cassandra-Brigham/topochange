@@ -1595,18 +1595,22 @@ class VariogramAnalysis:
             maxfev=20000,
             seed=seed,
         )
-        self.param_samples = samples
+        # Include optimal parameters in bootstrap samples to ensure they fall within bounds
+        if samples.size:
+            self.param_samples = np.vstack([samples, self.best_params])
+        else:
+            self.param_samples = np.array([self.best_params])
 
         # Percentiles of parameters
-        # Full range: 2.5th to 97.5th percentiles (min/max for plotting)
+        # Full range: 2.5th to 97.5th percentiles (robust bounds for plotting)
         # 1σ range: 16th to 84th percentiles (darker shading)
-        if samples.size:
+        if self.param_samples.size:
             if self.best_model_config['nugget']:
-                nug_samps = samples[:, -1]
-                samp = samples[:, :-1]
+                nug_samps = self.param_samples[:, -1]
+                samp = self.param_samples[:, :-1]
             else:
                 nug_samps = None
-                samp = samples
+                samp = self.param_samples
 
             sill_samps = samp[:, :n]
             range_samps = samp[:, n:2 * n]
@@ -1774,7 +1778,7 @@ class VariogramAnalysis:
                 range_idx = spec.param_names.index('range')
                 ranges.append(comp_params[range_idx])
                 range_indices.append(param_offset + range_idx)
-            param_offset += spec.n_params
+            param_offset += len(spec.param_names)
 
         self.sills = np.array(sills) if sills else np.array([])
         self.ranges = np.array(ranges) if ranges else np.array([])
@@ -1793,10 +1797,14 @@ class VariogramAnalysis:
             'model_types': model.component_names,
         }
 
-        # Bootstrap percentiles
-        self.param_samples = fitted.param_samples
+        # Bootstrap percentiles - include optimal params to ensure they fall within bounds
         if fitted.param_samples is not None and len(fitted.param_samples) > 0:
-            samples = fitted.param_samples
+            self.param_samples = np.vstack([fitted.param_samples, params])
+        else:
+            self.param_samples = np.array([params])
+
+        if self.param_samples.size > 0:
+            samples = self.param_samples
 
             # Extract sill percentiles
             if sill_indices:
