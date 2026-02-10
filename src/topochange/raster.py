@@ -954,7 +954,7 @@ class Raster:
         # =====================================================================
         # Parse CRS into compound/horizontal/vertical components
         # =====================================================================
-        from .crs_utils import parse_crs_components
+        from .crs_utils import parse_crs_components, extract_epoch_from_wkt
 
         compound_wkt, horizontal_wkt, vertical_wkt = parse_crs_components(crs)
         
@@ -963,7 +963,18 @@ class Raster:
         obj.original_compound_crs = compound_wkt
         obj.original_horizontal_crs = horizontal_wkt
         obj.original_vertical_crs = vertical_wkt
-        
+
+        # Try to extract epoch from CRS WKT (COORDINATEMETADATA wrapper)
+        crs_epoch = None
+        if crs:
+            try:
+                raw_wkt = crs.to_wkt() if hasattr(crs, 'to_wkt') else str(crs)
+                crs_epoch = extract_epoch_from_wkt(raw_wkt)
+            except Exception:
+                pass
+            if crs_epoch is None and compound_wkt:
+                crs_epoch = extract_epoch_from_wkt(compound_wkt)
+
         # Get PROJ string representation
         if crs:
             try:
@@ -1026,6 +1037,30 @@ class Raster:
             obj.time_info = time_info
             if "epoch" in time_info:
                 obj.epoch = time_info["epoch"]
+
+        # CRS COORDINATEMETADATA epoch overrides TIFFTAG_DATETIME-derived epochs.
+        # TIFFTAG_DATETIME is the *file creation time*, not the survey epoch.
+        if crs_epoch is not None:
+            current_source = None
+            if hasattr(obj, 'time_info') and obj.time_info:
+                current_source = obj.time_info.get('epoch_source')
+
+            # Override if: no epoch yet, or current epoch came from file datetime
+            if (not hasattr(obj, 'epoch') or obj.epoch is None
+                    or current_source in (
+                        None,
+                        'parsed_tifftag_datetime',
+                        'parsed_datetime',
+                        'parsed_date_time',
+                        'parsed_datetime_iso',
+                        'parsed_tifftag_datetime_iso',
+                        'parsed_date_time_iso',
+                    )):
+                obj.epoch = crs_epoch
+                if not hasattr(obj, 'time_info') or not obj.time_info:
+                    obj.time_info = {}
+                obj.time_info['epoch'] = crs_epoch
+                obj.time_info['epoch_source'] = 'crs_coordinatemetadata'
 
         # Store additional metadata
         obj.metadata = meta

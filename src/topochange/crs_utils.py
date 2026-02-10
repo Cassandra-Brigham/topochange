@@ -110,6 +110,50 @@ def wrap_coordinate_metadata_wkt(
     return f"COORDINATEMETADATA[{wkt2},EPOCH[{float(epoch)}]]"
 
 
+def extract_epoch_from_wkt(wkt_string: Optional[str]) -> Optional[float]:
+    """
+    Extract the epoch value from a WKT2 ``COORDINATEMETADATA`` wrapper.
+
+    The expected WKT2 structure is::
+
+        COORDINATEMETADATA[<CRS WKT>, EPOCH[<decimal_year>]]
+
+    Parameters
+    ----------
+    wkt_string : str or None
+        A WKT2 string that may contain a ``COORDINATEMETADATA`` block
+        with an ``EPOCH[...]`` element.
+
+    Returns
+    -------
+    float or None
+        The extracted epoch as a decimal year, or *None* if no
+        ``EPOCH[...]`` token is found (or the input is empty/None).
+
+    Examples
+    --------
+    >>> extract_epoch_from_wkt(
+    ...     'COORDINATEMETADATA[PROJCRS["WGS 84 / UTM zone 13N"],EPOCH[2011.726]]'
+    ... )
+    2011.726
+
+    >>> extract_epoch_from_wkt('PROJCRS["WGS 84 / UTM zone 13N"]') is None
+    True
+    """
+    if not wkt_string:
+        return None
+
+    import re
+
+    match = re.search(r'EPOCH\[([0-9]+\.?[0-9]*)\]', str(wkt_string))
+    if match:
+        try:
+            return float(match.group(1))
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
 def crs_to_projjson(crs: Union[str, _CRS, Dict[str, Any]]) -> Dict[str, Any]:
     """
     Normalize any CRS input to PROJJSON (as a Python dict).
