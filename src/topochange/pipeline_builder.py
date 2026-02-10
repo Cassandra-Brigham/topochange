@@ -357,21 +357,27 @@ def _build_vertical_steps(src: CRSState, dst: CRSState) -> str:
 
     # Orthometric A -> Orthometric B
     if sk == "orthometric" and dk == "orthometric":
-        if not src.geoid_grid or not dst.geoid_grid:
-            raise ProjError(
-                "Both source and target geoid grids must be specified for orthometric "
-                "to orthometric transform."
-            )
-        if Path(src.geoid_grid).name == Path(dst.geoid_grid).name:
-            # Same model; nothing to do
+        if not src.geoid_grid and not dst.geoid_grid:
+            # Neither geoid known — nothing we can do; treat as no-op
             return ""
-        # Remove A, apply B
+        if src.geoid_grid and dst.geoid_grid:
+            if Path(src.geoid_grid).name == Path(dst.geoid_grid).name:
+                # Same model; nothing to do
+                return ""
+            # Remove A, apply B
+            src_grid = _format_grid_path(src.geoid_grid)
+            dst_grid = _format_grid_path(dst.geoid_grid)
+            return (
+                f"+step +proj=vgridshift +grids={src_grid} +inv "
+                f"+step +proj=vgridshift +grids={dst_grid}"
+            )
+        if not src.geoid_grid and dst.geoid_grid:
+            # Source has no geoid; apply target geoid only
+            dst_grid = _format_grid_path(dst.geoid_grid)
+            return f"+step +proj=vgridshift +grids={dst_grid}"
+        # dst.geoid_grid is None, src.geoid_grid is set → remove source geoid only
         src_grid = _format_grid_path(src.geoid_grid)
-        dst_grid = _format_grid_path(dst.geoid_grid)
-        return (
-            f"+step +proj=vgridshift +grids={src_grid} +inv "
-            f"+step +proj=vgridshift +grids={dst_grid}"
-        )
+        return f"+step +proj=vgridshift +grids={src_grid} +inv"
 
     # Everything else (e.g., one/both vertical_kind missing)
     raise ProjError(

@@ -1877,20 +1877,60 @@ class PointCloudPair:
             del source_points, target_points
             gc.collect()
 
-            reg_type = "GICP" if method_upper in ["VGICP", "GICP"] else "PLANE_ICP"
-
-            gicp_result = small_gicp.align(
-                target_cloud_gicp,
-                source_cloud_gicp,
-                target_tree,
+            # VGICP requires a GaussianVoxelMap target (overload 3);
+            # GICP / PLANE_ICP use PointCloud + KdTree (overload 2).
+            align_kwargs = dict(
                 init_T_target_source=init_T,
-                registration_type=reg_type,
                 max_correspondence_distance=config.max_correspondence_distance,
                 max_iterations=config.max_iterations,
                 num_threads=config.num_threads,
-                verbose=verbose,
             )
 
+            if method_upper == "VGICP":
+                voxel_resolution = downsample_resolution
+                target_voxelmap = small_gicp.GaussianVoxelMap(voxel_resolution)
+                target_voxelmap.insert(target_cloud_gicp)
+                gicp_result = small_gicp.align(
+                    target_voxelmap,
+                    source_cloud_gicp,
+                    **align_kwargs,
+                )
+            else:
+                align_kwargs["registration_type"] = method_upper  # "GICP" or "PLANE_ICP"
+                gicp_result = small_gicp.align(
+                    target_cloud_gicp,
+                    source_cloud_gicp,
+                    target_tree,
+                    **align_kwargs,
+                )
+
+            # Compute proper Euclidean RMSE and fitness using preprocessed clouds
+            # (before cleanup, so we can extract numpy arrays)
+            from scipy.spatial import cKDTree as _cKDTree
+            source_pts_pp = np.asarray(source_cloud_gicp.points())
+            target_pts_pp = np.asarray(target_cloud_gicp.points())
+            # Handle Nx4 homogeneous coords if present
+            if source_pts_pp.shape[1] > 3:
+                source_pts_pp = source_pts_pp[:, :3]
+            if target_pts_pp.shape[1] > 3:
+                target_pts_pp = target_pts_pp[:, :3]
+
+            T = gicp_result.T_target_source
+            source_h = np.hstack([source_pts_pp, np.ones((len(source_pts_pp), 1))])
+            source_transformed = (source_h @ T.T)[:, :3]
+            _tree = _cKDTree(target_pts_pp)
+            distances, _ = _tree.query(source_transformed)
+
+            max_dist = config.max_correspondence_distance
+            inlier_mask = distances < max_dist
+            inlier_dists = distances[inlier_mask]
+
+            n_source_processed = len(source_pts_pp)
+            metrics_num_inliers = len(inlier_dists)
+            metrics_rmse = float(np.sqrt(np.mean(inlier_dists ** 2))) if len(inlier_dists) > 0 else float('inf')
+            metrics_fitness = metrics_num_inliers / n_source_processed if n_source_processed > 0 else 0.0
+
+            del source_pts_pp, target_pts_pp, source_h, source_transformed, _tree, distances
             del target_cloud_gicp, target_tree, source_cloud_gicp, source_tree
             gc.collect()
         else:
@@ -1903,9 +1943,25 @@ class PointCloudPair:
                 max_correspondence_distance=config.max_correspondence_distance,
                 max_iterations=config.max_iterations,
                 num_threads=config.num_threads,
-                verbose=verbose,
             )
 
+            # Compute proper Euclidean RMSE and fitness for ICP path
+            from scipy.spatial import cKDTree as _cKDTree
+            T = gicp_result.T_target_source
+            source_h = np.hstack([source_points, np.ones((len(source_points), 1))])
+            source_transformed = (source_h @ T.T)[:, :3]
+            _tree = _cKDTree(target_points)
+            distances, _ = _tree.query(source_transformed)
+
+            max_dist = config.max_correspondence_distance
+            inlier_mask = distances < max_dist
+            inlier_dists = distances[inlier_mask]
+
+            metrics_num_inliers = len(inlier_dists)
+            metrics_rmse = float(np.sqrt(np.mean(inlier_dists ** 2))) if len(inlier_dists) > 0 else float('inf')
+            metrics_fitness = metrics_num_inliers / len(source_points) if len(source_points) > 0 else 0.0
+
+            del source_h, source_transformed, _tree, distances
             del source_points, target_points
             gc.collect()
 
@@ -1919,14 +1975,11 @@ class PointCloudPair:
         result.target_path = target_pc.filename
         result.method_used = config.method
 
-        # Compute metrics
-        num_inliers = getattr(gicp_result, 'num_inliers', 0)
-        final_error = getattr(gicp_result, 'error', float('inf'))
-
-        result.num_inliers = num_inliers
-        result.num_correspondences = num_inliers
-        result.fitness = num_inliers / n_source if n_source > 0 else 0.0
-        result.rmse = np.sqrt(final_error / num_inliers) if num_inliers > 0 else float('inf')
+        # Use properly computed Euclidean metrics
+        result.num_inliers = metrics_num_inliers
+        result.num_correspondences = metrics_num_inliers
+        result.fitness = metrics_fitness
+        result.rmse = metrics_rmse
 
         if verbose:
             print(f"\nAlignment Results:", file=sys.stderr)
@@ -2098,12 +2151,12 @@ class PointCloudPair:
         if verbose:
             print(f"Loading points for quality assessment...", file=sys.stderr)
 
-        source_pts = _load_points_from_las(
+        source_pts = load_points_from_las(
             aligned_pc.filename,
             max_points=sample_size,
             voxel_size=None,
         )
-        target_pts = _load_points_from_las(
+        target_pts = load_points_from_las(
             target_pc.filename,
             max_points=sample_size * 2 if sample_size else None,  # More target for matching
             voxel_size=None,
@@ -2388,12 +2441,12 @@ class PointCloudPair:
             if max_points:
                 print(f"  Max points per cloud: {max_points:,}", file=sys.stderr)
 
-        points1 = _load_points_from_las(
+        points1 = load_points_from_las(
             pc1_cropped.filename,
             max_points=max_points,
             voxel_size=voxel_size,
         )
-        points2 = _load_points_from_las(
+        points2 = load_points_from_las(
             pc2_cropped.filename,
             max_points=max_points,
             voxel_size=voxel_size,

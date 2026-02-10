@@ -1100,18 +1100,14 @@ class LandscapeAligner:
                 # See: https://github.com/koide3/small_gicp
 
                 # Build preprocessing kwargs
+                # NOTE: Do NOT pass downsampling_resolution here.
+                # PDAL already downsampled the data in _preprocess_pointcloud(),
+                # so downsampling again would shrink the cloud further than intended.
+                # We only need preprocess_points for covariance/normal estimation.
                 preprocess_kwargs = {"num_threads": num_threads}
-                if self.config.downsample:
-                    downsample_resolution = self.config.voxel_size or 0.25
-                    preprocess_kwargs["downsampling_resolution"] = downsample_resolution
-                    logger.info(
-                        f"Preprocessing (downsample={downsample_resolution}m + "
-                        "covariance estimation)..."
-                    )
-                else:
-                    logger.info(
-                        "Preprocessing (covariance estimation, no downsampling)..."
-                    )
+                logger.info(
+                    "Preprocessing (covariance estimation, data already downsampled by PDAL)..."
+                )
 
                 # Preprocess source and target in parallel (independent operations)
                 with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1129,20 +1125,42 @@ class LandscapeAligner:
                     f"{target_cloud.size()} target points"
                 )
 
-                # Map method to small_gicp registration_type
-                # VGICP with preprocessed points is effectively GICP
-                reg_type = "GICP" if method == RegistrationMethod.VGICP else method.value.upper()
-
-                reg_result = small_gicp.align(
-                    target_cloud,
-                    source_cloud,
-                    target_tree,
+                # VGICP requires a GaussianVoxelMap target (overload 3);
+                # GICP / PLANE_ICP use PointCloud + KdTree (overload 2).
+                align_kwargs = dict(
                     init_T_target_source=initial_transform,
-                    registration_type=reg_type,
                     max_correspondence_distance=max_corr_dist,
                     max_iterations=self.config.max_iterations,
                     num_threads=num_threads,
                 )
+
+                if method == RegistrationMethod.VGICP:
+                    voxel_resolution = self.config.voxel_size or 0.25
+                    target_voxelmap = small_gicp.GaussianVoxelMap(voxel_resolution)
+                    target_voxelmap.insert(target_cloud)
+                    reg_result = small_gicp.align(
+                        target_voxelmap,
+                        source_cloud,
+                        **align_kwargs,
+                    )
+                else:
+                    reg_type = method.value.upper()  # "GICP" or "PLANE_ICP"
+                    align_kwargs["registration_type"] = reg_type
+                    reg_result = small_gicp.align(
+                        target_cloud,
+                        source_cloud,
+                        target_tree,
+                        **align_kwargs,
+                    )
+
+                # Extract preprocessed numpy arrays for metric computation
+                # (these are the actual points the alignment operated on)
+                source_for_metrics = np.asarray(source_cloud.points())
+                target_for_metrics = np.asarray(target_cloud.points())
+                if source_for_metrics.shape[1] > 3:
+                    source_for_metrics = source_for_metrics[:, :3]
+                if target_for_metrics.shape[1] > 3:
+                    target_for_metrics = target_for_metrics[:, :3]
             else:
                 # Plain ICP can use raw numpy arrays directly
                 align_kwargs = {
@@ -1159,14 +1177,18 @@ class LandscapeAligner:
 
                 reg_result = small_gicp.align(target, source, **align_kwargs)
 
+                # Use raw arrays for metric computation (ICP path)
+                source_for_metrics = source
+                target_for_metrics = target
+
             # Extract results - use T_target_source attribute
             result.transformation = reg_result.T_target_source
             result.converged = getattr(reg_result, 'converged', True)
             result.iterations = getattr(reg_result, 'iterations', 0)
-            
-            # Compute fitness metrics
+
+            # Compute fitness metrics using the actual points the alignment operated on
             result.rmse, result.fitness, result.num_correspondences = \
-                self._compute_fitness(source, target, result.transformation)
+                self._compute_fitness(source_for_metrics, target_for_metrics, result.transformation)
             
         except Exception as e:
             logger.error(f"Registration failed: {e}")
