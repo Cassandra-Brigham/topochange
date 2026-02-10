@@ -496,7 +496,17 @@ def transformer_with_epoch(
     except TypeError:
         # Fallback for older pyproj versions without epoch support
         pass
-    
+    except Exception as exc:
+        # Fallback for PROJ errors (CRSError, ProjError, RuntimeError) –
+        # e.g. missing deformation model grid for the requested epoch.
+        # Log a warning so the user knows epoch-awareness was dropped.
+        import warnings as _w
+        _w.warn(
+            f"Epoch-aware transformer failed ({type(exc).__name__}: {exc}); "
+            "falling back to non-epoch transform.",
+            stacklevel=2,
+        )
+
     # Fallback: standard transform without epoch awareness
     return Transformer.from_crs(src, dst, always_xy=True)
 

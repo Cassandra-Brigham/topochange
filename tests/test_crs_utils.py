@@ -11,6 +11,7 @@ from topochange.crs_utils import (
     crs_equals,
     crs_to_wkt2_2019,
     wrap_coordinate_metadata_wkt,
+    extract_epoch_from_wkt,
     crs_to_projjson,
     make_coordinate_metadata_projjson,
     is_orthometric,
@@ -1052,3 +1053,63 @@ class TestBuildOutputCrsWkt:
         vert = CRS.from_epsg(5703)
         wkt = build_output_crs_wkt(horiz, vert)
         assert "COMPOUNDCRS" in wkt
+
+
+# ==============================================================================
+# Test extract_epoch_from_wkt
+# ==============================================================================
+
+class TestExtractEpochFromWkt:
+    """Tests for extract_epoch_from_wkt function."""
+
+    def test_simple_coordinatemetadata(self):
+        """Extract epoch from a simple COORDINATEMETADATA WKT."""
+        wkt = 'COORDINATEMETADATA[PROJCRS["WGS 84 / UTM zone 13N"],EPOCH[2011.5]]'
+        assert extract_epoch_from_wkt(wkt) == 2011.5
+
+    def test_compound_crs_with_epoch(self):
+        """Extract epoch from COORDINATEMETADATA wrapping a compound CRS."""
+        wkt = (
+            'COORDINATEMETADATA['
+            'COMPOUNDCRS["NAD83 + NAVD88",'
+            'PROJCRS["NAD 83"],'
+            'VERTCRS["NAVD88 height"]'
+            '],'
+            'EPOCH[2011.726]'
+            ']'
+        )
+        assert extract_epoch_from_wkt(wkt) == pytest.approx(2011.726)
+
+    def test_no_coordinatemetadata(self):
+        """Return None when WKT has no COORDINATEMETADATA."""
+        wkt = 'PROJCRS["WGS 84 / UTM zone 13N",BASEGEOGCRS["WGS 84"]]'
+        assert extract_epoch_from_wkt(wkt) is None
+
+    def test_compound_crs_without_epoch(self):
+        """Return None for compound CRS without COORDINATEMETADATA."""
+        wkt = (
+            'COMPOUNDCRS["NAD83 + NAVD88",'
+            'PROJCRS["NAD 83"],'
+            'VERTCRS["NAVD88 height"]'
+            ']'
+        )
+        assert extract_epoch_from_wkt(wkt) is None
+
+    def test_none_input(self):
+        """Return None for None input."""
+        assert extract_epoch_from_wkt(None) is None
+
+    def test_empty_string(self):
+        """Return None for empty string."""
+        assert extract_epoch_from_wkt("") is None
+
+    def test_integer_epoch(self):
+        """Extract integer epoch value."""
+        wkt = 'COORDINATEMETADATA[PROJCRS["Test"],EPOCH[2011]]'
+        assert extract_epoch_from_wkt(wkt) == 2011.0
+
+    def test_real_wkt_from_build_output(self):
+        """Extract epoch from a WKT actually produced by build_output_crs_wkt."""
+        wkt = build_output_crs_wkt("EPSG:32613", "EPSG:5703", 2011.726)
+        epoch = extract_epoch_from_wkt(wkt)
+        assert epoch == pytest.approx(2011.726)

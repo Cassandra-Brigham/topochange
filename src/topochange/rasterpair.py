@@ -1307,6 +1307,15 @@ class RasterPair:
         
         # 1. Dynamic epoch transformation
         if not skip_epoch and 'epoch' in comparison['transformations_needed']:
+            if target_epoch is None:
+                import warnings as _w
+                _w.warn(
+                    "Epoch mismatch detected but target raster has no epoch set "
+                    f"(source epoch={getattr(current, 'epoch', None)}). "
+                    "Skipping dynamic epoch transform — results may contain "
+                    "systematic spatial offsets.",
+                    stacklevel=2,
+                )
             if target_epoch is not None:
                 src_epoch = getattr(current, 'epoch', None)
                 if verbose:
@@ -1327,11 +1336,20 @@ class RasterPair:
                 }
                 self._transformation_history.append(step_info)
                 
-                # Record in CRSHistory if available
-                # Interpolation tracking handled by raster.py
+                # Record pipeline-level history entry
                 if record_history and getattr(current, 'crs_history', None) is not None:
-                    pass
-        
+                    try:
+                        current.crs_history.record_transformation_entry(
+                            transformation_type="pipeline_epoch_transform",
+                            source_crs_proj=getattr(self.raster1, 'crs', None),
+                            target_crs_proj=getattr(current, 'crs', None),
+                            method="dynamic_epoch_transform via RasterPair pipeline",
+                            src_epoch=src_epoch,
+                            dst_epoch=target_epoch,
+                        )
+                    except Exception:
+                        pass
+
         # 2. Horizontal CRS reprojection
         if not skip_horizontal and 'horizontal_crs' in comparison['transformations_needed']:
             if target_horiz_crs is not None:
@@ -1361,9 +1379,17 @@ class RasterPair:
                 }
                 self._transformation_history.append(step_info)
 
-                # Interpolation tracking handled by raster.py
+                # Record pipeline-level history entry
                 if record_history and getattr(current, 'crs_history', None) is not None:
-                    pass
+                    try:
+                        current.crs_history.record_transformation_entry(
+                            transformation_type="pipeline_horizontal_reprojection",
+                            source_crs_proj=src_crs,
+                            target_crs_proj=target_horiz_crs,
+                            method="warp_raster via RasterPair pipeline",
+                        )
+                    except Exception:
+                        pass
 
         # 3. Vertical datum transformation
         needs_vertical = 'vertical_datum' in comparison['transformations_needed']
@@ -1394,9 +1420,21 @@ class RasterPair:
                 }
                 self._transformation_history.append(step_info)
 
-                # Interpolation tracking handled by raster.py
+                # Record pipeline-level history entry
                 if record_history and getattr(current, 'crs_history', None) is not None:
-                    pass
+                    try:
+                        current.crs_history.record_transformation_entry(
+                            transformation_type="pipeline_vertical_datum",
+                            source_crs_proj=getattr(self.raster1, 'crs', None),
+                            target_crs_proj=getattr(current, 'crs', None),
+                            method="warp_raster (vertical) via RasterPair pipeline",
+                            source_vertical_kind=source_vertical_kind,
+                            target_vertical_kind=target_vertical_kind,
+                            source_geoid=source_geoid,
+                            target_geoid=target_geoid,
+                        )
+                    except Exception:
+                        pass
 
         # 3b. Vertical unit conversion
         needs_unit_conversion = 'vertical_units' in comparison['transformations_needed']
@@ -1462,9 +1500,18 @@ class RasterPair:
             }
             self._transformation_history.append(step_info)
 
-            # Interpolation tracking handled by raster.py
+            # Record pipeline-level history entry
             if record_history and getattr(current, 'crs_history', None) is not None:
-                pass
+                try:
+                    current.crs_history.record_transformation_entry(
+                        transformation_type="pipeline_grid_alignment",
+                        source_crs_proj=getattr(self.raster1, 'crs', None),
+                        target_crs_proj=getattr(self.raster2, 'crs', None),
+                        method="warp_raster (align_to) via RasterPair pipeline",
+                        alignment_origin=self.raster2.filename,
+                    )
+                except Exception:
+                    pass
 
         # Cache the result
         self._raster1_transformed = current

@@ -164,3 +164,151 @@ class TestBuildAwsPipelineAsrs:
         ]
         assert len(writer_stages) == 1
         assert "a_srs" not in writer_stages[0]
+
+
+# ==============================================================================
+# _writer_gdal override_srs tests
+# ==============================================================================
+
+class TestWriterGdalOverrideSrs:
+    """Verify _writer_gdal() includes override_srs when provided."""
+
+    def test_without_override_srs(self):
+        """Default call has no override_srs key."""
+        w = GetDEMs._writer_gdal("test.tif")
+        assert "override_srs" not in w
+        assert w["type"] == "writers.gdal"
+
+    def test_with_override_srs(self):
+        """Providing override_srs includes it in the dict."""
+        w = GetDEMs._writer_gdal("test.tif", override_srs=_SAMPLE_CRS_WKT)
+        assert w["override_srs"] == _SAMPLE_CRS_WKT
+
+    def test_override_srs_none_omitted(self):
+        """Explicitly passing None omits override_srs."""
+        w = GetDEMs._writer_gdal("test.tif", override_srs=None)
+        assert "override_srs" not in w
+
+
+class TestMakeDemPipelineGdalSrs:
+    """Verify make_DEM_pipeline_from_file writers.gdal uses WKT2 CRS."""
+
+    @staticmethod
+    def _make_instance():
+        """Create a bare GetDEMs instance (no __init__ side effects)."""
+        obj = object.__new__(GetDEMs)
+        return obj
+
+    def test_dsm_uses_output_crs_wkt(self):
+        """DSM writers.gdal override_srs should use output_crs_wkt when provided."""
+        inst = self._make_instance()
+        pipeline = inst.make_DEM_pipeline_from_file(
+            filename="test.laz",
+            extent=_EXTENT_3857,
+            dem_resolution=1.0,
+            outCRS="EPSG:32613",
+            demType="dsm",
+            gridMethod="max",
+            dem_outName="test_dsm",
+            dem_outExt="tif",
+            output_crs_wkt=_SAMPLE_CRS_WKT,
+        )
+        gdal_stages = [
+            s for s in pipeline["pipeline"] if s.get("type") == "writers.gdal"
+        ]
+        assert len(gdal_stages) == 1
+        assert gdal_stages[0]["override_srs"] == _SAMPLE_CRS_WKT
+
+    def test_dtm_uses_output_crs_wkt(self):
+        """DTM writers.gdal override_srs should use output_crs_wkt when provided."""
+        inst = self._make_instance()
+        pipeline = inst.make_DEM_pipeline_from_file(
+            filename="test.laz",
+            extent=_EXTENT_3857,
+            dem_resolution=1.0,
+            outCRS="EPSG:32613",
+            demType="dtm",
+            gridMethod="idw",
+            dem_outName="test_dtm",
+            dem_outExt="tif",
+            output_crs_wkt=_SAMPLE_CRS_WKT,
+        )
+        gdal_stages = [
+            s for s in pipeline["pipeline"] if s.get("type") == "writers.gdal"
+        ]
+        assert len(gdal_stages) == 1
+        assert gdal_stages[0]["override_srs"] == _SAMPLE_CRS_WKT
+
+    def test_falls_back_to_outcrs_when_no_wkt(self):
+        """writers.gdal should fall back to outCRS if output_crs_wkt is None."""
+        inst = self._make_instance()
+        pipeline = inst.make_DEM_pipeline_from_file(
+            filename="test.laz",
+            extent=_EXTENT_3857,
+            dem_resolution=1.0,
+            outCRS="EPSG:32613",
+            demType="dsm",
+            gridMethod="max",
+            dem_outName="test_dsm",
+            dem_outExt="tif",
+            output_crs_wkt=None,
+        )
+        gdal_stages = [
+            s for s in pipeline["pipeline"] if s.get("type") == "writers.gdal"
+        ]
+        assert len(gdal_stages) == 1
+        assert gdal_stages[0]["override_srs"] == "EPSG:32613"
+
+
+class TestMakeDemPipelineAwsGdalSrs:
+    """Verify make_DEM_pipeline_aws writers.gdal uses WKT2 CRS."""
+
+    @staticmethod
+    def _make_instance():
+        """Create a bare GetDEMs instance (no __init__ side effects)."""
+        obj = object.__new__(GetDEMs)
+        return obj
+
+    def test_dsm_uses_output_crs_wkt(self):
+        """AWS DSM writers.gdal override_srs should use output_crs_wkt."""
+        inst = self._make_instance()
+        pipeline = inst.make_DEM_pipeline_aws(
+            extent_epsg3857=_EXTENT_3857,
+            property_ids=["CO_SanLuisJuanMiguel_1_2020"],
+            pc_resolution=10.0,
+            dem_resolution=1.0,
+            data_source="usgs",
+            outCRS="EPSG:32613",
+            demType="dsm",
+            gridMethod="max",
+            dem_outName="test_dsm",
+            dem_outExt="tif",
+            output_crs_wkt=_SAMPLE_CRS_WKT,
+        )
+        gdal_stages = [
+            s for s in pipeline["pipeline"] if s.get("type") == "writers.gdal"
+        ]
+        assert len(gdal_stages) == 1
+        assert gdal_stages[0]["override_srs"] == _SAMPLE_CRS_WKT
+
+    def test_falls_back_to_outcrs(self):
+        """AWS DSM should fall back to outCRS when output_crs_wkt is None."""
+        inst = self._make_instance()
+        pipeline = inst.make_DEM_pipeline_aws(
+            extent_epsg3857=_EXTENT_3857,
+            property_ids=["CO_SanLuisJuanMiguel_1_2020"],
+            pc_resolution=10.0,
+            dem_resolution=1.0,
+            data_source="usgs",
+            outCRS="EPSG:32613",
+            demType="dsm",
+            gridMethod="max",
+            dem_outName="test_dsm",
+            dem_outExt="tif",
+            output_crs_wkt=None,
+        )
+        gdal_stages = [
+            s for s in pipeline["pipeline"] if s.get("type") == "writers.gdal"
+        ]
+        assert len(gdal_stages) == 1
+        assert gdal_stages[0]["override_srs"] == "EPSG:32613"

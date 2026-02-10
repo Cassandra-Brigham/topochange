@@ -424,18 +424,24 @@ class Raster:
     def current_compound_crs(self, value: Optional[str]):
         """
         Set compound CRS and auto-extract horizontal/vertical components.
-        
+
         When you set a compound CRS, the horizontal and vertical components
-        are automatically extracted from it.
+        are automatically extracted from it. If the new CRS is 2D (no vertical
+        component), the existing vertical CRS is preserved — a horizontal-only
+        update should never destroy pre-existing vertical metadata.
         """
         self._current_compound_crs = value
-        
+
         if value is not None:
             # Parse and extract components
             from .crs_utils import parse_crs_components
             _, horiz_wkt, vert_wkt = parse_crs_components(value)
-            self._current_horizontal_crs = horiz_wkt
-            self._current_vertical_crs = vert_wkt
+            if horiz_wkt is not None:
+                self._current_horizontal_crs = horiz_wkt
+            # Only overwrite vertical if the new CRS actually carries one.
+            # A 2D CRS (vert_wkt=None) must NOT erase existing vertical metadata.
+            if vert_wkt is not None:
+                self._current_vertical_crs = vert_wkt
     
     @property
     def current_horizontal_crs(self) -> Optional[str]:
@@ -472,8 +478,14 @@ class Raster:
     def _update_current_compound_from_components(self):
         """
         Update compound CRS from horizontal and vertical components.
-        
-        This is called internally when horizontal or vertical CRS is set.
+
+        This is called internally when horizontal or vertical CRS is set
+        via their individual property setters.
+
+        Design rule: compound_crs always holds the *best available* CRS
+        representation.  When both H+V exist it builds a true compound;
+        when only one exists it stores that component directly so that
+        ``current_full_crs`` is never unexpectedly None.
         """
         if self._current_horizontal_crs and self._current_vertical_crs:
             try:
@@ -487,11 +499,11 @@ class Raster:
                 # If compound creation fails, leave compound as-is
                 pass
         elif self._current_horizontal_crs and not self._current_vertical_crs:
-            # Only horizontal - compound should be None
-            self._current_compound_crs = None
+            # Only horizontal – store it as the compound so current_full_crs works
+            self._current_compound_crs = self._current_horizontal_crs
         elif self._current_vertical_crs and not self._current_horizontal_crs:
-            # Only vertical - compound should be None
-            self._current_compound_crs = None
+            # Only vertical – store it as the compound so current_full_crs works
+            self._current_compound_crs = self._current_vertical_crs
     
     @property
     def original_full_crs(self) -> Optional[str]:
@@ -887,14 +899,17 @@ class Raster:
         # Record in CRS history if available
         if result.crs_history is not None:
             try:
-                result.crs_history.add_entry({
-                    'operation': 'unit_conversion',
-                    'source_unit': source_unit.name,
-                    'target_unit': target_unit.name,
-                    'conversion_factor': factor,
-                    'source_file': self.filename,
-                    'target_file': output_path,
-                })
+                result.crs_history.record_transformation_entry(
+                    transformation_type="vertical_unit_conversion",
+                    source_crs_proj=getattr(self, 'crs', None),
+                    target_crs_proj=getattr(self, 'crs', None),
+                    method=f"factor={factor}",
+                    source_file=str(self.filename),
+                    target_file=str(output_path),
+                    source_unit=source_unit.name,
+                    target_unit=target_unit.name,
+                    conversion_factor=factor,
+                )
             except Exception:
                 pass  # Graceful degradation
         
@@ -979,8 +994,14 @@ class Raster:
         if crs:
             try:
                 from pyproj import CRS as _CRS
+                import warnings as _warnings
                 pyproj_crs = _CRS.from_user_input(crs)
-                obj.original_proj_string = pyproj_crs.to_proj4()
+                with _warnings.catch_warnings():
+                    _warnings.filterwarnings(
+                        "ignore",
+                        message=".*You will likely lose important projection.*",
+                    )
+                    obj.original_proj_string = pyproj_crs.to_proj4()
             except Exception:
                 obj.original_proj_string = str(crs)
         else:
@@ -1377,6 +1398,12 @@ class Raster:
                 self.epoch_end = epoch_dec
 
             epoch_changed = True
+
+            # Keep time_info in sync with the new epoch value
+            if not hasattr(self, 'time_info') or not self.time_info:
+                self.time_info = {}
+            self.time_info['epoch'] = self.epoch
+            self.time_info['epoch_source'] = 'add_metadata'
 
         # -------------------------------
         # 8. Record a single CRSHistory entry summarizing all changes
@@ -2039,18 +2066,22 @@ class Raster:
                 dst_data = src_data.copy()
 
         # Apply vertical datum transformation to Z values
+        _applied_geoid = None  # track which geoid was applied for metadata
+        _geoid_direction = None
         if needs_vertical and src_vert_kind and dst_vert_kind and src_vert_kind != dst_vert_kind:
             # Get geoid grid
             from .geoid_utils import select_geoid_grid
-            
+
             if src_vert_kind == "ellipsoidal" and dst_vert_kind == "orthometric":
                 # Need to subtract geoid height: h_ortho = h_ellip - N
                 geoid_name = dst_geoid or src_geoid
                 if geoid_name:
                     dst_data = self._apply_geoid_to_raster(
-                        dst_data, dst_transform, dst_crs, geoid_name, 
+                        dst_data, dst_transform, dst_crs, geoid_name,
                         direction="subtract"
                     )
+                    _applied_geoid = geoid_name
+                    _geoid_direction = "subtract"
             elif src_vert_kind == "orthometric" and dst_vert_kind == "ellipsoidal":
                 # Need to add geoid height: h_ellip = h_ortho + N
                 geoid_name = src_geoid or dst_geoid
@@ -2059,8 +2090,19 @@ class Raster:
                         dst_data, dst_transform, dst_crs, geoid_name,
                         direction="add"
                     )
+                    _applied_geoid = geoid_name
+                    _geoid_direction = "add"
         elif needs_vertical and src_geoid and dst_geoid and src_geoid != dst_geoid:
             # Geoid-to-geoid transform (both orthometric but different geoids)
+            # Verify both are actually orthometric before proceeding
+            src_is_ortho = getattr(self, 'is_orthometric', None)
+            if src_is_ortho is False:
+                import warnings as _w
+                _w.warn(
+                    f"Geoid-to-geoid transform requested ({src_geoid} → {dst_geoid}) "
+                    "but source raster is not orthometric. Results may be incorrect.",
+                    stacklevel=2,
+                )
             # h_ortho_dst = h_ellip - N_dst = (h_ortho_src + N_src) - N_dst
             dst_data = self._apply_geoid_to_raster(
                 dst_data, dst_transform, dst_crs, src_geoid, direction="add"
@@ -2068,6 +2110,8 @@ class Raster:
             dst_data = self._apply_geoid_to_raster(
                 dst_data, dst_transform, dst_crs, dst_geoid, direction="subtract"
             )
+            _applied_geoid = dst_geoid
+            _geoid_direction = f"geoid_to_geoid: +{src_geoid} -{dst_geoid}"
         
         # Handle nodata - always use a canonical nodata value
         # Use source nodata if available, otherwise default to NaN for float data
@@ -2111,9 +2155,12 @@ class Raster:
             metadata={},
         )
 
+        # Use the actually-applied geoid for metadata (may differ from dst_geoid
+        # when e.g. only source geoid was available for an ellip→ortho transform)
+        effective_geoid = _applied_geoid if _applied_geoid else dst_geoid
         out_raster.add_metadata(
             compound_CRS=dst_crs,
-            geoid_model=dst_geoid,
+            geoid_model=effective_geoid,
             epoch=dst_epoch,
         )
 
@@ -2121,13 +2168,28 @@ class Raster:
         if dst_vert_kind:
             out_raster.is_orthometric = (dst_vert_kind.lower() == "orthometric")
 
+        # Preserve vertical CRS from source when only horizontal transform occurred
+        if not needs_vertical:
+            for attr in ('current_vertical_crs', 'original_vertical_crs',
+                         'is_orthometric', 'current_geoid_model', 'original_geoid_model'):
+                src_val = getattr(self, attr, None)
+                if src_val is not None:
+                    setattr(out_raster, attr, src_val)
+
         # Preserve vertical unit from source raster (AFTER add_metadata to avoid being overwritten)
         if hasattr(self, 'current_vertical_unit') and self.current_vertical_unit.name != "unknown":
             out_raster.current_vertical_unit = self.current_vertical_unit
             out_raster.current_vertical_units = self.current_vertical_units
             out_raster.original_vertical_unit = self.original_vertical_unit
             out_raster.original_vertical_units = self.original_vertical_units
-        
+
+        # Record geoid direction in metadata for provenance
+        if _geoid_direction is not None:
+            if not hasattr(out_raster, '_geoid_transform_info'):
+                out_raster._geoid_transform_info = {}
+            out_raster._geoid_transform_info['direction'] = _geoid_direction
+            out_raster._geoid_transform_info['geoid_model'] = _applied_geoid
+
         # Record in CRS history
         if getattr(self, 'crs_history', None) is not None:
             try:
@@ -2259,57 +2321,70 @@ class Raster:
                     if os.path.exists(geoid_grid):
                         geoid_path = geoid_grid
                 
-                if geoid_path is not None:
-                    with rasterio.open(geoid_path) as geoid_src:
-                        geoid_data = geoid_src.read(1)
-                        geoid_transform = geoid_src.transform
-                        geoid_bounds = geoid_src.bounds
+                if geoid_path is None:
+                    raise FileNotFoundError(
+                        f"Geoid grid '{geoid_grid}' not found in any search path. "
+                        "Returning uncorrected data would silently introduce ~20-30 m "
+                        "of vertical bias.  Set the PROJ_DATA environment variable or "
+                        "download the grid file."
+                    )
 
-                        # Create interpolator
-                        geoid_height, geoid_width = geoid_data.shape
-                        geoid_xs = np.linspace(geoid_bounds.left, geoid_bounds.right, geoid_width)
-                        geoid_ys = np.linspace(geoid_bounds.top, geoid_bounds.bottom, geoid_height)
+                with rasterio.open(geoid_path) as geoid_src:
+                    geoid_data = geoid_src.read(1)
+                    geoid_transform = geoid_src.transform
+                    geoid_bounds = geoid_src.bounds
 
-                        # Convert longitudes to 0-360 if geoid grid uses that convention
-                        lons_adjusted = lons.copy()
-                        if geoid_bounds.left > 180:  # Geoid uses 0-360 convention
-                            lons_adjusted = np.where(lons_adjusted < 0, lons_adjusted + 360, lons_adjusted)
+                    # Create interpolator
+                    geoid_height, geoid_width = geoid_data.shape
+                    geoid_xs = np.linspace(geoid_bounds.left, geoid_bounds.right, geoid_width)
+                    geoid_ys = np.linspace(geoid_bounds.top, geoid_bounds.bottom, geoid_height)
 
-                        interp = RegularGridInterpolator(
-                            (geoid_ys, geoid_xs),
-                            geoid_data,
-                            method='linear',
-                            bounds_error=False,
-                            fill_value=0.0,
-                        )
+                    # Convert longitudes to 0-360 if geoid grid uses that convention
+                    lons_adjusted = lons.copy()
+                    if geoid_bounds.left > 180:  # Geoid uses 0-360 convention
+                        lons_adjusted = np.where(lons_adjusted < 0, lons_adjusted + 360, lons_adjusted)
 
-                        # Sample geoid heights
-                        points = np.column_stack([lats.ravel(), lons_adjusted.ravel()])
-                        N = interp(points).reshape(height, width)
+                    interp = RegularGridInterpolator(
+                        (geoid_ys, geoid_xs),
+                        geoid_data,
+                        method='linear',
+                        bounds_error=False,
+                        fill_value=0.0,
+                    )
 
-                        # Apply correction
-                        result = data.copy()
-                        if direction == "add":
-                            result = result + N
-                        else:  # subtract
-                            result = result - N
+                    # Sample geoid heights
+                    points = np.column_stack([lats.ravel(), lons_adjusted.ravel()])
+                    N = interp(points).reshape(height, width)
 
-                        return result
+                    # Apply correction
+                    result = data.copy()
+                    if direction == "add":
+                        result = result + N
+                    else:  # subtract
+                        result = result - N
+
+                    return result
+            except FileNotFoundError:
+                raise  # propagate – caller must handle this explicitly
             except Exception as e:
                 import sys
                 import traceback
                 print(f"[ERROR] Could not apply geoid correction: {e}", file=sys.stderr)
                 traceback.print_exc(file=sys.stderr)
-                return data
+                raise RuntimeError(
+                    f"Geoid correction failed for grid '{geoid_name}': {e}"
+                ) from e
 
+        except (FileNotFoundError, RuntimeError):
+            raise  # propagate known errors
         except Exception as e:
             import sys
             import traceback
             print(f"[ERROR] Geoid correction failed: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
-            return data
-
-        return data
+            raise RuntimeError(
+                f"Geoid correction failed for grid '{geoid_name}': {e}"
+            ) from e
 
     def transform_vertical_datum(
         self,
@@ -2364,7 +2439,13 @@ class Raster:
                 "Raster.crs is None; vertical datum transformation requires a known horizontal CRS."
             )
         base_crs = _CRS.from_user_input(self.crs)
-        base_proj4 = base_crs.to_proj4()
+        import warnings as _warnings
+        with _warnings.catch_warnings():
+            _warnings.filterwarnings(
+                "ignore",
+                message=".*You will likely lose important projection.*",
+            )
+            base_proj4 = base_crs.to_proj4()
 
         def _proj_with_geoid(grid_path: str) -> str:
             return f"{base_proj4} +geoidgrids={grid_path}"
@@ -2612,6 +2693,12 @@ class Raster:
         xs_dst = np.array(xs_dst, dtype="float64")
         ys_dst = np.array(ys_dst, dtype="float64")
 
+        # NOTE: z=0 is used for the inverse coordinate mapping because we don't
+        # yet know the elevation at each destination pixel (that's what we're
+        # computing). For plate-motion models (e.g., ITRF2014→NAD83) the
+        # horizontal shift varies by only ~mm/yr with height, so the error
+        # from z=0 vs actual terrain elevation is negligible for typical
+        # epoch differences (<20 yr) and elevations (<5 km).
         z0 = np.zeros_like(xs_dst, dtype="float64")
 
         x_src_flat, y_src_flat, _z_src_flat = apply_dynamic_transform(
@@ -2722,6 +2809,21 @@ class Raster:
             geoid_model=getattr(self, "current_geoid_model", None),
             epoch=dst_epoch,
         )
+
+        # Record provenance: epoch came from a dynamic transformation
+        if not hasattr(out_raster, 'time_info') or not out_raster.time_info:
+            out_raster.time_info = {}
+        out_raster.time_info['epoch'] = dst_epoch
+        out_raster.time_info['epoch_source'] = 'dynamic_epoch_transform'
+        out_raster.time_info['source_epoch'] = src_epoch
+
+        # Preserve vertical metadata from source (horizontal-only CRS shouldn't wipe it)
+        for attr in ('is_orthometric', 'current_vertical_crs', 'original_vertical_crs',
+                     'current_vertical_unit', 'current_vertical_units',
+                     'original_vertical_unit', 'original_vertical_units'):
+            src_val = getattr(self, attr, None)
+            if src_val is not None:
+                setattr(out_raster, attr, src_val)
 
         if getattr(self, "crs_history", None) is not None:
             try:

@@ -1660,7 +1660,7 @@ class GetDEMs:
                     
     # --------------------Internal PDAL helpers-------------------------
     @staticmethod
-    def _writer_gdal(filename, *, grid_method="idw", res=1.0, driver="GTiff"):
+    def _writer_gdal(filename, *, grid_method="idw", res=1.0, driver="GTiff", override_srs=None):
         """
         Construct a PDAL GDAL writer stage for gridding point cloud data.
 
@@ -1683,6 +1683,11 @@ class GetDEMs:
         driver : str, default 'GTiff'
             GDAL driver used to write the raster.  ``'GTiff'`` yields a
             GeoTIFF.
+        override_srs : str or None, optional
+            Spatial reference system override.  When provided this is written
+            into the output GeoTIFF header, overriding whatever CRS PDAL
+            infers from the point cloud.  Accepts EPSG codes, WKT2 strings,
+            or any format understood by GDAL.
 
         Returns
         -------
@@ -1690,7 +1695,7 @@ class GetDEMs:
             A dictionary suitable for inclusion in a PDAL pipeline,
             representing a GDAL writer stage.
         """
-        return {
+        w = {
             "type": "writers.gdal",
             "filename": filename,
             "gdaldriver": driver,
@@ -1700,6 +1705,9 @@ class GetDEMs:
             "radius": 2 * float(res),
             "gdalopts": "COMPRESS=LZW,TILED=YES,blockxsize=256,blockysize=256,COPY_SRC_OVERVIEWS=YES",
         }
+        if override_srs is not None:
+            w["override_srs"] = override_srs
+        return w
 
     @staticmethod
     def _writer_las(name, ext, a_srs=None):
@@ -1895,6 +1903,10 @@ class GetDEMs:
         }
 
         # Add appropriate stages based on DEM type
+        # Use full WKT2 CRS (with vertical + epoch) when available,
+        # otherwise fall back to the plain EPSG/CRS string.
+        gdal_srs = output_crs_wkt if output_crs_wkt else outCRS
+
         if demType == 'dsm':
             # Directly add the DSM writer stage
             dem_pipeline['pipeline'].append({
@@ -1906,9 +1918,9 @@ class GetDEMs:
                 "resolution": float(dem_resolution),
                 "radius": 2*float(dem_resolution),
                 "gdalopts": "COMPRESS=LZW,TILED=YES,blockxsize=256,blockysize=256,COPY_SRC_OVERVIEWS=YES",
-                "override_srs": outCRS
+                "override_srs": gdal_srs
             })
-        
+
         elif demType == 'dtm':
             # Add a filter to keep only ground points
             dem_pipeline['pipeline'].append({
@@ -1926,7 +1938,7 @@ class GetDEMs:
                 "resolution": float(dem_resolution),
                 "radius": 2*float(dem_resolution),
                 "gdalopts": "COMPRESS=LZW,TILED=YES,blockxsize=256,blockysize=256,COPY_SRC_OVERVIEWS=YES",
-                "override_srs": outCRS
+                "override_srs": gdal_srs
             })
         else:
             raise Exception("demType must be 'dsm' or 'dtm'.")
@@ -2128,6 +2140,10 @@ class GetDEMs:
                                                 output_crs_wkt=output_crs_wkt)
         
         
+        # Use full WKT2 CRS (with vertical + epoch) when available,
+        # otherwise fall back to the plain EPSG/CRS string.
+        gdal_srs = output_crs_wkt if output_crs_wkt else outCRS
+
         if demType == 'dsm':
             dem_stage = {
                     "type":"writers.gdal",
@@ -2137,9 +2153,9 @@ class GetDEMs:
                     "output_type":gridMethod,
                     "resolution":float(dem_resolution),
                     "gdalopts":"COMPRESS=LZW,TILED=YES,blockxsize=256,blockysize=256,COPY_SRC_OVERVIEWS=YES",
-                    "override_srs": outCRS
+                    "override_srs": gdal_srs
             }
-        
+
         elif demType == 'dtm':
             groundfilter_stage = {
                     "type":"filters.range",
@@ -2156,7 +2172,7 @@ class GetDEMs:
                     "output_type":gridMethod,
                     "resolution":float(dem_resolution),
                     "gdalopts":"COMPRESS=LZW,TILED=YES,blockxsize=256,blockysize=256,COPY_SRC_OVERVIEWS=YES",
-                    "override_srs": outCRS
+                    "override_srs": gdal_srs
             }
         
         else:

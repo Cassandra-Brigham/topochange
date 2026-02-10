@@ -247,7 +247,13 @@ def _proj_step_from_crs(crs_str: str) -> str:
     """
     crs = CRS.from_user_input(crs_str)
     # PROJ string for the projected part
-    proj_str = crs.to_proj4()
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.filterwarnings(
+            "ignore",
+            message=".*You will likely lose important projection.*",
+        )
+        proj_str = crs.to_proj4()
     # Ensure we only keep the step part (starting at +proj=...)
     if "+proj=" not in proj_str:
         raise ProjError(f"CRS {crs_str!r} does not appear to be projected.")
