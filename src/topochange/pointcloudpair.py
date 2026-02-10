@@ -958,20 +958,27 @@ class PointCloudPair:
             print(f"PC2 CRS match common? {pc2_native_crs.equals(common_crs) if pc2_native_crs_wkt else 'N/A'}", file=sys.stderr)
             print(f"Cropping pc1 to: {out_path1.name}", file=sys.stderr)
 
-        pc1_cropped = pc1_source.clip_to_polygon(
-            polygon=clip_poly_pc1,
-            output_path=out_path1,
-            overwrite=overwrite,
-        )
+        # Clip both point clouds in parallel (independent I/O operations)
+        from concurrent.futures import ThreadPoolExecutor
 
         if verbose:
             print(f"Cropping pc2 to: {out_path2.name}", file=sys.stderr)
 
-        pc2_cropped = self.pc2.clip_to_polygon(
-            polygon=clip_poly_pc2,
-            output_path=out_path2,
-            overwrite=overwrite,
-        )
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f1 = pool.submit(
+                pc1_source.clip_to_polygon,
+                polygon=clip_poly_pc1,
+                output_path=out_path1,
+                overwrite=overwrite,
+            )
+            f2 = pool.submit(
+                self.pc2.clip_to_polygon,
+                polygon=clip_poly_pc2,
+                output_path=out_path2,
+                overwrite=overwrite,
+            )
+            pc1_cropped = f1.result()
+            pc2_cropped = f2.result()
 
         if verbose:
             print(f"Cropping complete.", file=sys.stderr)
@@ -1306,9 +1313,32 @@ class PointCloudPair:
             pipe = pdal.Pipeline(json.dumps(pipeline_spec))
             pipe.execute_streaming(chunk_size=1000000)
 
-            # Load converted point cloud
+            # Propagate metadata from source instead of re-running from_file()
+            prev = current
             current = PointCloud(str(unit_output_path))
-            current.from_file()
+            current.total_points = getattr(prev, 'total_points', None)
+            current.bounds = getattr(prev, 'bounds', None)
+            current.minx = getattr(prev, 'minx', None)
+            current.miny = getattr(prev, 'miny', None)
+            current.maxx = getattr(prev, 'maxx', None)
+            current.maxy = getattr(prev, 'maxy', None)
+            current.original_compound_crs = getattr(prev, 'current_compound_crs', None)
+            current.original_horizontal_crs = getattr(prev, 'current_horizontal_crs', None)
+            current.original_vertical_crs = getattr(prev, 'current_vertical_crs', None)
+            current.current_compound_crs = getattr(prev, 'current_compound_crs', None)
+            current.current_horizontal_crs = getattr(prev, 'current_horizontal_crs', None)
+            current.current_vertical_crs = getattr(prev, 'current_vertical_crs', None)
+            current.geoid_model = getattr(prev, 'geoid_model', None)
+            current.epoch = getattr(prev, 'epoch', None)
+            current.is_orthometric = getattr(prev, 'is_orthometric', None)
+            current.horizontal_unit = getattr(prev, 'horizontal_unit', None)
+            current.vertical_unit = getattr(prev, 'vertical_unit', None)
+            current.horizontal_units = getattr(prev, 'horizontal_units', None)
+            current.vertical_units = getattr(prev, 'vertical_units', None)
+            current.poly_4326 = getattr(prev, 'poly_4326', None)
+            current.poly_utm = getattr(prev, 'poly_utm', None)
+            current.epsg_utm = getattr(prev, 'epsg_utm', None)
+            current.bbox_4326 = getattr(prev, 'bbox_4326', None)
 
             # Update unit metadata
             dst_vunit = getattr(self.pc2, 'vertical_unit', None)
@@ -1767,9 +1797,12 @@ class PointCloudPair:
         require_small_gicp()
         import small_gicp
 
-        # Determine initial voxel size for memory-efficient loading
+        # Determine initial voxel size for memory-efficient loading.
+        # Use 4x the fine resolution by default — aggressive initial downsampling
+        # is safe because preprocess_points refines to the exact target resolution.
+        # This dramatically reduces I/O and memory for >1GB datasets.
         if config.initial_voxel_size is None:
-            load_voxel_size = config.voxel_size * 2.0 if config.voxel_size else 1.0
+            load_voxel_size = config.voxel_size * 4.0 if config.voxel_size else 2.0
         elif config.initial_voxel_size == 0:
             load_voxel_size = None
         else:
@@ -1786,28 +1819,61 @@ class PointCloudPair:
             if point_filter:
                 print(f"Point filter: {point_filter}", file=sys.stderr)
 
-        # Load points with filtering
-        if verbose:
-            print(f"\nLoading source points from: {Path(source_pc.filename).name}",
-                  file=sys.stderr)
-        source_points = load_points_from_las(
-            source_pc.filename,
-            max_points=config.max_points,
-            voxel_size=load_voxel_size,
-            point_filter=point_filter,
-            crop_bounds=crop_bounds,
-        )
+        # Auto-crop to bounding box intersection if no explicit crop_bounds given.
+        # This avoids loading millions of non-overlapping points that contribute
+        # nothing to alignment. The buffer ensures edge points are included.
+        if crop_bounds is None:
+            src_bounds = getattr(source_pc, 'bounds', None)
+            tgt_bounds = getattr(target_pc, 'bounds', None)
+            if (src_bounds is not None and tgt_bounds is not None
+                    and all(v is not None for v in src_bounds)
+                    and all(v is not None for v in tgt_bounds)):
+                s_minx, s_miny, s_maxx, s_maxy = src_bounds
+                t_minx, t_miny, t_maxx, t_maxy = tgt_bounds
+                # Compute intersection
+                i_minx = max(s_minx, t_minx)
+                i_miny = max(s_miny, t_miny)
+                i_maxx = min(s_maxx, t_maxx)
+                i_maxy = min(s_maxy, t_maxy)
+                if i_minx < i_maxx and i_miny < i_maxy:
+                    # Add buffer (10% of extent or max_correspondence_distance, whichever is larger)
+                    extent = max(i_maxx - i_minx, i_maxy - i_miny)
+                    buffer = max(extent * 0.1, config.max_correspondence_distance * 5)
+                    crop_bounds = (
+                        i_minx - buffer,
+                        i_miny - buffer,
+                        i_maxx + buffer,
+                        i_maxy + buffer,
+                    )
+                    if verbose:
+                        overlap_area = (i_maxx - i_minx) * (i_maxy - i_miny)
+                        print(f"Auto-crop to overlap region: "
+                              f"{i_maxx - i_minx:.0f}x{i_maxy - i_miny:.0f}m "
+                              f"({overlap_area:,.0f} m\u00b2) + {buffer:.1f}m buffer",
+                              file=sys.stderr)
 
+        # Load source and target points in parallel (independent I/O operations)
         if verbose:
-            print(f"Loading target points from: {Path(target_pc.filename).name}",
-                  file=sys.stderr)
-        target_points = load_points_from_las(
-            target_pc.filename,
+            print(f"\nLoading point clouds in parallel...", file=sys.stderr)
+            print(f"  Source: {Path(source_pc.filename).name}", file=sys.stderr)
+            print(f"  Target: {Path(target_pc.filename).name}", file=sys.stderr)
+
+        from concurrent.futures import ThreadPoolExecutor
+        load_kwargs = dict(
             max_points=config.max_points,
             voxel_size=load_voxel_size,
             point_filter=point_filter,
             crop_bounds=crop_bounds,
         )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            source_future = executor.submit(
+                load_points_from_las, source_pc.filename, **load_kwargs,
+            )
+            target_future = executor.submit(
+                load_points_from_las, target_pc.filename, **load_kwargs,
+            )
+            source_points = source_future.result()
+            target_points = target_future.result()
 
         if verbose:
             print(f"Source points: {len(source_points):,}", file=sys.stderr)
@@ -1855,83 +1921,138 @@ class PointCloudPair:
         downsample_resolution = config.voxel_size or 0.5
 
         if method_upper in ["VGICP", "GICP", "PLANE_ICP"]:
-            if verbose:
-                print("  Preprocessing point clouds (downsampling + covariance)...",
-                      file=sys.stderr)
+            # ── Build coarse-to-fine resolution schedule ──
+            from concurrent.futures import ThreadPoolExecutor
+            from scipy.spatial import cKDTree as _cKDTree
 
-            target_cloud_gicp, target_tree = small_gicp.preprocess_points(
-                target_points,
-                downsampling_resolution=downsample_resolution,
-                num_threads=config.num_threads,
-            )
-            source_cloud_gicp, source_tree = small_gicp.preprocess_points(
-                source_points,
-                downsampling_resolution=downsample_resolution,
-                num_threads=config.num_threads,
-            )
+            if getattr(config, 'multi_resolution', True) and downsample_resolution > 0:
+                if getattr(config, 'resolution_stages', None) is not None:
+                    resolutions = sorted(config.resolution_stages, reverse=True)
+                else:
+                    # Default: 3 stages — 4×, 2×, 1× the target resolution
+                    resolutions = [
+                        downsample_resolution * 4.0,
+                        downsample_resolution * 2.0,
+                        downsample_resolution,
+                    ]
+                # Deduplicate stages that are too close together
+                resolutions = [r for i, r in enumerate(resolutions)
+                               if i == 0 or r < resolutions[i - 1] * 0.9]
+            else:
+                resolutions = [downsample_resolution]
 
             if verbose:
-                print(f"  After preprocessing: {source_cloud_gicp.size()} source, "
-                      f"{target_cloud_gicp.size()} target points", file=sys.stderr)
+                if len(resolutions) > 1:
+                    res_str = " → ".join(f"{r:.2f}m" for r in resolutions)
+                    print(f"  Coarse-to-fine schedule: {res_str}", file=sys.stderr)
+                else:
+                    print("  Preprocessing point clouds (downsampling + covariance)...",
+                          file=sys.stderr)
+
+            # ── Multi-resolution alignment loop ──
+            for stage_idx, stage_resolution in enumerate(resolutions):
+                is_final = (stage_idx == len(resolutions) - 1)
+
+                if verbose and len(resolutions) > 1:
+                    label = "Final" if is_final else f"Stage {stage_idx + 1}/{len(resolutions)}"
+                    print(f"  [{label}] Preprocessing at resolution {stage_resolution:.3f}m...",
+                          file=sys.stderr)
+
+                # Preprocess source and target in parallel
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    target_future = executor.submit(
+                        small_gicp.preprocess_points,
+                        target_points,
+                        downsampling_resolution=stage_resolution,
+                        num_threads=max(1, config.num_threads // 2),
+                    )
+                    source_future = executor.submit(
+                        small_gicp.preprocess_points,
+                        source_points,
+                        downsampling_resolution=stage_resolution,
+                        num_threads=max(1, config.num_threads // 2),
+                    )
+                    target_cloud_gicp, target_tree = target_future.result()
+                    source_cloud_gicp, source_tree = source_future.result()
+
+                if verbose:
+                    print(f"    Points: {source_cloud_gicp.size():,} source, "
+                          f"{target_cloud_gicp.size():,} target", file=sys.stderr)
+
+                # Scale correspondence distance and iterations for coarser stages
+                if is_final:
+                    stage_max_dist = config.max_correspondence_distance
+                    stage_max_iters = config.max_iterations
+                else:
+                    scale = stage_resolution / resolutions[-1]
+                    stage_max_dist = config.max_correspondence_distance * scale
+                    stage_max_iters = max(20, config.max_iterations // 2)
+
+                # VGICP requires a GaussianVoxelMap target (overload 3);
+                # GICP / PLANE_ICP use PointCloud + KdTree (overload 2).
+                align_kwargs = dict(
+                    init_T_target_source=init_T,
+                    max_correspondence_distance=stage_max_dist,
+                    max_iterations=stage_max_iters,
+                    num_threads=config.num_threads,
+                )
+
+                if method_upper == "VGICP":
+                    target_voxelmap = small_gicp.GaussianVoxelMap(stage_resolution)
+                    target_voxelmap.insert(target_cloud_gicp)
+                    gicp_result = small_gicp.align(
+                        target_voxelmap,
+                        source_cloud_gicp,
+                        **align_kwargs,
+                    )
+                else:
+                    align_kwargs["registration_type"] = method_upper
+                    gicp_result = small_gicp.align(
+                        target_cloud_gicp,
+                        source_cloud_gicp,
+                        target_tree,
+                        **align_kwargs,
+                    )
+
+                # Carry the transform forward as the initial guess for the next stage
+                init_T = gicp_result.T_target_source
+
+                if verbose and len(resolutions) > 1:
+                    t = init_T[:3, 3]
+                    print(f"    Translation so far: [{t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f}] m",
+                          file=sys.stderr)
+
+                # Compute Euclidean RMSE only at the finest resolution
+                if is_final:
+                    source_pts_pp = np.asarray(source_cloud_gicp.points())
+                    target_pts_pp = np.asarray(target_cloud_gicp.points())
+                    if source_pts_pp.shape[1] > 3:
+                        source_pts_pp = source_pts_pp[:, :3]
+                    if target_pts_pp.shape[1] > 3:
+                        target_pts_pp = target_pts_pp[:, :3]
+
+                    T = gicp_result.T_target_source
+                    source_h = np.hstack([source_pts_pp, np.ones((len(source_pts_pp), 1))])
+                    source_transformed = (source_h @ T.T)[:, :3]
+                    _tree = _cKDTree(target_pts_pp)
+                    distances, _ = _tree.query(source_transformed)
+
+                    max_dist = config.max_correspondence_distance
+                    inlier_mask = distances < max_dist
+                    inlier_dists = distances[inlier_mask]
+
+                    n_source_processed = len(source_pts_pp)
+                    metrics_num_inliers = len(inlier_dists)
+                    metrics_rmse = float(np.sqrt(np.mean(inlier_dists ** 2))) if len(inlier_dists) > 0 else float('inf')
+                    metrics_fitness = metrics_num_inliers / n_source_processed if n_source_processed > 0 else 0.0
+
+                    del source_pts_pp, target_pts_pp, source_h, source_transformed, _tree, distances
+
+                # Cleanup stage clouds
+                del target_cloud_gicp, target_tree, source_cloud_gicp, source_tree
+                gc.collect()
 
             del source_points, target_points
-            gc.collect()
-
-            # VGICP requires a GaussianVoxelMap target (overload 3);
-            # GICP / PLANE_ICP use PointCloud + KdTree (overload 2).
-            align_kwargs = dict(
-                init_T_target_source=init_T,
-                max_correspondence_distance=config.max_correspondence_distance,
-                max_iterations=config.max_iterations,
-                num_threads=config.num_threads,
-            )
-
-            if method_upper == "VGICP":
-                voxel_resolution = downsample_resolution
-                target_voxelmap = small_gicp.GaussianVoxelMap(voxel_resolution)
-                target_voxelmap.insert(target_cloud_gicp)
-                gicp_result = small_gicp.align(
-                    target_voxelmap,
-                    source_cloud_gicp,
-                    **align_kwargs,
-                )
-            else:
-                align_kwargs["registration_type"] = method_upper  # "GICP" or "PLANE_ICP"
-                gicp_result = small_gicp.align(
-                    target_cloud_gicp,
-                    source_cloud_gicp,
-                    target_tree,
-                    **align_kwargs,
-                )
-
-            # Compute proper Euclidean RMSE and fitness using preprocessed clouds
-            # (before cleanup, so we can extract numpy arrays)
-            from scipy.spatial import cKDTree as _cKDTree
-            source_pts_pp = np.asarray(source_cloud_gicp.points())
-            target_pts_pp = np.asarray(target_cloud_gicp.points())
-            # Handle Nx4 homogeneous coords if present
-            if source_pts_pp.shape[1] > 3:
-                source_pts_pp = source_pts_pp[:, :3]
-            if target_pts_pp.shape[1] > 3:
-                target_pts_pp = target_pts_pp[:, :3]
-
-            T = gicp_result.T_target_source
-            source_h = np.hstack([source_pts_pp, np.ones((len(source_pts_pp), 1))])
-            source_transformed = (source_h @ T.T)[:, :3]
-            _tree = _cKDTree(target_pts_pp)
-            distances, _ = _tree.query(source_transformed)
-
-            max_dist = config.max_correspondence_distance
-            inlier_mask = distances < max_dist
-            inlier_dists = distances[inlier_mask]
-
-            n_source_processed = len(source_pts_pp)
-            metrics_num_inliers = len(inlier_dists)
-            metrics_rmse = float(np.sqrt(np.mean(inlier_dists ** 2))) if len(inlier_dists) > 0 else float('inf')
-            metrics_fitness = metrics_num_inliers / n_source_processed if n_source_processed > 0 else 0.0
-
-            del source_pts_pp, target_pts_pp, source_h, source_transformed, _tree, distances
-            del target_cloud_gicp, target_tree, source_cloud_gicp, source_tree
             gc.collect()
         else:
             gicp_result = small_gicp.align(
@@ -2050,11 +2171,23 @@ class PointCloudPair:
             result.centroid,
         )
 
-        # Load aligned point cloud
+        # Propagate metadata from source instead of re-running from_file()
+        # (avoids an expensive PDAL metadata pipeline on the file we just wrote)
         aligned_pc = PointCloud(output_path)
-        aligned_pc.from_file()
+        aligned_pc.total_points = getattr(source_pc, 'total_points', None)
+        # Bounds are preserved through rigid transformation (rotation + translation)
+        aligned_pc.bounds = getattr(source_pc, 'bounds', None)
+        aligned_pc.minx = getattr(source_pc, 'minx', None)
+        aligned_pc.miny = getattr(source_pc, 'miny', None)
+        aligned_pc.maxx = getattr(source_pc, 'maxx', None)
+        aligned_pc.maxy = getattr(source_pc, 'maxy', None)
+        # Polygon attributes
+        aligned_pc.poly_4326 = getattr(source_pc, 'poly_4326', None)
+        aligned_pc.poly_utm = getattr(source_pc, 'poly_utm', None)
+        aligned_pc.epsg_utm = getattr(source_pc, 'epsg_utm', None)
+        aligned_pc.bbox_4326 = getattr(source_pc, 'bbox_4326', None)
 
-        # Copy metadata from source
+        # CRS metadata via add_metadata (handles compound CRS assembly)
         aligned_pc.add_metadata(
             compound_CRS=source_pc.current_compound_crs or source_pc.original_compound_crs,
             horizontal_CRS=source_pc.current_horizontal_crs or source_pc.original_horizontal_crs,
@@ -2068,6 +2201,16 @@ class PointCloudPair:
         aligned_pc.vertical_unit = source_pc.vertical_unit
         aligned_pc.horizontal_units = source_pc.horizontal_units
         aligned_pc.vertical_units = source_pc.vertical_units
+        # Copy remaining attributes needed by downstream consumers
+        aligned_pc.is_orthometric = getattr(source_pc, 'is_orthometric', None)
+        aligned_pc.geoid_model = getattr(source_pc, 'geoid_model', None)
+        for attr in ('gps_time_mean_raw', 'gps_time_min_raw', 'gps_time_max_raw',
+                      'gps_stddev_raw', 'gps_time_mean', 'gps_time_min',
+                      'gps_time_max', 'gps_stddev', 'decimal_year_mean_utc',
+                      'decimal_year_min_utc', 'decimal_year_max_utc',
+                      'classification', 'class_values', 'class_counts',
+                      'has_ground_class', 'creation_doy', 'creation_year'):
+            setattr(aligned_pc, attr, getattr(source_pc, attr, None))
 
         # Update result dict
         alignment_result['aligned_pc'] = aligned_pc
@@ -2705,7 +2848,7 @@ class PointCloudPair:
                     if verbose:
                         print(f"\n--- Loading existing horizontal-only transform: {horizontal_path.name} ---", file=sys.stderr)
                     self._pc1_horizontal_only = PointCloud(str(horizontal_path))
-                    self._pc1_horizontal_only.from_file()
+                    self._pc1_horizontal_only.from_file(lightweight=True)  # hexbin needed for crop_to_overlap
                 elif needs_horizontal:
                     # Run transformation
                     if verbose:
@@ -2734,7 +2877,7 @@ class PointCloudPair:
                     if verbose:
                         print(f"\n--- Loading existing full transform: {transformed_path.name} ---", file=sys.stderr)
                     self._pc1_transformed = PointCloud(str(transformed_path))
-                    self._pc1_transformed.from_file()
+                    self._pc1_transformed.from_file(lightweight=True)  # hexbin needed for crop_to_overlap
                     # Copy metadata from reference
                     self._pc1_transformed.add_metadata(
                         horizontal_CRS=getattr(self.pc2, 'current_horizontal_crs', None) or getattr(self.pc2, 'original_horizontal_crs', None),
@@ -2772,7 +2915,7 @@ class PointCloudPair:
                     print(f"  PC1: {cropped_path.name}", file=sys.stderr)
                     print(f"  PC2: {pc2_cropped_path.name}", file=sys.stderr)
                 self._pc1_cropped = PointCloud(str(cropped_path))
-                self._pc1_cropped.from_file()
+                self._pc1_cropped.from_file(lightweight=True, bbox_only=True)
                 # Copy metadata from transformed source or reference
                 # For transformed/aligned tiers, epoch should match reference (coordinates are transformed)
                 if is_transformed_tier or is_aligned_tier:
@@ -2784,7 +2927,7 @@ class PointCloudPair:
                     )
                 self._pc1_cropped_original = self._pc1_cropped  # Preserve for later
                 self._pc2_cropped = PointCloud(str(pc2_cropped_path))
-                self._pc2_cropped.from_file()
+                self._pc2_cropped.from_file(lightweight=True, bbox_only=True)
             else:
                 if verbose:
                     print(f"\n--- Auto-preparing: Crop to overlap ---", file=sys.stderr)
@@ -2807,7 +2950,7 @@ class PointCloudPair:
                 if verbose:
                     print(f"\n--- Loading existing aligned cloud: {aligned_path.name} ---", file=sys.stderr)
                 aligned_pc = PointCloud(str(aligned_path))
-                aligned_pc.from_file()
+                aligned_pc.from_file(lightweight=True, bbox_only=True)
                 # Copy metadata from reference (pc2) since aligned cloud coordinates are in reference frame
                 aligned_pc.add_metadata(
                     horizontal_CRS=getattr(self.pc2, 'current_horizontal_crs', None) or getattr(self.pc2, 'original_horizontal_crs', None),

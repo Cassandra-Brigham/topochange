@@ -80,6 +80,14 @@ from .deformation_utils import select_velocity_model
 if TYPE_CHECKING:
     from .raster import Raster
 
+# Module-level cache for pyproj Transformers (avoids repeated PROJ database lookups)
+from functools import lru_cache as _lru_cache
+
+@_lru_cache(maxsize=32)
+def _cached_transformer(src_auth: str, dst_auth: str):
+    """Return a cached Transformer for the given (src, dst) authority pair."""
+    return Transformer.from_crs(src_auth, dst_auth, always_xy=True)
+
 
 def has_rasterio() -> bool:
     try:
@@ -1531,11 +1539,24 @@ class PointCloud:
                 f"No points found within the clip polygon. Output file may be empty."
             )
 
-        # Create new PointCloud from output
+        # Propagate metadata from source instead of re-running from_file()
+        # (avoids an expensive PDAL metadata pipeline on the file we just wrote)
         clipped_pc = PointCloud(str(output_path))
-        clipped_pc.from_file(lightweight=True)
-
-        # Copy metadata from source
+        clipped_pc.total_points = count
+        # Derive bounds from the clip polygon (tighter than re-reading the header)
+        poly_bounds = polygon.bounds if hasattr(polygon, 'bounds') else None
+        if poly_bounds:
+            clipped_pc.minx, clipped_pc.miny = poly_bounds[0], poly_bounds[1]
+            clipped_pc.maxx, clipped_pc.maxy = poly_bounds[2], poly_bounds[3]
+        else:
+            clipped_pc.minx, clipped_pc.miny = self.minx, self.miny
+            clipped_pc.maxx, clipped_pc.maxy = self.maxx, self.maxy
+        clipped_pc.bounds = (clipped_pc.minx, clipped_pc.miny,
+                             clipped_pc.maxx, clipped_pc.maxy)
+        # CRS & datum metadata
+        clipped_pc.original_compound_crs = self.current_compound_crs
+        clipped_pc.original_horizontal_crs = self.current_horizontal_crs
+        clipped_pc.original_vertical_crs = self.current_vertical_crs
         clipped_pc.current_compound_crs = self.current_compound_crs
         clipped_pc.current_horizontal_crs = self.current_horizontal_crs
         clipped_pc.current_vertical_crs = self.current_vertical_crs
@@ -1544,6 +1565,24 @@ class PointCloud:
         clipped_pc.is_orthometric = getattr(self, 'is_orthometric', None)
         clipped_pc.horizontal_unit = self.horizontal_unit
         clipped_pc.vertical_unit = self.vertical_unit
+        clipped_pc.horizontal_units = getattr(self, 'horizontal_units', self.horizontal_unit.display_name)
+        clipped_pc.vertical_units = getattr(self, 'vertical_units', self.vertical_unit.display_name)
+        # Polygon attributes — derive from clip polygon
+        clipped_pc.poly_4326 = getattr(self, 'poly_4326', None)
+        clipped_pc.poly_utm = getattr(self, 'poly_utm', None)
+        clipped_pc.epsg_utm = getattr(self, 'epsg_utm', None)
+        clipped_pc.bbox_4326 = getattr(self, 'bbox_4326', None)
+        # GPS/epoch attributes (not recomputed)
+        for attr in ('gps_time_mean_raw', 'gps_time_min_raw', 'gps_time_max_raw',
+                      'gps_stddev_raw', 'gps_time_mean', 'gps_time_min',
+                      'gps_time_max', 'gps_stddev', 'decimal_year_mean_utc',
+                      'decimal_year_min_utc', 'decimal_year_max_utc'):
+            setattr(clipped_pc, attr, getattr(self, attr, None))
+        # Classification attributes
+        clipped_pc.classification = getattr(self, 'classification', {})
+        clipped_pc.class_values = getattr(self, 'class_values', [])
+        clipped_pc.class_counts = getattr(self, 'class_counts', [])
+        clipped_pc.has_ground_class = getattr(self, 'has_ground_class', False)
 
         return clipped_pc
 

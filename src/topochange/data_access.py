@@ -871,6 +871,12 @@ class GetDEMs:
     def __init__(self, data_access, ot_query):
         self.da = data_access
         self.ot = ot_query
+        # Reusable HTTP session for connection pooling (avoids per-request TLS handshakes)
+        self._session = requests.Session()
+        self._session.headers.update({
+            'User-Agent': 'topochange/1.0',
+            'Accept-Encoding': 'gzip, deflate',
+        })
                           
     # -----------------Raster gap‑fill utility--------------------------
     @staticmethod
@@ -1034,32 +1040,57 @@ class GetDEMs:
             'success': False
         }
         
-        if output_path.exists():
-            logger.info(f"File already exists: {output_path.name}")
-            file_metadata['size_bytes'] = output_path.stat().st_size
-            file_metadata['success'] = True
-            return file_metadata
-        
+        # Check if the file already exists and is complete (or can be resumed)
+        existing_size = output_path.stat().st_size if output_path.exists() else 0
+
         for attempt in range(retry_count):
             try:
-                logger.info(f"Downloading: {url}")
-                response = requests.get(url, stream=True, timeout=30)
+                # Use Range header to resume partial downloads
+                headers = {}
+                if existing_size > 0:
+                    headers['Range'] = f'bytes={existing_size}-'
+
+                logger.info(f"Downloading: {url}" + (f" (resuming from {existing_size:,} bytes)" if existing_size else ""))
+                response = self._session.get(url, stream=True, timeout=30, headers=headers)
+
+                # If server returns 416 Range Not Satisfiable, file is already complete
+                if response.status_code == 416:
+                    logger.info(f"File already complete: {output_path.name}")
+                    file_metadata['size_bytes'] = existing_size
+                    file_metadata['success'] = True
+                    return file_metadata
+
                 response.raise_for_status()
-                
+
+                # Validate existing file against Content-Length for non-resumed downloads
+                if existing_size > 0 and response.status_code == 200:
+                    # Server didn't support Range — check if existing file is complete
+                    content_length = response.headers.get('Content-Length')
+                    if content_length and existing_size >= int(content_length):
+                        logger.info(f"File already exists: {output_path.name}")
+                        file_metadata['size_bytes'] = existing_size
+                        file_metadata['success'] = True
+                        return file_metadata
+                    # Server ignored Range header — need to re-download from scratch
+                    existing_size = 0
+
                 output_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(output_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
+                mode = 'ab' if (existing_size > 0 and response.status_code == 206) else 'wb'
+                with open(output_path, mode) as f:
+                    for chunk in response.iter_content(chunk_size=131072):
                         f.write(chunk)
-                
+
                 file_metadata['download_timestamp'] = datetime.now().isoformat()
                 file_metadata['size_bytes'] = output_path.stat().st_size
                 file_metadata['success'] = True
-                
+
                 logger.info(f"Successfully downloaded: {output_path.name}")
                 return file_metadata
-                
+
             except Exception as e:
                 logger.warning(f"Attempt {attempt + 1} failed for {url}: {e}")
+                # Update existing_size for next resume attempt
+                existing_size = output_path.stat().st_size if output_path.exists() else 0
                 if attempt < retry_count - 1:
                     time.sleep(2 ** attempt)
         
@@ -1087,14 +1118,15 @@ class GetDEMs:
         list
             List of node keys (e.g., "0-0-0-0", "1-0-0-0")
         """
+        from collections import deque
         intersecting_nodes = []
-        
+
         # Start with root node
-        queue = ['0-0-0-0']
+        queue = deque(['0-0-0-0'])
         visited = set()
-        
+
         while queue and len(intersecting_nodes) < max_nodes:
-            node_key = queue.pop(0)
+            node_key = queue.popleft()
             
             if node_key in visited:
                 continue
@@ -1124,7 +1156,7 @@ class GetDEMs:
             hierarchy_url = f"{base_url}/ept-hierarchy/{node_key}.json"
             
             try:
-                response = requests.get(hierarchy_url, timeout=5)
+                response = self._session.get(hierarchy_url, timeout=5)
                 if response.status_code == 200:
                     hierarchy_data = response.json()
                     
@@ -1187,7 +1219,7 @@ class GetDEMs:
         
         try:
             # Get EPT metadata
-            response = requests.get(f"{base_url}/ept.json", timeout=10)
+            response = self._session.get(f"{base_url}/ept.json", timeout=10)
             response.raise_for_status()
             ept_meta = response.json()
             bounds = ept_meta.get('bounds', [])
@@ -1272,22 +1304,22 @@ class GetDEMs:
         stac_url = f"https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/entwine/stac/DigitalCoast_mission_{dataset_id}.json"
         
         try:
-            response = requests.get(stac_url, timeout=10)
+            response = self._session.get(stac_url, timeout=10)
             if response.status_code != 200:
                 logger.error(f"STAC not found for NOAA dataset {dataset_id}")
                 return []
-            
+
             stac_data = response.json()
-            
+
             if 'assets' not in stac_data or 'ept' not in stac_data['assets']:
                 logger.error(f"No EPT asset in STAC for {dataset_id}")
                 return []
-            
+
             ept_url = stac_data['assets']['ept']['href']
             base_url = ept_url.replace('/ept.json', '')
-            
+
             # Get EPT metadata
-            response = requests.get(ept_url, timeout=10)
+            response = self._session.get(ept_url, timeout=10)
             response.raise_for_status()
             ept_meta = response.json()
             bounds = ept_meta.get('bounds', [])
@@ -1379,18 +1411,20 @@ class GetDEMs:
             raise ValueError("AOI polygon not defined")
         
         downloaded_files = []
-        
-        # Setup S3 client for OpenTopography
-        s3_config = Config(
-            signature_version=UNSIGNED,
-            retries={'max_attempts': 3, 'mode': 'standard'},
-            s3={'addressing_style': 'path'}
-        )
-        s3_client = boto3.client(
-            's3', 
-            endpoint_url='https://opentopography.s3.sdsc.edu', 
-            config=s3_config
-        )
+
+        # Reuse or create S3 client for OpenTopography (connection pooling)
+        if not hasattr(self, '_ot_s3_client'):
+            s3_config = Config(
+                signature_version=UNSIGNED,
+                retries={'max_attempts': 3, 'mode': 'standard'},
+                s3={'addressing_style': 'path'}
+            )
+            self._ot_s3_client = boto3.client(
+                's3',
+                endpoint_url='https://opentopography.s3.sdsc.edu',
+                config=s3_config
+            )
+        s3_client = self._ot_s3_client
         
         try:
             # FIRST: Do a targeted search for tile index files at the root level
@@ -2001,7 +2035,7 @@ class GetDEMs:
                 url = f"https://s3-us-west-2.amazonaws.com/usgs-lidar-public/{id}/ept.json"
             elif data_source == 'noaa':
                 stac_url = f"https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/entwine/stac/DigitalCoast_mission_{id}.json"
-                response = requests.get(stac_url)
+                response = self._session.get(stac_url, timeout=10)
                 data = response.json()
                 url = data['assets']['ept']['href']
             else:

@@ -206,6 +206,10 @@ class RegistrationConfig:
     target_points: int = 2_000_000  # Target number of points (increased default for accuracy)
     max_points: Optional[int] = None  # Hard cap on points per cloud
 
+    # === Multi-Resolution Alignment ===
+    multi_resolution: bool = True  # Enable coarse-to-fine multi-resolution alignment
+    resolution_stages: Optional[List[float]] = None  # Custom resolution schedule (coarse→fine); auto if None
+
     # === Coarse Alignment Parameters ===
     perform_coarse_alignment: bool = True  # Enable coarse (centroid) alignment
     use_ground_plane_constraint: bool = True  # Constrain rotation for landscape data

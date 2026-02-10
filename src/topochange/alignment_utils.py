@@ -220,13 +220,13 @@ def load_points_from_las(
         raise RuntimeError(f"No points loaded from {filename}")
 
     # Extract XYZ
-    xyz = np.vstack([arr['X'], arr['Y'], arr['Z']]).T
+    xyz = np.column_stack((arr['X'], arr['Y'], arr['Z']))
 
     if return_colors:
         # Try to extract RGB colors
         try:
             if 'Red' in arr.dtype.names and 'Green' in arr.dtype.names and 'Blue' in arr.dtype.names:
-                rgb = np.vstack([arr['Red'], arr['Green'], arr['Blue']]).T
+                rgb = np.column_stack((arr['Red'], arr['Green'], arr['Blue']))
                 # Normalize to 0-1 if values are 16-bit
                 if rgb.max() > 255:
                     rgb = rgb / 65535.0
@@ -730,6 +730,149 @@ class PointCloudPreprocessor:
         )
 
         return voxel_size
+
+    @classmethod
+    def run_chain(
+        cls,
+        filename: Union[str, Path],
+        output_path: Union[str, Path],
+        *,
+        classifications: Optional[Union[str, List[int], int]] = None,
+        crop_bounds: Optional[Tuple[float, float, float, float]] = None,
+        smrf: bool = False,
+        smrf_params: Optional[Dict] = None,
+        outlier_k: Optional[int] = None,
+        outlier_std: float = 2.0,
+        voxel_size: Optional[float] = None,
+        voxel_mode: str = "center",
+        max_points: Optional[int] = None,
+        streaming: bool = True,
+        chunk_size: int = 1_000_000,
+        overwrite: bool = True,
+    ) -> str:
+        """
+        Apply multiple preprocessing steps in a single PDAL pipeline pass.
+
+        This avoids the intermediate file writes that occur when chaining
+        individual methods (filter_by_classification → filter_outliers →
+        downsample_voxel). All requested filters are composed into one
+        read → filter → … → filter → write pipeline executed in streaming
+        mode.
+
+        Parameters
+        ----------
+        filename : str or Path
+            Input LAS/LAZ file.
+        output_path : str or Path
+            Output LAS/LAZ file.
+        classifications : str, int, or list of int, optional
+            Classification filter (same semantics as filter_by_classification).
+            None or "all" means no classification filtering.
+        crop_bounds : tuple of (minx, miny, maxx, maxy), optional
+            Spatial bounding box for cropping.
+        smrf : bool, default False
+            Apply SMRF ground classification filter.
+        smrf_params : dict, optional
+            Override default SMRF parameters (cell, slope, initial_distance,
+            max_distance, max_window_size).
+        outlier_k : int, optional
+            If provided, apply statistical outlier removal with this many
+            neighbors.
+        outlier_std : float, default 2.0
+            Standard deviation multiplier for outlier threshold.
+        voxel_size : float, optional
+            Voxel size for downsampling. None means no downsampling.
+        voxel_mode : str, default "center"
+            Point selection mode for voxel filter: "center", "first", "last".
+        max_points : int, optional
+            Hard cap on output points (applied last).
+        streaming : bool, default True
+            Use streaming execution for memory efficiency.
+        chunk_size : int, default 1_000_000
+            Chunk size for streaming execution.
+        overwrite : bool, default True
+            Overwrite existing output file.
+
+        Returns
+        -------
+        str
+            Path to the output file.
+        """
+        filename = Path(filename)
+        output_path = Path(output_path)
+
+        if output_path.exists() and not overwrite:
+            logger.info(f"Using existing preprocessed file: {output_path}")
+            return str(output_path)
+
+        steps: List[Dict[str, Any]] = [
+            {"type": "readers.las", "filename": str(filename)}
+        ]
+
+        # 1. Classification filter (early = fewer points for subsequent stages)
+        if classifications and classifications not in ("all", "All"):
+            if classifications in ("ground", "Ground"):
+                limits = "Classification[2:2]"
+            elif isinstance(classifications, int):
+                limits = f"Classification[{classifications}:{classifications}]"
+            elif isinstance(classifications, (list, tuple)):
+                limits = ",".join(f"Classification[{c}:{c}]" for c in classifications)
+            else:
+                raise ValueError(f"Invalid classification filter: {classifications}")
+            steps.append({"type": "filters.range", "limits": limits})
+
+        # 2. Spatial crop
+        if crop_bounds is not None:
+            minx, miny, maxx, maxy = crop_bounds
+            steps.append({
+                "type": "filters.crop",
+                "bounds": f"([{minx},{maxx}],[{miny},{maxy}])",
+            })
+
+        # 3. SMRF ground classification
+        if smrf:
+            params = {
+                "type": "filters.smrf",
+                "cell": 1.0,
+                "slope": 0.15,
+                "initial_distance": 0.15,
+                "max_distance": 2.5,
+                "max_window_size": 18.0,
+            }
+            if smrf_params:
+                params.update(smrf_params)
+            steps.append(params)
+
+        # 4. Statistical outlier removal
+        if outlier_k is not None:
+            steps.append({
+                "type": "filters.outlier",
+                "method": "statistical",
+                "mean_k": int(outlier_k),
+                "multiplier": float(outlier_std),
+            })
+
+        # 5. Voxel downsampling
+        if voxel_size is not None and voxel_size > 0:
+            steps.append({
+                "type": "filters.voxeldownsize",
+                "cell": float(voxel_size),
+                "mode": voxel_mode,
+            })
+
+        # 6. Point limit (last)
+        if max_points is not None and max_points > 0:
+            steps.append({"type": "filters.head", "count": int(max_points)})
+
+        # Writer
+        steps.append({"type": "writers.las", "filename": str(output_path)})
+
+        run_pdal_pipeline(
+            steps, need_arrays=False, streaming=streaming, chunk_size=chunk_size
+        )
+
+        logger.info(f"Preprocessed point cloud saved to {output_path}")
+        return str(output_path)
 
 
 # ============================================================================
