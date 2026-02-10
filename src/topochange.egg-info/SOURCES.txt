@@ -36,3 +36,4 @@ tests/test_dem_creation.py
 tests/test_option1_integration.py
 tests/test_pointcloud_metadata.py
 tests/test_pointcloud_transformation.py
+tests/test_variogram_models.py

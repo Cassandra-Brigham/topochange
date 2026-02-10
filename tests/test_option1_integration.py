@@ -1,23 +1,19 @@
 """
 Integration tests for complete Option 1 workflow from my_implementation.ipynb
 Tests the full pipeline: metadata -> transformation -> alignment -> DEM creation
+Uses synthetic LAZ data from conftest fixtures.
 """
 
 import pytest
 import os
 import tempfile
-from pathlib import Path
 import numpy as np
 from topochange import PointCloud, PointCloudPair, RasterPair
+from skip_markers import requires_pdal, requires_small_gicp
 
 
 class TestOption1CompleteWorkflow:
     """Integration test for the complete Option 1 workflow"""
-
-    @pytest.fixture
-    def test_data_dir(self):
-        """Return path to test data directory"""
-        return Path(__file__).parent.parent / "test_data"
 
     @pytest.fixture
     def output_dir(self):
@@ -25,7 +21,9 @@ class TestOption1CompleteWorkflow:
         with tempfile.TemporaryDirectory() as tmpdir:
             yield tmpdir
 
-    def test_full_workflow_without_velocity(self, test_data_dir, output_dir):
+    @requires_pdal
+    @requires_small_gicp
+    def test_full_workflow_without_velocity(self, compare_pc, reference_pc, output_dir):
         """
         Test the complete workflow from Option 1:
         1. Load point clouds
@@ -35,18 +33,9 @@ class TestOption1CompleteWorkflow:
         5. Create DEMs
         6. Verify DEM properties
         """
-        # Step 1: Load point clouds
-        compare_path = test_data_dir / "compare.laz"
-        reference_path = test_data_dir / "reference.laz"
-
-        if not compare_path.exists() or not reference_path.exists():
-            pytest.skip("Test data not found")
-
-        pc1 = PointCloud(str(compare_path))
-        pc1.from_file()
-
-        pc2 = PointCloud(str(reference_path))
-        pc2.from_file()
+        # Step 1: Point clouds already loaded via fixtures
+        pc1 = compare_pc
+        pc2 = reference_pc
 
         # Verify point clouds loaded
         assert pc1 is not None
@@ -132,22 +121,11 @@ class TestOption1CompleteWorkflow:
 class TestOption1WorkflowStepByStep:
     """Test each step of Option 1 workflow independently"""
 
-    @pytest.fixture
-    def test_data_dir(self):
-        """Return path to test data directory"""
-        return Path(__file__).parent.parent / "test_data"
-
-    def test_step1_load_and_metadata(self, test_data_dir):
+    @requires_pdal
+    def test_step1_load_and_metadata(self, compare_pc, reference_pc):
         """Test Step 1: Load point clouds and update metadata"""
-        compare_path = test_data_dir / "compare.laz"
-        reference_path = test_data_dir / "reference.laz"
-
-        if not compare_path.exists() or not reference_path.exists():
-            pytest.skip("Test data not found")
-
         # Load compare point cloud
-        pc1 = PointCloud(str(compare_path))
-        pc1.from_file()
+        pc1 = compare_pc
 
         # Update compare metadata
         pc1.add_metadata(
@@ -156,8 +134,7 @@ class TestOption1WorkflowStepByStep:
         )
 
         # Load reference point cloud
-        pc2 = PointCloud(str(reference_path))
-        pc2.from_file()
+        pc2 = reference_pc
 
         # Update reference metadata
         pc2.add_metadata(
@@ -173,20 +150,13 @@ class TestOption1WorkflowStepByStep:
         assert pc2.geoid_model is not None
         assert pc2.epoch is not None
 
-    def test_step2_create_pair_and_transform(self, test_data_dir):
+    @requires_pdal
+    def test_step2_create_pair_and_transform(self, compare_pc, reference_pc):
         """Test Step 2: Create pair and transform"""
-        compare_path = test_data_dir / "compare.laz"
-        reference_path = test_data_dir / "reference.laz"
-
-        if not compare_path.exists() or not reference_path.exists():
-            pytest.skip("Test data not found")
-
-        pc1 = PointCloud(str(compare_path))
-        pc1.from_file()
+        pc1 = compare_pc
         pc1.add_metadata(compound_CRS="EPSG:4979")
 
-        pc2 = PointCloud(str(reference_path))
-        pc2.from_file()
+        pc2 = reference_pc
         pc2.add_metadata(vertical_CRS="EPSG:5703")
 
         # Create pair
@@ -203,19 +173,12 @@ class TestOption1WorkflowStepByStep:
         except Exception as e:
             pytest.fail(f"Transformation failed: {e}")
 
-    def test_step3_alignment(self, test_data_dir):
+    @requires_pdal
+    @requires_small_gicp
+    def test_step3_alignment(self, compare_pc, reference_pc):
         """Test Step 3: Align point clouds"""
-        compare_path = test_data_dir / "compare.laz"
-        reference_path = test_data_dir / "reference.laz"
-
-        if not compare_path.exists() or not reference_path.exists():
-            pytest.skip("Test data not found")
-
-        pc1 = PointCloud(str(compare_path))
-        pc1.from_file()
-
-        pc2 = PointCloud(str(reference_path))
-        pc2.from_file()
+        pc1 = compare_pc
+        pc2 = reference_pc
 
         pc_pair = PointCloudPair(pc1, pc2)
 
@@ -238,19 +201,12 @@ class TestOption1WorkflowStepByStep:
         except ImportError as e:
             pytest.skip(f"small_gicp not available: {e}")
 
-    def test_step4_dem_creation(self, test_data_dir):
+    @requires_pdal
+    @requires_small_gicp
+    def test_step4_dem_creation(self, compare_pc, reference_pc):
         """Test Step 4: Create DEMs from aligned clouds"""
-        compare_path = test_data_dir / "compare.laz"
-        reference_path = test_data_dir / "reference.laz"
-
-        if not compare_path.exists() or not reference_path.exists():
-            pytest.skip("Test data not found")
-
-        pc1 = PointCloud(str(compare_path))
-        pc1.from_file()
-
-        pc2 = PointCloud(str(reference_path))
-        pc2.from_file()
+        pc1 = compare_pc
+        pc2 = reference_pc
 
         pc_pair = PointCloudPair(pc1, pc2)
 
@@ -288,24 +244,11 @@ class TestOption1WorkflowStepByStep:
 class TestOption1ErrorHandling:
     """Test error handling in Option 1 workflow"""
 
-    @pytest.fixture
-    def test_data_dir(self):
-        """Return path to test data directory"""
-        return Path(__file__).parent.parent / "test_data"
-
-    def test_missing_metadata_handling(self, test_data_dir):
+    @requires_pdal
+    def test_missing_metadata_handling(self, compare_pc, reference_pc):
         """Test that workflow handles missing metadata gracefully"""
-        compare_path = test_data_dir / "compare.laz"
-        reference_path = test_data_dir / "reference.laz"
-
-        if not compare_path.exists() or not reference_path.exists():
-            pytest.skip("Test data not found")
-
-        pc1 = PointCloud(str(compare_path))
-        pc1.from_file()
-
-        pc2 = PointCloud(str(reference_path))
-        pc2.from_file()
+        pc1 = compare_pc
+        pc2 = reference_pc
 
         # Create pair without updating metadata
         pc_pair = PointCloudPair(pc1, pc2)
@@ -313,15 +256,10 @@ class TestOption1ErrorHandling:
         # Should still be able to create pair
         assert pc_pair is not None
 
-    def test_invalid_crs_handling(self, test_data_dir):
+    @requires_pdal
+    def test_invalid_crs_handling(self, compare_pc):
         """Test handling of invalid CRS values"""
-        compare_path = test_data_dir / "compare.laz"
-
-        if not compare_path.exists():
-            pytest.skip("Test data not found")
-
-        pc = PointCloud(str(compare_path))
-        pc.from_file()
+        pc = compare_pc
 
         # Try to set invalid CRS - should handle gracefully
         try:
@@ -335,29 +273,17 @@ class TestOption1ErrorHandling:
 class TestOption1Performance:
     """Performance tests for Option 1 workflow"""
 
-    @pytest.fixture
-    def test_data_dir(self):
-        """Return path to test data directory"""
-        return Path(__file__).parent.parent / "test_data"
-
-    def test_workflow_completes_in_reasonable_time(self, test_data_dir):
+    @requires_pdal
+    @requires_small_gicp
+    def test_workflow_completes_in_reasonable_time(self, compare_pc, reference_pc):
         """Test that workflow completes without hanging"""
         import time
-
-        compare_path = test_data_dir / "compare.laz"
-        reference_path = test_data_dir / "reference.laz"
-
-        if not compare_path.exists() or not reference_path.exists():
-            pytest.skip("Test data not found")
 
         start_time = time.time()
 
         try:
-            pc1 = PointCloud(str(compare_path))
-            pc1.from_file()
-
-            pc2 = PointCloud(str(reference_path))
-            pc2.from_file()
+            pc1 = compare_pc
+            pc2 = reference_pc
 
             pc1.add_metadata(compound_CRS="EPSG:4979")
             pc2.add_metadata(vertical_CRS="EPSG:5703")
@@ -386,7 +312,3 @@ class TestOption1Performance:
 
         except ImportError as e:
             pytest.skip(f"Required dependencies not available: {e}")
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

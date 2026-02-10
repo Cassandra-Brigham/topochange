@@ -1,39 +1,23 @@
 """
 Tests for DEM creation from aligned point clouds (Option 1 workflow)
+Uses synthetic LAZ data from conftest fixtures.
 """
 
 import pytest
 import os
 import tempfile
-from pathlib import Path
 import numpy as np
 from topochange import PointCloud, PointCloudPair, Raster
+from skip_markers import requires_pdal, requires_small_gicp
 
 
 class TestDEMCreation:
     """Tests for creating DEMs from point cloud pairs"""
 
     @pytest.fixture
-    def test_data_dir(self):
-        """Return path to test data directory"""
-        return Path(__file__).parent.parent / "test_data"
-
-    @pytest.fixture
-    def aligned_pc_pair(self, test_data_dir):
+    def aligned_pc_pair(self, compare_pc, reference_pc):
         """Create an aligned PointCloudPair for testing"""
-        compare_path = test_data_dir / "compare.laz"
-        reference_path = test_data_dir / "reference.laz"
-
-        if not compare_path.exists() or not reference_path.exists():
-            pytest.skip("Test data not found")
-
-        pc1 = PointCloud(str(compare_path))
-        pc1.from_file()
-
-        pc2 = PointCloud(str(reference_path))
-        pc2.from_file()
-
-        pc_pair = PointCloudPair(pc1, pc2)
+        pc_pair = PointCloudPair(compare_pc, reference_pc)
 
         # Transform and align
         try:
@@ -48,6 +32,8 @@ class TestDEMCreation:
 
         return pc_pair
 
+    @requires_pdal
+    @requires_small_gicp
     def test_create_dtm_pair(self, aligned_pc_pair):
         """Test creating DTM pair from aligned point clouds"""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -70,6 +56,8 @@ class TestDEMCreation:
             assert os.path.exists(dem1.filename)
             assert os.path.exists(dem2.filename)
 
+    @requires_pdal
+    @requires_small_gicp
     def test_dem_resolution(self, aligned_pc_pair):
         """Test DEM creation with specified resolution"""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -88,26 +76,9 @@ class TestDEMProperties:
     """Tests for DEM properties and metadata"""
 
     @pytest.fixture
-    def test_data_dir(self):
-        """Return path to test data directory"""
-        return Path(__file__).parent.parent / "test_data"
-
-    @pytest.fixture
-    def test_dems(self, test_data_dir):
+    def test_dems(self, compare_pc, reference_pc):
         """Create test DEMs"""
-        compare_path = test_data_dir / "compare.laz"
-        reference_path = test_data_dir / "reference.laz"
-
-        if not compare_path.exists() or not reference_path.exists():
-            pytest.skip("Test data not found")
-
-        pc1 = PointCloud(str(compare_path))
-        pc1.from_file()
-
-        pc2 = PointCloud(str(reference_path))
-        pc2.from_file()
-
-        pc_pair = PointCloudPair(pc1, pc2)
+        pc_pair = PointCloudPair(compare_pc, reference_pc)
 
         try:
             pc_pair.transform_compare_to_match_reference(skip_epoch=True, verbose=False)
@@ -128,6 +99,8 @@ class TestDEMProperties:
         except ImportError as e:
             pytest.skip(f"Required dependencies not available: {e}")
 
+    @requires_pdal
+    @requires_small_gicp
     def test_dem_units(self, test_dems):
         """Test checking and setting DEM units"""
         dem1, dem2 = test_dems
@@ -143,7 +116,3 @@ class TestDEMProperties:
         # Check that units were set
         assert dem1.vertical_unit == "meter"
         assert dem2.vertical_unit == "meter"
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
