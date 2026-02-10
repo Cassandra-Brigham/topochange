@@ -32,8 +32,15 @@ src/topochange.egg-info/requires.txt
 src/topochange.egg-info/top_level.txt
 src/topochange/data/velocity_models_registry.yaml
 tests/test_alignment.py
+tests/test_composite_variogram.py
+tests/test_crs_utils.py
+tests/test_data_access_pipelines.py
 tests/test_dem_creation.py
 tests/test_option1_integration.py
 tests/test_pointcloud_metadata.py
 tests/test_pointcloud_transformation.py
+tests/test_raster_and_rasterpair.py
+tests/test_uncertainty.py
+tests/test_utils.py
+tests/test_variogram_analysis.py
 tests/test_variogram_models.py
