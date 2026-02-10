@@ -23,6 +23,8 @@ from topochange.crs_utils import (
     vertical_unit_scale,
     apply_vertical_datum_transform,
     apply_dynamic_transform,
+    vertical_datum_to_crs,
+    build_output_crs_wkt,
 )
 
 
@@ -932,3 +934,121 @@ class TestEdgeCasesAndErrorHandling:
             src_epoch=None, dst_epoch=None
         )
         assert isinstance(transformer, Transformer)
+
+
+# ==============================================================================
+# Tests for vertical_datum_to_crs
+# ==============================================================================
+
+class TestVerticalDatumToCrs:
+    """Tests for vertical datum name → pyproj CRS mapping."""
+
+    def test_navd88_returns_5703(self):
+        """NAVD88 maps to EPSG:5703 (NAVD88 height)."""
+        crs = vertical_datum_to_crs("NAVD88")
+        assert crs is not None
+        assert crs.to_epsg() == 5703
+
+    def test_navd88_case_insensitive(self):
+        """Lookup is case-insensitive."""
+        crs = vertical_datum_to_crs("navd88")
+        assert crs is not None
+        assert crs.to_epsg() == 5703
+
+    def test_ngvd29_returns_5702(self):
+        """NGVD29 maps to EPSG:5702."""
+        crs = vertical_datum_to_crs("NGVD29")
+        assert crs is not None
+        assert crs.to_epsg() == 5702
+
+    def test_egm96_returns_5773(self):
+        """EGM96 datum maps to EPSG:5773."""
+        crs = vertical_datum_to_crs("EGM96")
+        assert crs is not None
+        assert crs.to_epsg() == 5773
+
+    def test_egm2008_returns_3855(self):
+        """EGM2008 datum maps to EPSG:3855."""
+        crs = vertical_datum_to_crs("EGM2008")
+        assert crs is not None
+        assert crs.to_epsg() == 3855
+
+    def test_ellipsoidal_returns_none(self):
+        """Ellipsoidal height has no orthometric CRS mapping."""
+        assert vertical_datum_to_crs("ellipsoidal") is None
+
+    def test_none_datum_none_geoid_returns_none(self):
+        """Both None → None."""
+        assert vertical_datum_to_crs(None, None) is None
+
+    def test_geoid_model_navd88_realization(self):
+        """Known NAVD88 geoid realizations map to EPSG:5703."""
+        for geoid in ("geoid09", "geoid12b", "geoid18"):
+            crs = vertical_datum_to_crs(None, geoid)
+            assert crs is not None, f"Failed for {geoid}"
+            assert crs.to_epsg() == 5703, f"Wrong EPSG for {geoid}"
+
+    def test_geoid_model_egm96(self):
+        """EGM96 geoid model maps correctly via fallback."""
+        crs = vertical_datum_to_crs(None, "egm96")
+        assert crs is not None
+        assert crs.to_epsg() == 5773
+
+    def test_unknown_datum_returns_none(self):
+        """Unrecognized datum returns None."""
+        assert vertical_datum_to_crs("SOMETHING_UNKNOWN") is None
+
+    def test_datum_takes_precedence_over_geoid(self):
+        """When datum is known, it is used even if geoid is also provided."""
+        crs = vertical_datum_to_crs("NAVD88", "geoid18")
+        assert crs.to_epsg() == 5703
+
+
+# ==============================================================================
+# Tests for build_output_crs_wkt
+# ==============================================================================
+
+class TestBuildOutputCrsWkt:
+    """Tests for compound + epoch WKT2 builder."""
+
+    def test_horizontal_only(self):
+        """Horizontal CRS only produces a valid WKT string."""
+        wkt = build_output_crs_wkt("EPSG:32610")
+        # Should be a valid projected CRS WKT2
+        crs = CRS.from_wkt(wkt)
+        assert crs.to_epsg() == 32610
+
+    def test_horizontal_plus_vertical(self):
+        """Horizontal + vertical produces a compound CRS WKT."""
+        wkt = build_output_crs_wkt("EPSG:32610", "EPSG:5703")
+        assert "COMPOUNDCRS" in wkt
+        crs = CRS.from_wkt(wkt)
+        assert crs.is_compound
+
+    def test_with_epoch_only(self):
+        """Epoch wraps the CRS in COORDINATEMETADATA."""
+        wkt = build_output_crs_wkt("EPSG:32610", epoch=2020.5)
+        assert "COORDINATEMETADATA" in wkt
+        assert "EPOCH" in wkt
+        assert "2020.5" in wkt
+
+    def test_compound_with_epoch(self):
+        """Compound CRS + epoch produces full COORDINATEMETADATA wrapper."""
+        wkt = build_output_crs_wkt("EPSG:32613", "EPSG:5703", 2011.726)
+        assert "COORDINATEMETADATA" in wkt
+        assert "COMPOUNDCRS" in wkt
+        assert "EPOCH" in wkt
+        assert "2011.726" in wkt
+
+    def test_no_epoch_no_vertical(self):
+        """Without vertical or epoch, returns plain WKT2:2019."""
+        wkt = build_output_crs_wkt("EPSG:32610")
+        assert "COORDINATEMETADATA" not in wkt
+        assert "COMPOUNDCRS" not in wkt
+
+    def test_accepts_crs_object(self):
+        """Accepts pyproj.CRS objects as input."""
+        horiz = CRS.from_epsg(32610)
+        vert = CRS.from_epsg(5703)
+        wkt = build_output_crs_wkt(horiz, vert)
+        assert "COMPOUNDCRS" in wkt

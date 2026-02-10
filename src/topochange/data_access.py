@@ -1702,7 +1702,7 @@ class GetDEMs:
         }
 
     @staticmethod
-    def _writer_las(name, ext):
+    def _writer_las(name, ext, a_srs=None):
         """
         Construct a PDAL LAS/LAZ writer stage for saving point clouds.
 
@@ -1713,6 +1713,10 @@ class GetDEMs:
         ext : {'las', 'laz'}
             Desired output format.  ``'las'`` produces an uncompressed LAS
             file while ``'laz'`` triggers LASzip compression.
+        a_srs : str or None, optional
+            WKT2 CRS string to assign to the output file header via
+            PDAL's ``a_srs`` option.  When ``None`` (default), PDAL
+            infers the CRS from preceding pipeline stages.
 
         Returns
         -------
@@ -1729,12 +1733,14 @@ class GetDEMs:
         w = {"type": "writers.las", "filename": f"{name}.{ext}"}
         if ext == "laz":
             w["compression"] = "laszip"
+        if a_srs is not None:
+            w["a_srs"] = a_srs
         return w
 
     # ----------------------- Local file pipelines ---------------------
     @staticmethod
-    def build_pdal_pipeline_from_file(filename, extent, filterNoise=False, reclassify=False, savePointCloud=True, outCRS='EPSG:3857', 
-                            pc_outName='filter_test', pc_outType='laz'):
+    def build_pdal_pipeline_from_file(filename, extent, filterNoise=False, reclassify=False, savePointCloud=True, outCRS='EPSG:3857',
+                            pc_outName='filter_test', pc_outType='laz', output_crs_wkt=None):
         """
         Construct a PDAL pipeline to read, optionally filter/reclassify, and
         reproject a local point cloud.
@@ -1768,6 +1774,10 @@ class GetDEMs:
             Base filename used when saving the filtered point cloud.
         pc_outType : {'las', 'laz'}, default 'laz'
             File format for the output point cloud.
+        output_crs_wkt : str or None, optional
+            WKT2 CRS string to assign to the output file header via
+            PDAL's ``a_srs`` option.  When ``None`` (default), PDAL
+            infers the CRS from the reprojection stage.
 
         Returns
         -------
@@ -1786,14 +1796,14 @@ class GetDEMs:
                 "polygon": extent.wkt
             }
         ]
-        
+
         # Optionally add a noise filter stage
         if filterNoise:
             pointcloud_pipeline.append({
                 "type": "filters.range",
                 "limits": "Classification![7:7], Classification![18:18]"
             })
-        
+
         # Optionally add reclassification stages
         if reclassify:
             pointcloud_pipeline += [
@@ -1801,33 +1811,35 @@ class GetDEMs:
                 {"type": "filters.smrf"},
                 {"type": "filters.range", "limits": "Classification[2:2]"}
             ]
-        
+
         # Add reprojection stage
         pointcloud_pipeline.append({
             "type": "filters.reprojection",
             "out_srs": outCRS,
         })
-        
+
         # Optionally add a save point cloud stage
         if savePointCloud:
             if pc_outType not in ['las', 'laz']:
                 raise Exception("pc_outType must be 'las' or 'laz'.")
-            
+
             writer_stage = {
                 "type": "writers.las",
                 "filename": f"{pc_outName}.{pc_outType}"
             }
             if pc_outType == 'laz':
                 writer_stage["compression"] = "laszip"
-            
+            if output_crs_wkt is not None:
+                writer_stage["a_srs"] = output_crs_wkt
+
             pointcloud_pipeline.append(writer_stage)
-            
+
         return pointcloud_pipeline
     
     def make_DEM_pipeline_from_file(self, filename, extent, dem_resolution,
                         filterNoise=True, reclassify=False, savePointCloud=False, outCRS='EPSG:3857',
-                        pc_outName='filter_test', pc_outType='laz', demType='dtm', gridMethod='idw', 
-                        dem_outName='dem_test', dem_outExt='tif', driver="GTiff"):
+                        pc_outName='filter_test', pc_outType='laz', demType='dtm', gridMethod='idw',
+                        dem_outName='dem_test', dem_outExt='tif', driver="GTiff", output_crs_wkt=None):
         """
         Build a PDAL pipeline to convert a local point cloud into a DEM.
 
@@ -1875,7 +1887,7 @@ class GetDEMs:
             A PDAL pipeline dictionary describing the steps to generate the DEM.
         """
         # Build the base point cloud pipeline using the provided parameters
-        pointcloud_pipeline = self.build_pdal_pipeline_from_file(filename, extent, filterNoise, reclassify, savePointCloud, outCRS, pc_outName, pc_outType)
+        pointcloud_pipeline = self.build_pdal_pipeline_from_file(filename, extent, filterNoise, reclassify, savePointCloud, outCRS, pc_outName, pc_outType, output_crs_wkt=output_crs_wkt)
         
         # Prepare the base pipeline dictionary
         dem_pipeline = {
@@ -1924,8 +1936,8 @@ class GetDEMs:
     # ----------------------- AWS EPT pipeline helpers -----------------
     @staticmethod
     def build_aws_pdal_pipeline(extent_epsg3857, property_ids, pc_resolution, data_source, filterNoise = False,
-                            reclassify = False, savePointCloud = True, outCRS = 'EPSG:3857', pc_outName = 'filter_test', 
-                            pc_outType = 'laz'):
+                            reclassify = False, savePointCloud = True, outCRS = 'EPSG:3857', pc_outName = 'filter_test',
+                            pc_outType = 'laz', output_crs_wkt=None):
         """
         Build a PDAL pipeline for downloading and processing AWS-hosted EPT data.
 
@@ -2035,13 +2047,13 @@ class GetDEMs:
         pointcloud_pipeline['pipeline'].append(reprojection_stage)
         
         if savePointCloud == True:
-            
+
             if pc_outType == 'las':
                 savePC_stage = {
                     "type": "writers.las",
                     "filename": str(pc_outName)+'.'+ str(pc_outType),
                 }
-            elif pc_outType == 'laz':    
+            elif pc_outType == 'laz':
                 savePC_stage = {
                     "type": "writers.las",
                     "compression": "laszip",
@@ -2050,6 +2062,10 @@ class GetDEMs:
             else:
                 raise Exception("pc_outType must be 'las' or 'laz'.")
 
+            # Assign explicit CRS to the output file header
+            if output_crs_wkt is not None:
+                savePC_stage["a_srs"] = output_crs_wkt
+
             pointcloud_pipeline['pipeline'].append(savePC_stage)
             
         return pointcloud_pipeline
@@ -2057,7 +2073,7 @@ class GetDEMs:
     def make_DEM_pipeline_aws(self, extent_epsg3857, property_ids, pc_resolution, dem_resolution, data_source = "usgs",
                         filterNoise = True, reclassify = True, savePointCloud = False, outCRS = 'EPSG:3857',
                         pc_outName = 'filter_test', pc_outType = 'laz', demType = 'dtm', gridMethod = 'idw',
-                        dem_outName = 'dem_test', dem_outExt = 'tif', driver = "GTiff"):
+                        dem_outName = 'dem_test', dem_outExt = 'tif', driver = "GTiff", output_crs_wkt=None):
         """Build a PDAL pipeline to create a DEM from AWS-hosted point cloud data.
 
         This method wraps :func:`build_aws_pdal_pipeline` and appends additional
@@ -2108,7 +2124,8 @@ class GetDEMs:
         """
 
         dem_pipeline = self.build_aws_pdal_pipeline(extent_epsg3857, property_ids, pc_resolution, data_source,
-                                                filterNoise, reclassify, savePointCloud, outCRS, pc_outName, pc_outType)
+                                                filterNoise, reclassify, savePointCloud, outCRS, pc_outName, pc_outType,
+                                                output_crs_wkt=output_crs_wkt)
         
         
         if demType == 'dsm':
@@ -2315,27 +2332,37 @@ class GetDEMs:
             raise ValueError("dataset_type must be either 'compare' or 'reference'")
 
         if outCRS == "WGS84 UTM":
-            base_crs = CRS.from_epsg(dataset_crs_)
+            horiz_crs = CRS.from_epsg(dataset_crs_)
         else:
-            base_crs = CRS.from_user_input(outCRS)
+            horiz_crs = CRS.from_user_input(outCRS)
 
-        # Create a new CRS definition with the epoch
+        # Build compound CRS (horizontal + vertical) with optional epoch
+        # using proper WKT2:2019 instead of PROJ4 strings.
+        from topochange.crs_utils import vertical_datum_to_crs, build_output_crs_wkt
+
+        metadata = self.ot.get_metadata_dict(dataset_type)
+        vert_crs = vertical_datum_to_crs(
+            metadata.get("vertical_datum"), metadata.get("geoid_model")
+        )
+
+        epoch_decimal = None
         if epoch:
             try:
-                # Convert the base CRS to a PROJ string
-                proj_string = base_crs.to_proj4()
-                # Calculate the epoch as a decimal year
-                decimal_year = epoch.year + (epoch.timetuple().tm_yday - 1) / 365.25
-                # Append the epoch parameter to the PROJ string
-                final_out_crs_wkt = f"{proj_string} +epoch={decimal_year:.4f}"
-                print(f"✔️ Using epoch {epoch} for {dataset_type} dataset via PROJ string.")
+                epoch_decimal = epoch.year + (epoch.timetuple().tm_yday - 1) / 365.25
+                logger.info(f"Using epoch {epoch} ({epoch_decimal:.4f}) for {dataset_type} dataset.")
             except Exception as e:
-                warnings.warn(f"Could not convert CRS to PROJ string to add epoch: {e}. Proceeding without epoch.")
-                final_out_crs_wkt = base_crs.to_wkt()
+                warnings.warn(f"Could not calculate epoch: {e}")
         else:
-            final_out_crs_wkt = base_crs.to_wkt()
-            print(f"⚠️ No epoch provided for {dataset_type} dataset.")
-        
+            logger.info(f"No epoch provided for {dataset_type} dataset.")
+
+        try:
+            final_out_crs_wkt = build_output_crs_wkt(horiz_crs, vert_crs, epoch_decimal)
+        except Exception as e:
+            warnings.warn(
+                f"Could not build compound CRS: {e}. Using horizontal CRS only."
+            )
+            final_out_crs_wkt = horiz_crs.to_wkt()
+
         if data_source_ == 'ot':
             # Download OpenTopography data via S3 (no Enterprise API key required)
             # This uses the publicly accessible S3 bucket at opentopography.s3.sdsc.edu
@@ -2780,12 +2807,16 @@ class GetDEMs:
                 # Merge tiles into a single LAZ file using PDAL
                 merged_laz = folder + output_name + '_' + dataset_type + '_merged.laz'
                 
+                merge_writer = {"type": "writers.las", "filename": merged_laz}
+                if final_out_crs_wkt:
+                    merge_writer["a_srs"] = final_out_crs_wkt
+
                 merge_pipeline = {
                     "pipeline": [
                         {"type": "readers.las", "filename": f} for f in downloaded_laz_files
                     ] + [
                         {"type": "filters.merge"},
-                        {"type": "writers.las", "filename": merged_laz}
+                        merge_writer
                     ]
                 }
                 
@@ -2798,10 +2829,11 @@ class GetDEMs:
             # Create DTM
             ot_dtm_pipeline = self.make_DEM_pipeline_from_file(
                 input_laz, bounds_polygon_epsg_initial_crs, dem_resolution,
-                filterNoise=filterNoise, reclassify=reclassify, savePointCloud=savePointCloud, 
+                filterNoise=filterNoise, reclassify=reclassify, savePointCloud=savePointCloud,
                 outCRS=final_out_crs_wkt,
-                pc_outName=folder+output_name, pc_outType='laz', demType='dtm', gridMethod='idw', 
-                dem_outName=folder+output_name+'_'+dataset_type+'_DTM', dem_outExt='tif', driver="GTiff"
+                pc_outName=folder+output_name, pc_outType='laz', demType='dtm', gridMethod='idw',
+                dem_outName=folder+output_name+'_'+dataset_type+'_DTM', dem_outExt='tif', driver="GTiff",
+                output_crs_wkt=final_out_crs_wkt
             )
             ot_dtm_pipeline = pdal.Pipeline(json.dumps(ot_dtm_pipeline))
             ot_dtm_pipeline.execute_streaming(chunk_size=1000000)
@@ -2812,10 +2844,11 @@ class GetDEMs:
             # Create DSM
             ot_dsm_pipeline = self.make_DEM_pipeline_from_file(
                 input_laz, bounds_polygon_epsg_initial_crs, dem_resolution,
-                filterNoise=filterNoise, reclassify=reclassify, savePointCloud=savePointCloud, 
+                filterNoise=filterNoise, reclassify=reclassify, savePointCloud=savePointCloud,
                 outCRS=final_out_crs_wkt,
-                pc_outName=folder+output_name, pc_outType='laz', demType='dsm', gridMethod='max', 
-                dem_outName=folder+output_name+'_'+dataset_type+'_DSM', dem_outExt='tif', driver="GTiff"
+                pc_outName=folder+output_name, pc_outType='laz', demType='dsm', gridMethod='max',
+                dem_outName=folder+output_name+'_'+dataset_type+'_DSM', dem_outExt='tif', driver="GTiff",
+                output_crs_wkt=final_out_crs_wkt
             )
             ot_dsm_pipeline = pdal.Pipeline(json.dumps(ot_dsm_pipeline))
             ot_dsm_pipeline.execute_streaming(chunk_size=1000000)
@@ -2826,18 +2859,20 @@ class GetDEMs:
         elif data_source_ == "usgs":
             usgs_dtm_pipeline = self.make_DEM_pipeline_aws(bounds_polygon_epsg_initial_crs, [dataset_id], pc_resolution, dem_resolution, data_source = "usgs",
                     filterNoise = False, reclassify = False, savePointCloud = False, outCRS = final_out_crs_wkt,
-                    pc_outName = folder+output_name+'_'+dataset_type, pc_outType = 'laz', demType = 'dtm', gridMethod = 'idw', 
-                    dem_outName = folder+output_name+'_'+dataset_type+'_DTM', dem_outExt = 'tif', driver = "GTiff")
+                    pc_outName = folder+output_name+'_'+dataset_type, pc_outType = 'laz', demType = 'dtm', gridMethod = 'idw',
+                    dem_outName = folder+output_name+'_'+dataset_type+'_DTM', dem_outExt = 'tif', driver = "GTiff",
+                    output_crs_wkt=final_out_crs_wkt)
 
             usgs_dtm_pipeline = pdal.Pipeline(json.dumps(usgs_dtm_pipeline))
             usgs_dtm_pipeline.execute_streaming(chunk_size=1000000)
             dtm_path = folder+output_name+'_'+dataset_type+'_DTM.tif'
             self.cleanup_raster_nodata(dtm_path, nodata=nodata)
-            
+
             usgs_dsm_pipeline = self.make_DEM_pipeline_aws(bounds_polygon_epsg_initial_crs, [dataset_id], pc_resolution, dem_resolution, data_source = "usgs",
                             filterNoise = False, reclassify = False, savePointCloud = False, outCRS = final_out_crs_wkt,
-                            pc_outName = folder+output_name+'_'+dataset_type, pc_outType = 'laz', demType = 'dsm', gridMethod = 'max', 
-                            dem_outName = folder+output_name+'_'+dataset_type+'_DSM', dem_outExt = 'tif', driver = "GTiff")
+                            pc_outName = folder+output_name+'_'+dataset_type, pc_outType = 'laz', demType = 'dsm', gridMethod = 'max',
+                            dem_outName = folder+output_name+'_'+dataset_type+'_DSM', dem_outExt = 'tif', driver = "GTiff",
+                            output_crs_wkt=final_out_crs_wkt)
 
             usgs_dsm_pipeline = pdal.Pipeline(json.dumps(usgs_dsm_pipeline))
             usgs_dsm_pipeline.execute_streaming(chunk_size=1000000)
@@ -2847,18 +2882,20 @@ class GetDEMs:
         elif data_source_ == "noaa":
             noaa_dtm_pipeline = self.make_DEM_pipeline_aws(bounds_polygon_epsg_initial_crs, [dataset_id], pc_resolution, dem_resolution, data_source = "noaa",
                     filterNoise = False, reclassify = False, savePointCloud = False, outCRS = final_out_crs_wkt,
-                    pc_outName = folder+output_name+'_'+dataset_type, pc_outType = 'laz', demType = 'dtm', gridMethod = 'idw', 
-                    dem_outName = folder+output_name+'_'+dataset_type+'_DTM', dem_outExt = 'tif', driver = "GTiff")
+                    pc_outName = folder+output_name+'_'+dataset_type, pc_outType = 'laz', demType = 'dtm', gridMethod = 'idw',
+                    dem_outName = folder+output_name+'_'+dataset_type+'_DTM', dem_outExt = 'tif', driver = "GTiff",
+                    output_crs_wkt=final_out_crs_wkt)
 
             noaa_dtm_pipeline = pdal.Pipeline(json.dumps(noaa_dtm_pipeline))
             noaa_dtm_pipeline.execute_streaming(chunk_size=1000000)
             dtm_path = folder+output_name+'_'+dataset_type+'_DTM.tif'
             self.cleanup_raster_nodata(dtm_path, nodata=nodata)
-            
+
             noaa_dsm_pipeline = self.make_DEM_pipeline_aws(bounds_polygon_epsg_initial_crs, [dataset_id], pc_resolution, dem_resolution, data_source = "noaa",
                             filterNoise = False, reclassify = False, savePointCloud = False, outCRS = final_out_crs_wkt,
-                            pc_outName = folder+output_name+'_'+dataset_type, pc_outType = 'laz', demType = 'dsm', gridMethod = 'max', 
-                            dem_outName = folder+output_name+'_'+dataset_type+'_DSM', dem_outExt = 'tif', driver = "GTiff")
+                            pc_outName = folder+output_name+'_'+dataset_type, pc_outType = 'laz', demType = 'dsm', gridMethod = 'max',
+                            dem_outName = folder+output_name+'_'+dataset_type+'_DSM', dem_outExt = 'tif', driver = "GTiff",
+                            output_crs_wkt=final_out_crs_wkt)
 
             noaa_dsm_pipeline = pdal.Pipeline(json.dumps(noaa_dsm_pipeline))
             noaa_dsm_pipeline.execute_streaming(chunk_size=1000000)
@@ -3004,25 +3041,36 @@ class GetDEMs:
             raise ValueError("dataset_type must be either 'compare' or 'reference'")
 
         if outCRS == "WGS84 UTM":
-            base_crs = CRS.from_epsg(dataset_crs_)
+            horiz_crs = CRS.from_epsg(dataset_crs_)
         else:
-            base_crs = CRS.from_user_input(outCRS)
+            horiz_crs = CRS.from_user_input(outCRS)
 
-        # Build output CRS string (with optional epoch)
+        # Build compound CRS (horizontal + vertical) with optional epoch
+        # using proper WKT2:2019 instead of PROJ4 strings.
+        from topochange.crs_utils import vertical_datum_to_crs, build_output_crs_wkt
+
+        metadata = self.ot.get_metadata_dict(dataset_type)
+        vert_crs = vertical_datum_to_crs(
+            metadata.get("vertical_datum"), metadata.get("geoid_model")
+        )
+
+        epoch_decimal = None
         if epoch:
             try:
-                proj_string = base_crs.to_proj4()
-                decimal_year = epoch.year + (epoch.timetuple().tm_yday - 1) / 365.25
-                final_out_crs_wkt = f"{proj_string} +epoch={decimal_year:.4f}"
-                print(f"Using epoch {epoch} for {dataset_type} dataset via PROJ string.")
+                epoch_decimal = epoch.year + (epoch.timetuple().tm_yday - 1) / 365.25
+                logger.info(f"Using epoch {epoch} ({epoch_decimal:.4f}) for {dataset_type} dataset.")
             except Exception as e:
-                warnings.warn(
-                    f"Could not add epoch to PROJ string: {e}. Proceeding without epoch."
-                )
-                final_out_crs_wkt = base_crs.to_wkt()
+                warnings.warn(f"Could not calculate epoch: {e}")
         else:
-            final_out_crs_wkt = base_crs.to_wkt()
-            print(f"No epoch provided for {dataset_type} dataset.")
+            logger.info(f"No epoch provided for {dataset_type} dataset.")
+
+        try:
+            final_out_crs_wkt = build_output_crs_wkt(horiz_crs, vert_crs, epoch_decimal)
+        except Exception as e:
+            warnings.warn(
+                f"Could not build compound CRS: {e}. Using horizontal CRS only."
+            )
+            final_out_crs_wkt = horiz_crs.to_wkt()
 
         output_laz = os.path.join(folder, f"{output_name}_{dataset_type}.laz")
 
@@ -3365,6 +3413,7 @@ class GetDEMs:
                         outCRS=final_out_crs_wkt,
                         pc_outName=output_laz.replace(".laz", ""),
                         pc_outType="laz",
+                        output_crs_wkt=final_out_crs_wkt,
                     )
                 }
                 pipe = pdal.Pipeline(json.dumps(single_pipeline))
@@ -3402,13 +3451,14 @@ class GetDEMs:
                 merge_pipeline["pipeline"].append(
                     {"type": "filters.reprojection", "out_srs": final_out_crs_wkt}
                 )
-                merge_pipeline["pipeline"].append(
-                    {
-                        "type": "writers.las",
-                        "compression": "laszip",
-                        "filename": output_laz,
-                    }
-                )
+                merge_writer = {
+                    "type": "writers.las",
+                    "compression": "laszip",
+                    "filename": output_laz,
+                }
+                if final_out_crs_wkt:
+                    merge_writer["a_srs"] = final_out_crs_wkt
+                merge_pipeline["pipeline"].append(merge_writer)
 
                 logger.info(
                     f"Merging {len(downloaded_laz_files)} tiles into {output_laz}"
@@ -3429,6 +3479,7 @@ class GetDEMs:
                 outCRS=final_out_crs_wkt,
                 pc_outName=output_laz.replace(".laz", ""),
                 pc_outType="laz",
+                output_crs_wkt=final_out_crs_wkt,
             )
             pipe = pdal.Pipeline(json.dumps(pc_pipeline))
             pipe.execute_streaming(chunk_size=1000000)
@@ -3446,6 +3497,7 @@ class GetDEMs:
                 outCRS=final_out_crs_wkt,
                 pc_outName=output_laz.replace(".laz", ""),
                 pc_outType="laz",
+                output_crs_wkt=final_out_crs_wkt,
             )
             pipe = pdal.Pipeline(json.dumps(pc_pipeline))
             pipe.execute_streaming(chunk_size=1000000)

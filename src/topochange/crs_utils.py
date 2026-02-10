@@ -598,3 +598,130 @@ def apply_dynamic_transform(
     else:
         x_out, y_out, z_out = transformer.transform(x, y, z)
         return x_out, y_out, z_out
+
+
+# ---------------------------------------------------------------------------
+# Vertical datum → CRS mapping
+# ---------------------------------------------------------------------------
+
+# Mapping of vertical datum names (lowercase) to EPSG codes
+_VERTICAL_DATUM_EPSG = {
+    "navd88": 5703,   # NAVD88 height (meters)
+    "navd 88": 5703,
+    "ngvd29": 5702,   # NGVD29 height
+    "ngvd 29": 5702,
+    "egm96": 5773,    # EGM96 geoid height
+    "egm2008": 3855,  # EGM2008 geoid height
+    "egm08": 3855,
+}
+
+# Geoid models that are NAVD88 realizations (US national geoids)
+_NAVD88_GEOID_MODELS = frozenset({
+    "geoid99", "geoid03", "geoid06", "geoid09",
+    "geoid12a", "geoid12b", "geoid18",
+})
+
+
+def vertical_datum_to_crs(
+    vertical_datum: Optional[str] = None,
+    geoid_model: Optional[str] = None,
+) -> Optional[_CRS]:
+    """
+    Map a vertical datum name and/or geoid model to a pyproj vertical CRS.
+
+    Parameters
+    ----------
+    vertical_datum : str or None
+        Vertical datum name from catalog metadata (e.g. ``"NAVD88"``).
+    geoid_model : str or None
+        Geoid model name (e.g. ``"geoid12b"``, ``"egm96"``).
+
+    Returns
+    -------
+    pyproj.CRS or None
+        A 1-D vertical CRS object, or ``None`` if the datum is
+        ellipsoidal, unknown, or cannot be mapped.
+
+    Examples
+    --------
+    >>> vertical_datum_to_crs("NAVD88", "geoid12b")
+    <Vertical CRS: EPSG:5703 ...>
+    >>> vertical_datum_to_crs("ellipsoidal") is None
+    True
+    >>> vertical_datum_to_crs(None, "geoid18")
+    <Vertical CRS: EPSG:5703 ...>
+    """
+    # Ellipsoidal heights have no orthometric vertical CRS
+    if vertical_datum and "ellipsoid" in vertical_datum.lower():
+        return None
+
+    # Try direct datum name lookup
+    if vertical_datum:
+        key = vertical_datum.strip().lower()
+        epsg = _VERTICAL_DATUM_EPSG.get(key)
+        if epsg is not None:
+            return _CRS.from_epsg(epsg)
+
+    # Try geoid model lookup
+    if geoid_model:
+        gm = geoid_model.strip().lower().replace("-", "").replace("_", "").replace(" ", "")
+        # Check if it's a known NAVD88 realization
+        if gm in _NAVD88_GEOID_MODELS:
+            return _CRS.from_epsg(5703)
+        # Check if it maps directly to a datum (e.g. "egm96")
+        epsg = _VERTICAL_DATUM_EPSG.get(gm)
+        if epsg is not None:
+            return _CRS.from_epsg(epsg)
+
+    return None
+
+
+def build_output_crs_wkt(
+    horizontal_crs: Union[str, _CRS, Dict[str, Any]],
+    vertical_crs: Optional[Union[str, _CRS, Dict[str, Any]]] = None,
+    epoch: Optional[Number] = None,
+) -> str:
+    """
+    Build a WKT2:2019 CRS string suitable for PDAL ``writers.las`` ``a_srs``.
+
+    Combines a horizontal CRS with an optional vertical CRS (producing a
+    compound CRS) and an optional epoch (wrapping in ``COORDINATEMETADATA``).
+
+    Parameters
+    ----------
+    horizontal_crs : str, pyproj.CRS, or dict
+        The horizontal (projected or geographic) CRS.
+    vertical_crs : str, pyproj.CRS, dict, or None
+        Vertical CRS component.  When provided, the result is a compound
+        CRS; otherwise only the horizontal CRS is returned.
+    epoch : float/int or None
+        Decimal-year epoch.  When provided, the CRS is wrapped in
+        ``COORDINATEMETADATA[..., EPOCH[<epoch>]]``.
+
+    Returns
+    -------
+    str
+        A WKT2:2019 string (possibly wrapped in ``COORDINATEMETADATA``).
+
+    Examples
+    --------
+    >>> wkt = build_output_crs_wkt("EPSG:32613", "EPSG:5703", 2011.726)
+    >>> "COMPOUNDCRS" in wkt and "COORDINATEMETADATA" in wkt
+    True
+    """
+    horiz_obj = _ensure_crs_obj(horizontal_crs)
+
+    if vertical_crs is not None:
+        vert_obj = _ensure_crs_obj(vertical_crs)
+        output_crs = create_compound_crs(horiz_obj, vert_obj)
+    else:
+        output_crs = horiz_obj
+
+    # Convert to canonical WKT2:2019
+    output_wkt = crs_to_wkt2_2019(output_crs, pretty=False)
+
+    # Optionally wrap with epoch
+    if epoch is not None:
+        output_wkt = wrap_coordinate_metadata_wkt(output_crs, epoch)
+
+    return output_wkt
