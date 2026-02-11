@@ -1,7 +1,6 @@
 """Comprehensive tests for topochange.crs_utils module.
 
-Tests all functions for CRS conversion, transformation, and validation.
-"""
+Tests all functions for CRS conversion, transformation, and validation."""
 import pytest
 import numpy as np
 from pyproj import CRS, Transformer
@@ -29,9 +28,7 @@ from topochange.crs_utils import (
 )
 
 
-# ==============================================================================
-# Test fixtures for common CRS objects
-# ==============================================================================
+# test fixtures for common CRS objects
 
 @pytest.fixture
 def wgs84_2d():
@@ -69,9 +66,7 @@ def nad83_navd88_compound():
     return CRS.from_epsg(6349)
 
 
-# ==============================================================================
-# Test _ensure_crs_obj
-# ==============================================================================
+# test _ensure_crs_obj
 
 class TestEnsureCrsObj:
     """Tests for _ensure_crs_obj function."""
@@ -113,7 +108,7 @@ class TestEnsureCrsObj:
         """String-based CRS parsing is cached."""
         crs1 = _ensure_crs_obj("EPSG:4326")
         crs2 = _ensure_crs_obj("EPSG:4326")
-        # Both should reference the same cached object
+        # both should reference the same cached object
         assert crs1 is crs2
 
     def test_ensure_crs_obj_invalid_string(self):
@@ -122,9 +117,7 @@ class TestEnsureCrsObj:
             _ensure_crs_obj("INVALID_CRS_STRING")
 
 
-# ==============================================================================
-# Test crs_equals
-# ==============================================================================
+# test crs_equals
 
 class TestCrsEquals:
     """Tests for crs_equals function."""
@@ -160,15 +153,13 @@ class TestCrsEquals:
 
     def test_crs_equals_wkt_comparison_fallback(self):
         """Falls back to WKT comparison for non-EPSG CRS."""
-        # Create two WKT strings that are equivalent but not from same EPSG
+        # create two WKT strings that are equivalent but not from same EPSG
         crs1 = CRS.from_epsg(4326)
         crs2 = CRS.from_wkt(crs1.to_wkt())
         assert crs_equals(crs1, crs2)
 
 
-# ==============================================================================
-# Test crs_to_wkt2_2019
-# ==============================================================================
+# test crs_to_wkt2_2019
 
 class TestCrsToWkt2_2019:
     """Tests for crs_to_wkt2_2019 function."""
@@ -187,14 +178,14 @@ class TestCrsToWkt2_2019:
     def test_crs_to_wkt2_2019_pretty_true(self):
         """Pretty=True produces formatted output."""
         wkt = crs_to_wkt2_2019("EPSG:4326", pretty=True)
-        # Formatted output contains newlines
+        # formatted output contains newlines
         assert "\n" in wkt or "GEOGCRS" in wkt
 
     def test_crs_to_wkt2_2019_pretty_false(self):
         """Pretty=False produces compact output."""
         wkt = crs_to_wkt2_2019("EPSG:4326", pretty=False)
         assert isinstance(wkt, str)
-        # Both formats should be valid WKT
+        # both formats should be valid WKT
         CRS.from_wkt(wkt)
 
     def test_crs_to_wkt2_2019_with_crs_object(self):
@@ -205,9 +196,7 @@ class TestCrsToWkt2_2019:
         assert "UTM" in wkt or "zone 10" in wkt
 
 
-# ==============================================================================
-# Test wrap_coordinate_metadata_wkt
-# ==============================================================================
+# test wrap_coordinate_metadata_wkt
 
 class TestWrapCoordinateMetadataWkt:
     """Tests for wrap_coordinate_metadata_wkt function."""
@@ -241,16 +230,14 @@ class TestWrapCoordinateMetadataWkt:
     def test_wrap_coordinate_metadata_wkt_format(self):
         """Output has correct WKT2:2019 format structure."""
         result = wrap_coordinate_metadata_wkt("EPSG:4326", 2020.0)
-        # COORDINATEMETADATA is valid WKT2:2019 format but not parseable as standalone CRS
-        # Verify structure instead
+        # cOORDINATEMETADATA is valid WKT2:2019 format but not parseable as standalone CRS
+        # verify structure instead
         assert result.startswith("COORDINATEMETADATA[")
         assert result.endswith("]")
         assert "EPOCH[2020.0]" in result
 
 
-# ==============================================================================
-# Test crs_to_projjson
-# ==============================================================================
+# test crs_to_projjson
 
 class TestCrsToProjectionJson:
     """Tests for crs_to_projjson function."""
@@ -283,9 +270,7 @@ class TestCrsToProjectionJson:
         assert "type" in result
 
 
-# ==============================================================================
-# Test make_coordinate_metadata_projjson
-# ==============================================================================
+# test make_coordinate_metadata_projjson
 
 class TestMakeCoordinateMetadataProjectionJson:
     """Tests for make_coordinate_metadata_projjson function."""
@@ -319,9 +304,7 @@ class TestMakeCoordinateMetadataProjectionJson:
         assert result["epoch"] == 2015.0
 
 
-# ==============================================================================
-# Test is_orthometric
-# ==============================================================================
+# test is_orthometric
 
 class TestIsOrthometric:
     """Tests for is_orthometric function."""
@@ -339,13 +322,13 @@ class TestIsOrthometric:
     def test_is_orthometric_invalid_input_returns_none(self):
         """Invalid input returns None defensively."""
         result = is_orthometric("INVALID_CRS")
-        # Should return None, not raise
+        # should return None, not raise
         assert result is None
 
     def test_is_orthometric_geographic_crs(self):
         """Geographic CRS without vertical returns None."""
         result = is_orthometric(CRS.from_epsg(4326))
-        # Could be None or False depending on axis analysis
+        # could be None or False depending on axis analysis
         assert result in (None, False)
 
     def test_is_orthometric_with_epsg_string(self):
@@ -355,16 +338,14 @@ class TestIsOrthometric:
 
     def test_is_orthometric_ellipsoidal_height(self):
         """Ellipsoidal height CRS returns False."""
-        # Create a vertical CRS that explicitly says ellipsoidal
+        # create a vertical CRS that explicitly says ellipsoidal
         crs_3d = CRS.from_epsg(4979)
         result = is_orthometric(crs_3d)
-        # Result should indicate ellipsoidal (False or None)
+        # result should indicate ellipsoidal (False or None)
         assert result in (False, None)
 
 
-# ==============================================================================
-# Test is_3d_geographic_crs
-# ==============================================================================
+# test is_3d_geographic_crs
 
 class TestIs3dGeographicCrs:
     """Tests for is_3d_geographic_crs function."""
@@ -395,9 +376,7 @@ class TestIs3dGeographicCrs:
         assert not is_3d_geographic_crs("EPSG:5703")
 
 
-# ==============================================================================
-# Test extract_ellipsoidal_height_as_vertical_crs
-# ==============================================================================
+# test extract_ellipsoidal_height_as_vertical_crs
 
 class TestExtractEllipsoidalHeightAsVerticalCrs:
     """Tests for extract_ellipsoidal_height_as_vertical_crs function."""
@@ -431,9 +410,7 @@ class TestExtractEllipsoidalHeightAsVerticalCrs:
         assert vert_crs.is_vertical
 
 
-# ==============================================================================
-# Test create_compound_crs
-# ==============================================================================
+# test create_compound_crs
 
 class TestCreateCompoundCrs:
     """Tests for create_compound_crs function."""
@@ -475,9 +452,7 @@ class TestCreateCompoundCrs:
         assert compound.sub_crs_list[0].to_epsg() == 2230
 
 
-# ==============================================================================
-# Test parse_crs_components
-# ==============================================================================
+# test parse_crs_components
 
 class TestParseCrsComponents:
     """Tests for parse_crs_components function."""
@@ -522,7 +497,7 @@ class TestParseCrsComponents:
         """Returned components are WKT strings."""
         compound = create_compound_crs("EPSG:32610", "EPSG:5703")
         compound_wkt, horiz_wkt, vert_wkt = parse_crs_components(compound)
-        # All should be parseable as WKT
+        # all should be parseable as WKT
         CRS.from_wkt(horiz_wkt)
         CRS.from_wkt(vert_wkt)
 
@@ -534,9 +509,7 @@ class TestParseCrsComponents:
         assert vert_wkt is None
 
 
-# ==============================================================================
-# Test transformer_with_epoch
-# ==============================================================================
+# test transformer_with_epoch
 
 class TestTransformerWithEpoch:
     """Tests for transformer_with_epoch function."""
@@ -549,9 +522,9 @@ class TestTransformerWithEpoch:
     def test_transformer_with_epoch_basic_transform(self):
         """Transformer performs basic coordinate transformation."""
         transformer = transformer_with_epoch("EPSG:4326", "EPSG:32610")
-        # San Francisco: -122.4, 37.8
+        # san Francisco: -122.4, 37.8
         x, y = transformer.transform(-122.4, 37.8)
-        # Should be in UTM (larger numbers)
+        # should be in UTM (larger numbers)
         assert 400000 < x < 600000
         assert 4100000 < y < 4300000
 
@@ -577,14 +550,12 @@ class TestTransformerWithEpoch:
         transformer = transformer_with_epoch("EPSG:4326", "EPSG:32610")
         # -122.4, 37.8 should be valid (lon, lat)
         x, y = transformer.transform(-122.4, 37.8)
-        # If always_xy is False, would expect error or wrong result
+        # if always_xy is False, would expect error or wrong result
         assert isinstance(x, (int, float))
         assert isinstance(y, (int, float))
 
 
-# ==============================================================================
-# Test horizontal_unit_scale
-# ==============================================================================
+# test horizontal_unit_scale
 
 class TestHorizontalUnitScale:
     """Tests for horizontal_unit_scale function."""
@@ -601,10 +572,10 @@ class TestHorizontalUnitScale:
 
     def test_horizontal_unit_scale_us_survey_feet_unknown(self):
         """US Survey feet unit not recognized in unit conversion table returns None."""
-        # EPSG:2230 uses "US survey foot" which is not in the _HORIZONTAL_UNIT_FACTORS dict
-        # Only "us_survey_foot" (with underscore) is in the lookup table
+        # ePSG:2230 uses "US survey foot" which is not in the _HORIZONTAL_UNIT_FACTORS dict
+        # only "us_survey_foot" (with underscore) is in the lookup table
         scale = horizontal_unit_scale("EPSG:2230", "meter")
-        # Since the axis unit_name doesn't match any key, returns None
+        # since the axis unit_name doesn't match any key, returns None
         assert scale is None
 
     def test_horizontal_unit_scale_with_crs_object(self):
@@ -626,9 +597,7 @@ class TestHorizontalUnitScale:
         assert scale1 == scale2 == scale3
 
 
-# ==============================================================================
-# Test vertical_unit_scale
-# ==============================================================================
+# test vertical_unit_scale
 
 class TestVerticalUnitScale:
     """Tests for vertical_unit_scale function."""
@@ -656,15 +625,13 @@ class TestVerticalUnitScale:
 
     def test_vertical_unit_scale_geographic_crs(self):
         """Works with geographic CRS (uses last axis)."""
-        # Geographic CRS has lat/lon axes
+        # geographic CRS has lat/lon axes
         scale = vertical_unit_scale("EPSG:4326", "degree")
-        # Degrees are not in the unit conversion table, so None
+        # degrees are not in the unit conversion table, so None
         assert scale is None
 
 
-# ==============================================================================
-# Test apply_vertical_datum_transform
-# ==============================================================================
+# test apply_vertical_datum_transform
 
 class TestApplyVerticalDatumTransform:
     """Tests for apply_vertical_datum_transform function."""
@@ -706,14 +673,12 @@ class TestApplyVerticalDatumTransform:
     def test_apply_vertical_datum_transform_scalar_x_y(self):
         """Uses scalar x, y (optimization)."""
         z = np.array([100.0, 200.0, 300.0])
-        # Should not raise; uses scalar 0, 0 for x, y
+        # should not raise; uses scalar 0, 0 for x, y
         result = apply_vertical_datum_transform(z, "EPSG:5703", "EPSG:5703")
         assert result.shape == z.shape
 
 
-# ==============================================================================
-# Test apply_dynamic_transform
-# ==============================================================================
+# test apply_dynamic_transform
 
 class TestApplyDynamicTransform:
     """Tests for apply_dynamic_transform function."""
@@ -761,7 +726,7 @@ class TestApplyDynamicTransform:
             src_epoch=None, dst_epoch=None
         )
 
-        # Should be in geographic range
+        # should be in geographic range
         assert -180 < x_out[0] < 180 or isinstance(x_out, (list, tuple))
         assert -90 < y_out[0] < 90 or isinstance(y_out, (list, tuple))
 
@@ -791,13 +756,11 @@ class TestApplyDynamicTransform:
             src_epoch=None, dst_epoch=None
         )
 
-        # Output should have same shape as input
+        # output should have same shape as input
         assert len(x_out) == 3 or np.array(x_out).shape == (3,)
 
 
-# ==============================================================================
-# Integration tests
-# ==============================================================================
+# integration tests
 
 class TestCrsUtilsIntegration:
     """Integration tests combining multiple functions."""
@@ -824,7 +787,7 @@ class TestCrsUtilsIntegration:
         assert horiz_wkt is not None
         assert vert_wkt is not None
 
-        # Parse back
+        # parse back
         horiz_crs = CRS.from_wkt(horiz_wkt)
         assert horiz_crs.to_epsg() == 32610
 
@@ -833,14 +796,14 @@ class TestCrsUtilsIntegration:
         crs_3d = "EPSG:4979"
         assert is_3d_geographic_crs(crs_3d)
 
-        # Extract vertical component
+        # extract vertical component
         vert = extract_ellipsoidal_height_as_vertical_crs(crs_3d)
         assert vert.is_vertical
 
-        # Create 2D geographic
+        # create 2D geographic
         crs_2d = CRS.from_epsg(4326)
 
-        # Create compound
+        # create compound
         compound = create_compound_crs(crs_2d, vert)
         assert compound.is_compound
 
@@ -852,7 +815,7 @@ class TestCrsUtilsIntegration:
         nav_scale = vertical_unit_scale("EPSG:5703", "foot")
         assert nav_scale == pytest.approx(3.28084, rel=1e-4)
 
-        # Both should be the same (physical units)
+        # both should be the same (physical units)
         assert utm_scale == pytest.approx(nav_scale, rel=1e-10)
 
     def test_workflow_coordinate_metadata_with_epochs(self):
@@ -865,15 +828,13 @@ class TestCrsUtilsIntegration:
         assert "COORDINATEMETADATA" in wkt_meta
         assert "2020.0" in wkt_meta
 
-        # PROJJSON format
+        # pROJJSON format
         json_meta = make_coordinate_metadata_projjson(crs, epoch)
         assert json_meta["type"] == "CoordinateMetadata"
         assert json_meta["epoch"] == 2020.0
 
 
-# ==============================================================================
-# Edge case and error handling tests
-# ==============================================================================
+# edge case and error handling tests
 
 class TestEdgeCasesAndErrorHandling:
     """Tests for edge cases and error handling."""
@@ -915,7 +876,7 @@ class TestEdgeCasesAndErrorHandling:
 
     def test_crs_equals_with_mixed_input_types(self):
         """crs_equals works with mixed input types."""
-        # All these should be equal
+        # all these should be equal
         assert crs_equals("EPSG:4326", CRS.from_epsg(4326))
         assert crs_equals(CRS.from_epsg(4326), "EPSG:4326")
         assert crs_equals(
@@ -937,9 +898,7 @@ class TestEdgeCasesAndErrorHandling:
         assert isinstance(transformer, Transformer)
 
 
-# ==============================================================================
-# Tests for vertical_datum_to_crs
-# ==============================================================================
+# tests for vertical_datum_to_crs
 
 class TestVerticalDatumToCrs:
     """Tests for vertical datum name → pyproj CRS mapping."""
@@ -1005,9 +964,7 @@ class TestVerticalDatumToCrs:
         assert crs.to_epsg() == 5703
 
 
-# ==============================================================================
-# Tests for build_output_crs_wkt
-# ==============================================================================
+# tests for build_output_crs_wkt
 
 class TestBuildOutputCrsWkt:
     """Tests for compound + epoch WKT2 builder."""
@@ -1015,7 +972,7 @@ class TestBuildOutputCrsWkt:
     def test_horizontal_only(self):
         """Horizontal CRS only produces a valid WKT string."""
         wkt = build_output_crs_wkt("EPSG:32610")
-        # Should be a valid projected CRS WKT2
+        # should be a valid projected CRS WKT2
         crs = CRS.from_wkt(wkt)
         assert crs.to_epsg() == 32610
 
@@ -1055,9 +1012,7 @@ class TestBuildOutputCrsWkt:
         assert "COMPOUNDCRS" in wkt
 
 
-# ==============================================================================
-# Test extract_epoch_from_wkt
-# ==============================================================================
+# test extract_epoch_from_wkt
 
 class TestExtractEpochFromWkt:
     """Tests for extract_epoch_from_wkt function."""
@@ -1113,3 +1068,4 @@ class TestExtractEpochFromWkt:
         wkt = build_output_crs_wkt("EPSG:32613", "EPSG:5703", 2011.726)
         epoch = extract_epoch_from_wkt(wkt)
         assert epoch == pytest.approx(2011.726)
+

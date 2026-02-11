@@ -1,7 +1,5 @@
-"""
-Tests for DEM creation from aligned point clouds (Option 1 workflow)
-Uses synthetic LAZ data from conftest fixtures.
-"""
+"""Tests for DEM creation from aligned point clouds (Option 1 workflow)
+Uses synthetic LAZ data from conftest fixtures."""
 
 import pytest
 import os
@@ -19,7 +17,7 @@ class TestDEMCreation:
         """Create an aligned PointCloudPair for testing"""
         pc_pair = PointCloudPair(compare_pc, reference_pc)
 
-        # Transform and align
+        # transform and align
         try:
             pc_pair.transform_compare_to_match_reference(skip_epoch=True, verbose=False)
             pc_pair.align_point_clouds(
@@ -42,15 +40,15 @@ class TestDEMCreation:
                 output_dir=tmpdir
             )
 
-            # Check that DEMs were created
+            # check that DEMs were created
             assert dem1 is not None
             assert dem2 is not None
 
-            # Check that DEMs have data
+            # check that DEMs have data
             assert hasattr(dem1, 'data')
             assert hasattr(dem2, 'data')
 
-            # Check that DEM files were created
+            # check that DEM files were created
             assert dem1.filename is not None
             assert dem2.filename is not None
             assert os.path.exists(dem1.filename)
@@ -67,7 +65,7 @@ class TestDEMCreation:
                 output_dir=tmpdir
             )
 
-            # Check that resolution is correct
+            # check that resolution is correct
             assert abs(dem1.resolution[0] - resolution) < 0.01
             assert abs(dem2.resolution[0] - resolution) < 0.01
 
@@ -105,14 +103,15 @@ class TestDEMProperties:
         """Test checking and setting DEM units"""
         dem1, dem2 = test_dems
 
-        # Check that units attributes exist
+        # check that units attributes exist
         assert hasattr(dem1, 'horizontal_unit')
         assert hasattr(dem1, 'vertical_unit')
 
-        # Test setting units
+        # test setting units
         dem1.set_units(vertical_unit="meter")
         dem2.set_units(vertical_unit="meter")
 
-        # Check that units were set
+        # check that units were set
         assert dem1.vertical_unit == "meter"
         assert dem2.vertical_unit == "meter"
+

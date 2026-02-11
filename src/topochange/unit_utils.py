@@ -1,22 +1,4 @@
-"""
-unit_utils.py - Comprehensive unit parsing and conversion for geospatial data.
-
-This module provides:
-- UnitInfo dataclass to encapsulate unit metadata
-- Unit registry with EPSG codes and common aliases
-- Extraction of units from pyproj CRS objects
-- Parsing of unit strings from catalogs and metadata
-- Array-aware conversion functions
-
-The design leverages pyproj's built-in unit_conversion_factor when available,
-with fallback to a comprehensive lookup table for string parsing.
-
-Key insight: PROJ handles unit conversion automatically during CRS transformations.
-This module is needed for:
-1. Extracting/displaying unit info to users
-2. Manual conversion when working with raw values (e.g., point cloud Z before reprojection)
-3. Parsing catalog metadata strings into structured data
-"""
+"""unit parsing and conversion for geospatial data."""
 
 from __future__ import annotations
 
@@ -28,16 +10,12 @@ import numpy as np
 from pyproj import CRS as _CRS
 
 
-# =============================================================================
 # UnitInfo Dataclass
-# =============================================================================
 
 @dataclass(frozen=True)
 class UnitInfo:
     """
     Encapsulates information about a measurement unit.
-    
-    Think of this like a currency object that knows its exchange rate and metadata.
     
     Attributes
     ----------
@@ -98,8 +76,8 @@ class UnitInfo:
                 f"Cannot convert between {self.category} ({self.name}) "
                 f"and {target.category} ({target.name})"
             )
-        # Convert: source -> base -> target
-        # Factor = source_to_base / target_to_base
+        # convert: source -> base -> target
+        # factor = source_to_base / target_to_base
         factor = self.to_base_factor / target.to_base_factor
         return np.asarray(values) * factor
     
@@ -110,45 +88,43 @@ class UnitInfo:
         return f"UnitInfo({self.name!r}, factor={self.to_base_factor})"
 
 
-# =============================================================================
-# Unit Registry
-# =============================================================================
+# unit Registry
 
 # EPSG codes for common units (from EPSG registry)
-# Linear: base = metre (factor = 1.0)
-# Angular: base = radian (factor = 1.0)
+# linear: base = metre (factor = 1.0)
+# angular: base = radian (factor = 1.0)
 
 _LINEAR_UNITS: Dict[str, UnitInfo] = {
-    # Metre (EPSG:9001) - the base unit
+    # metre (EPSG:9001) - the base unit
     "metre": UnitInfo("meter", "metre", "m", 1.0, "linear", 9001),
     "meter": UnitInfo("meter", "metre", "m", 1.0, "linear", 9001),
     "m": UnitInfo("meter", "metre", "m", 1.0, "linear", 9001),
     "meters": UnitInfo("meter", "metre", "m", 1.0, "linear", 9001),
     "metres": UnitInfo("meter", "metre", "m", 1.0, "linear", 9001),
     
-    # Kilometre (EPSG:9036)
+    # kilometre (EPSG:9036)
     "kilometre": UnitInfo("kilometer", "kilometre", "km", 1000.0, "linear", 9036),
     "kilometer": UnitInfo("kilometer", "kilometre", "km", 1000.0, "linear", 9036),
     "km": UnitInfo("kilometer", "kilometre", "km", 1000.0, "linear", 9036),
     
-    # Centimetre 
+    # centimetre
     "centimetre": UnitInfo("centimeter", "centimetre", "cm", 0.01, "linear", None),
     "centimeter": UnitInfo("centimeter", "centimetre", "cm", 0.01, "linear", None),
     "cm": UnitInfo("centimeter", "centimetre", "cm", 0.01, "linear", None),
     
-    # Millimetre
+    # millimetre
     "millimetre": UnitInfo("millimeter", "millimetre", "mm", 0.001, "linear", None),
     "millimeter": UnitInfo("millimeter", "millimetre", "mm", 0.001, "linear", None),
     "mm": UnitInfo("millimeter", "millimetre", "mm", 0.001, "linear", None),
     
-    # International foot (EPSG:9002) - exactly 0.3048 m
+    # international foot (EPSG:9002) - exactly 0.3048 m
     "foot": UnitInfo("foot", "foot", "ft", 0.3048, "linear", 9002),
     "feet": UnitInfo("foot", "foot", "ft", 0.3048, "linear", 9002),
     "ft": UnitInfo("foot", "foot", "ft", 0.3048, "linear", 9002),
     "international foot": UnitInfo("foot", "foot", "ft", 0.3048, "linear", 9002),
     "international_foot": UnitInfo("foot", "foot", "ft", 0.3048, "linear", 9002),
     
-    # US survey foot (EPSG:9003) - 1200/3937 m (slightly longer than international foot)
+    # uS survey foot (EPSG:9003) - 1200/3937 m (slightly longer than international foot)
     "us survey foot": UnitInfo("us_survey_foot", "US survey foot", "ftUS", 1200.0/3937.0, "linear", 9003),
     "us_survey_foot": UnitInfo("us_survey_foot", "US survey foot", "ftUS", 1200.0/3937.0, "linear", 9003),
     "us-survey-foot": UnitInfo("us_survey_foot", "US survey foot", "ftUS", 1200.0/3937.0, "linear", 9003),
@@ -159,75 +135,75 @@ _LINEAR_UNITS: Dict[str, UnitInfo] = {
     "survey foot": UnitInfo("us_survey_foot", "US survey foot", "ftUS", 1200.0/3937.0, "linear", 9003),
     "survey feet": UnitInfo("us_survey_foot", "US survey foot", "ftUS", 1200.0/3937.0, "linear", 9003),
     
-    # British foot (EPSG:9070) - used in some older UK data
+    # british foot (EPSG:9070) - used in some older UK data
     "british foot": UnitInfo("british_foot", "British foot", "ft(Br)", 0.3047972654, "linear", 9070),
     "british_foot": UnitInfo("british_foot", "British foot", "ft(Br)", 0.3047972654, "linear", 9070),
     
-    # Clarke's foot (EPSG:9005) - used in some African/Indian surveys
+    # clarke's foot (EPSG:9005) - used in some African/Indian surveys
     "clarke's foot": UnitInfo("clarke_foot", "Clarke's foot", "ft(Cla)", 0.3047972654, "linear", 9005),
     "clarke_foot": UnitInfo("clarke_foot", "Clarke's foot", "ft(Cla)", 0.3047972654, "linear", 9005),
     
-    # Inch
+    # inch
     "inch": UnitInfo("inch", "inch", "in", 0.0254, "linear", None),
     "inches": UnitInfo("inch", "inch", "in", 0.0254, "linear", None),
     "in": UnitInfo("inch", "inch", "in", 0.0254, "linear", None),
     
-    # Yard
+    # yard
     "yard": UnitInfo("yard", "yard", "yd", 0.9144, "linear", None),
     "yards": UnitInfo("yard", "yard", "yd", 0.9144, "linear", None),
     "yd": UnitInfo("yard", "yard", "yd", 0.9144, "linear", None),
     
-    # Mile
+    # mile
     "mile": UnitInfo("mile", "mile", "mi", 1609.344, "linear", None),
     "miles": UnitInfo("mile", "mile", "mi", 1609.344, "linear", None),
     "mi": UnitInfo("mile", "mile", "mi", 1609.344, "linear", None),
     
-    # Nautical mile (EPSG:9030)
+    # nautical mile (EPSG:9030)
     "nautical mile": UnitInfo("nautical_mile", "nautical mile", "nmi", 1852.0, "linear", 9030),
     "nautical_mile": UnitInfo("nautical_mile", "nautical mile", "nmi", 1852.0, "linear", 9030),
     "nmi": UnitInfo("nautical_mile", "nautical mile", "nmi", 1852.0, "linear", 9030),
     
-    # German legal metre (EPSG:9031)
+    # german legal metre (EPSG:9031)
     "german legal metre": UnitInfo("german_legal_metre", "German legal metre", "GLM", 1.0000135965, "linear", 9031),
 }
 
-# Angular units (base = radian)
+# angular units (base = radian)
 import math
 _ANGULAR_UNITS: Dict[str, UnitInfo] = {
-    # Radian (EPSG:9101) - the base unit
+    # radian (EPSG:9101) - the base unit
     "radian": UnitInfo("radian", "radian", "rad", 1.0, "angular", 9101),
     "radians": UnitInfo("radian", "radian", "rad", 1.0, "angular", 9101),
     "rad": UnitInfo("radian", "radian", "rad", 1.0, "angular", 9101),
     
-    # Degree (EPSG:9102) - π/180 radians
+    # degree (EPSG:9102) - π/180 radians
     "degree": UnitInfo("degree", "degree", "°", math.pi / 180.0, "angular", 9102),
     "degrees": UnitInfo("degree", "degree", "°", math.pi / 180.0, "angular", 9102),
     "deg": UnitInfo("degree", "degree", "°", math.pi / 180.0, "angular", 9102),
     "°": UnitInfo("degree", "degree", "°", math.pi / 180.0, "angular", 9102),
     
-    # Arc-minute (EPSG:9103)
+    # arc-minute (EPSG:9103)
     "arc-minute": UnitInfo("arc_minute", "arc-minute", "'", math.pi / 10800.0, "angular", 9103),
     "arc_minute": UnitInfo("arc_minute", "arc-minute", "'", math.pi / 10800.0, "angular", 9103),
     "arcminute": UnitInfo("arc_minute", "arc-minute", "'", math.pi / 10800.0, "angular", 9103),
     "'": UnitInfo("arc_minute", "arc-minute", "'", math.pi / 10800.0, "angular", 9103),
     
-    # Arc-second (EPSG:9104)
+    # arc-second (EPSG:9104)
     "arc-second": UnitInfo("arc_second", "arc-second", '"', math.pi / 648000.0, "angular", 9104),
     "arc_second": UnitInfo("arc_second", "arc-second", '"', math.pi / 648000.0, "angular", 9104),
     "arcsecond": UnitInfo("arc_second", "arc-second", '"', math.pi / 648000.0, "angular", 9104),
     '"': UnitInfo("arc_second", "arc-second", '"', math.pi / 648000.0, "angular", 9104),
     "arcsec": UnitInfo("arc_second", "arc-second", '"', math.pi / 648000.0, "angular", 9104),
     
-    # Grad/gon (EPSG:9105) - π/200 radians
+    # grad/gon (EPSG:9105) - π/200 radians
     "grad": UnitInfo("grad", "grad", "gon", math.pi / 200.0, "angular", 9105),
     "gon": UnitInfo("grad", "grad", "gon", math.pi / 200.0, "angular", 9105),
     "grads": UnitInfo("grad", "grad", "gon", math.pi / 200.0, "angular", 9105),
 }
 
-# Combined registry
+# combined registry
 _ALL_UNITS = {**_LINEAR_UNITS, **_ANGULAR_UNITS}
 
-# Canonical unit objects for common access
+# canonical unit objects for common access
 METER = _LINEAR_UNITS["meter"]
 FOOT = _LINEAR_UNITS["foot"]
 US_SURVEY_FOOT = _LINEAR_UNITS["us_survey_foot"]
@@ -235,13 +211,11 @@ KILOMETER = _LINEAR_UNITS["kilometer"]
 DEGREE = _ANGULAR_UNITS["degree"]
 RADIAN = _ANGULAR_UNITS["radian"]
 
-# Unknown unit placeholder
+# unknown unit placeholder
 UNKNOWN_UNIT = UnitInfo("unknown", "unknown", "?", 1.0, "unknown", None)
 
 
-# =============================================================================
-# Unit Lookup Functions
-# =============================================================================
+# unit Lookup Functions
 
 def lookup_unit(name: str) -> Optional[UnitInfo]:
     """
@@ -329,12 +303,12 @@ def parse_unit_string(s: str) -> UnitInfo:
     
     s_lower = s.lower().strip()
     
-    # First try direct lookup (for simple cases like "meter")
+    # first try direct lookup (for simple cases like "meter")
     direct = lookup_unit(s_lower)
     if direct is not None:
         return direct
     
-    # Try to extract unit from parentheses: "(metre)", "(ftUS)", etc.
+    # try to extract unit from parentheses: "(metre)", "(ftUS)", etc.
     paren_match = re.search(r'\(([^)]+)\)', s)
     if paren_match:
         paren_content = paren_match.group(1).strip()
@@ -342,7 +316,7 @@ def parse_unit_string(s: str) -> UnitInfo:
         if unit is not None:
             return unit
     
-    # Try common patterns in the string
+    # try common patterns in the string
     patterns = [
         (r'\bft\s*us\b', "us_survey_foot"),
         (r'\bus\s*survey\s*foot\b', "us_survey_foot"),
@@ -365,10 +339,6 @@ def parse_unit_string(s: str) -> UnitInfo:
     return UNKNOWN_UNIT
 
 
-# =============================================================================
-# CRS Unit Extraction
-# =============================================================================
-
 def _ensure_crs_obj(crs: Union[str, _CRS, Dict[str, Any]]) -> _CRS:
     """
     Accept WKT, PROJJSON (dict), proj string, EPSG code, or CRS object.
@@ -390,20 +360,20 @@ def _unit_from_axis(axis) -> UnitInfo:
     unit_name = axis.unit_name
     factor = axis.unit_conversion_factor
     
-    # Determine category from factor magnitude
-    # Angular units have factor < 0.1 (degrees = 0.0174...)
-    # Linear units have factor >= 0.001
+    # determine category from factor magnitude
+    # angular units have factor < 0.1 (degrees = 0.0174...)
+    # linear units have factor >= 0.001
     if factor is None:
         return UNKNOWN_UNIT
     
-    # Try to find matching unit in registry
+    # try to find matching unit in registry
     matched_unit = lookup_unit(unit_name) if unit_name else None
     
     if matched_unit is not None:
-        # If registry factor is close to pyproj factor, use registry (has more metadata)
+        # if registry factor is close to pyproj factor, use registry (has more metadata)
         if abs(matched_unit.to_base_factor - factor) < 1e-9:
             return matched_unit
-        # Otherwise create new UnitInfo with pyproj's authoritative factor
+        # otherwise create new UnitInfo with pyproj's authoritative factor
         return UnitInfo(
             name=matched_unit.name,
             display_name=matched_unit.display_name,
@@ -413,7 +383,7 @@ def _unit_from_axis(axis) -> UnitInfo:
             epsg_code=matched_unit.epsg_code,
         )
     
-    # Determine category heuristically
+    # determine category heuristically
     if factor < 0.1:
         category = "angular"
         abbrev = "?"
@@ -421,7 +391,7 @@ def _unit_from_axis(axis) -> UnitInfo:
         category = "linear"
         abbrev = "?"
     
-    # Create from pyproj info
+    # create from pyproj info
     display_name = unit_name if unit_name else "unknown"
     return UnitInfo(
         name=display_name.lower().replace(" ", "_") if display_name else "unknown",
@@ -465,13 +435,13 @@ def get_horizontal_unit(crs: Any) -> UnitInfo:
     except Exception:
         return UNKNOWN_UNIT
     
-    # For compound CRS, get the horizontal component
+    # for compound CRS, get the horizontal component
     if crs_obj.is_compound:
         sub_crs_list = getattr(crs_obj, 'sub_crs_list', None) or []
         if sub_crs_list:
             crs_obj = sub_crs_list[0]  # First is horizontal
     
-    # Get first axis (should be horizontal for most CRS)
+    # get first axis (should be horizontal for most CRS)
     if crs_obj.coordinate_system and crs_obj.coordinate_system.axis_list:
         axis = crs_obj.coordinate_system.axis_list[0]
         return _unit_from_axis(axis)
@@ -509,7 +479,7 @@ def get_vertical_unit(crs: Any) -> UnitInfo:
     except Exception:
         return UNKNOWN_UNIT
     
-    # For compound CRS, get the vertical component
+    # for compound CRS, get the vertical component
     if crs_obj.is_compound:
         sub_crs_list = getattr(crs_obj, 'sub_crs_list', None) or []
         if len(sub_crs_list) >= 2:
@@ -517,16 +487,16 @@ def get_vertical_unit(crs: Any) -> UnitInfo:
             if vert_crs.coordinate_system and vert_crs.coordinate_system.axis_list:
                 return _unit_from_axis(vert_crs.coordinate_system.axis_list[0])
     
-    # For standalone vertical CRS
+    # for standalone vertical CRS
     if getattr(crs_obj, 'is_vertical', False):
         if crs_obj.coordinate_system and crs_obj.coordinate_system.axis_list:
             return _unit_from_axis(crs_obj.coordinate_system.axis_list[0])
     
-    # For 3D geographic CRS, the last axis is vertical (height)
+    # for 3D geographic CRS, the last axis is vertical (height)
     if crs_obj.coordinate_system and crs_obj.coordinate_system.axis_list:
         axis_list = crs_obj.coordinate_system.axis_list
         if len(axis_list) >= 3:
-            # Third axis is typically height
+            # third axis is typically height
             return _unit_from_axis(axis_list[2])
     
     return UNKNOWN_UNIT
@@ -550,15 +520,13 @@ def get_crs_units(crs: Any) -> Tuple[UnitInfo, Optional[UnitInfo]]:
     h_unit = get_horizontal_unit(crs)
     v_unit = get_vertical_unit(crs)
     
-    # Return None for vertical if unknown/not present
+    # return None for vertical if unknown/not present
     if v_unit.name == "unknown":
         return h_unit, None
     return h_unit, v_unit
 
 
-# =============================================================================
-# Unit Conversion Functions
-# =============================================================================
+# unit Conversion Functions
 
 def convert_length(
     values: Union[np.ndarray, float, List[float]],
@@ -589,7 +557,7 @@ def convert_length(
     >>> convert_length(1000, METER, US_SURVEY_FOOT)
     array(3280.8333...)
     """
-    # Resolve units
+    # resolve units
     if isinstance(from_unit, str):
         from_unit = lookup_unit_strict(from_unit)
     if isinstance(to_unit, str):
@@ -676,9 +644,7 @@ def get_conversion_factor(from_unit: Union[str, UnitInfo], to_unit: Union[str, U
     return from_unit.to_base_factor / to_unit.to_base_factor
 
 
-# =============================================================================
-# Convenience Wrappers (for backward compatibility with existing crs_utils.py)
-# =============================================================================
+# convenience Wrappers (for backward compatibility with existing crs_utils.py)
 
 def horizontal_unit_scale(src_crs: Any, target_unit: str) -> Optional[float]:
     """
@@ -741,9 +707,7 @@ def vertical_unit_scale(src_crs: Any, target_unit: str) -> Optional[float]:
         return None
 
 
-# =============================================================================
 # PDAL Metadata Parsing
-# =============================================================================
 
 def parse_pdal_units(srs_metadata: Dict[str, Any]) -> Tuple[UnitInfo, UnitInfo]:
     """
@@ -779,9 +743,7 @@ def parse_pdal_units(srs_metadata: Dict[str, Any]) -> Tuple[UnitInfo, UnitInfo]:
     return h_unit, v_unit
 
 
-# =============================================================================
-# Catalog String Parsing
-# =============================================================================
+# catalog String Parsing
 
 def parse_catalog_vertical_units(vertical_str: str) -> UnitInfo:
     """
@@ -805,10 +767,10 @@ def parse_catalog_vertical_units(vertical_str: str) -> UnitInfo:
     if not vertical_str:
         return UNKNOWN_UNIT
     
-    # Use the general parser
+    # use the general parser
     unit = parse_unit_string(vertical_str)
     
-    # If unknown but looks like an orthometric datum, assume meters
+    # if unknown but looks like an orthometric datum, assume meters
     if unit.name == "unknown":
         v_lower = vertical_str.lower()
         if any(kw in v_lower for kw in ["navd88", "navd 88", "ngvd29", "egm96", "egm2008", "geoid"]):
@@ -817,9 +779,7 @@ def parse_catalog_vertical_units(vertical_str: str) -> UnitInfo:
     return unit
 
 
-# =============================================================================
-# Display/Formatting Utilities
-# =============================================================================
+# display/Formatting Utilities
 
 def format_value_with_unit(value: float, unit: UnitInfo, precision: int = 2) -> str:
     """

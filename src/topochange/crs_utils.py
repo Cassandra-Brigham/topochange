@@ -1,8 +1,4 @@
-"""CRS conversion and transformation utilities.
-
-Provides functions for converting between CRS formats (WKT, PROJ, EPSG),
-detecting vertical/horizontal components, and building coordinate transformers.
-"""
+"""CRS conversion and transformation utilities."""
 from functools import lru_cache
 from typing import Any, Dict, Optional, Union
 
@@ -13,7 +9,7 @@ from pyproj.transformer import TransformerGroup as _TransformerGroup
 
 Number = Union[int, float]
 
-# LRU cache for string-based CRS creation (most common case)
+# lRU cache for string-based CRS creation (most common case)
 @lru_cache(maxsize=128)
 def _cached_crs_from_string(crs_string: str) -> _CRS:
     """Cache CRS objects created from strings (WKT, EPSG codes, PROJ strings)."""
@@ -30,7 +26,7 @@ def _ensure_crs_obj(crs: Union[str, _CRS, Dict[str, Any]]) -> _CRS:
     if isinstance(crs, _CRS):
         return crs
     if isinstance(crs, dict):
-        # Dicts can't be cached directly; convert to JSON string for caching
+        # dicts can't be cached directly; convert to JSON string for caching
         import json
         json_str = json.dumps(crs, sort_keys=True)
         return _cached_crs_from_json(json_str)
@@ -73,13 +69,13 @@ def crs_equals(crs1: Union[str, _CRS, Dict[str, Any]],
     obj1 = _ensure_crs_obj(crs1)
     obj2 = _ensure_crs_obj(crs2)
 
-    # Fast path: compare EPSG codes if both have them
+    # fast path: compare EPSG codes if both have them
     epsg1 = obj1.to_epsg()
     epsg2 = obj2.to_epsg()
     if epsg1 is not None and epsg2 is not None:
         return epsg1 == epsg2
 
-    # Slow path: full comparison (cached by WKT strings)
+    # slow path: full comparison (cached by WKT strings)
     wkt1 = obj1.to_wkt(WktVersion.WKT2_2019)
     wkt2 = obj2.to_wkt(WktVersion.WKT2_2019)
     return _cached_crs_equals(wkt1, wkt2)
@@ -243,13 +239,13 @@ def is_3d_geographic_crs(crs: Union[str, _CRS, Dict[str, Any]]) -> bool:
     except Exception:
         return False
     
-    # Must be geographic (not projected, not compound, not vertical-only)
+    # must be geographic (not projected, not compound, not vertical-only)
     if not crs_obj.is_geographic:
         return False
     if crs_obj.is_compound:
         return False
     
-    # Check for 3 axes with the third being height
+    # check for 3 axes with the third being height
     cs = crs_obj.coordinate_system
     if cs is None or cs.axis_list is None:
         return False
@@ -257,7 +253,7 @@ def is_3d_geographic_crs(crs: Union[str, _CRS, Dict[str, Any]]) -> bool:
     if len(cs.axis_list) != 3:
         return False
     
-    # Third axis should be ellipsoidal height (direction "up")
+    # third axis should be ellipsoidal height (direction "up")
     third_axis = cs.axis_list[2]
     return third_axis.direction.lower() == "up"
 
@@ -273,7 +269,7 @@ def extract_ellipsoidal_height_as_vertical_crs(
         2D horizontal + 1D vertical
     
     A 3D geographic CRS like EPSG:4979 cannot be used directly as the 
-    vertical component of a CompoundCRS—we must synthesize a 1D vertical 
+    vertical component of a CompoundCRS:we must synthesize a 1D vertical 
     CRS from its datum information.
     
     Parameters
@@ -306,14 +302,14 @@ def extract_ellipsoidal_height_as_vertical_crs(
             f"Expected a 3D geographic CRS, got: {crs_obj.type_name}"
         )
     
-    # Extract datum info for the vertical CRS name
+    # extract datum info for the vertical CRS name
     datum_name = "Unknown Datum"
     if crs_obj.datum:
         datum_name = crs_obj.datum.name
     elif hasattr(crs_obj, 'datum_ensemble') and crs_obj.datum_ensemble:
         datum_name = crs_obj.datum_ensemble.name
     
-    # Extract the vertical axis unit (default to metre)
+    # extract the vertical axis unit (default to metre)
     unit_name = "metre"
     unit_factor = 1.0
     cs = crs_obj.coordinate_system
@@ -324,8 +320,8 @@ def extract_ellipsoidal_height_as_vertical_crs(
         if hasattr(third_axis, 'unit_conversion_factor') and third_axis.unit_conversion_factor:
             unit_factor = third_axis.unit_conversion_factor
     
-    # Build a custom 1D Vertical CRS WKT for ellipsoidal height
-    # This follows WKT2:2019 structure
+    # build a custom 1D Vertical CRS WKT for ellipsoidal height
+    # this follows WKT2:2019 structure
     vert_wkt = f'''VERTCRS["{datum_name} Ellipsoidal Height",
     VDATUM["{datum_name}"],
     CS[vertical,1],
@@ -365,11 +361,11 @@ def create_compound_crs(
     horiz_obj = _ensure_crs_obj(horizontal_crs)
     vert_obj = _ensure_crs_obj(vertical_crs)
     
-    # Create compound CRS using WKT concatenation
+    # create compound CRS using WKT concatenation
     horiz_wkt = horiz_obj.to_wkt()
     vert_wkt = vert_obj.to_wkt()
     
-    # Build compound WKT
+    # build compound WKT
     compound_wkt = f'COMPOUNDCRS["{horiz_obj.name} + {vert_obj.name}",{horiz_wkt},{vert_wkt}]'
     
     return _CRS.from_wkt(compound_wkt)
@@ -421,31 +417,31 @@ def parse_crs_components(crs: Any) -> tuple[Optional[str], Optional[str], Option
         return None, None, None
     
     try:
-        # Convert to pyproj CRS for consistent API
+        # convert to pyproj CRS for consistent API
         if not isinstance(crs, _CRS):
             pyproj_crs = _CRS.from_user_input(crs)
         else:
             pyproj_crs = crs
             
     except Exception:
-        # If conversion fails, try to get WKT directly from rasterio CRS
+        # if conversion fails, try to get WKT directly from rasterio CRS
         try:
             if hasattr(crs, 'wkt'):
-                # Assume it's horizontal-only since we can't parse it
+                # assume it's horizontal-only since we can't parse it
                 return None, crs.wkt, None
             else:
                 return None, str(crs), None
         except Exception:
             return None, None, None
     
-    # Case 1: Compound CRS (has both horizontal and vertical components)
+    # case 1: Compound CRS (has both horizontal and vertical components)
     if pyproj_crs.is_compound:
         compound_wkt = pyproj_crs.to_wkt()
         
-        # Extract sub-CRS components
+        # extract sub-CRS components
         sub_crs_list = getattr(pyproj_crs, 'sub_crs_list', None) or []
         
-        # First component is horizontal, second is vertical
+        # first component is horizontal, second is vertical
         horizontal_component = sub_crs_list[0] if len(sub_crs_list) >= 1 else None
         vertical_component = sub_crs_list[1] if len(sub_crs_list) >= 2 else None
         
@@ -454,13 +450,13 @@ def parse_crs_components(crs: Any) -> tuple[Optional[str], Optional[str], Option
         
         return compound_wkt, horizontal_wkt, vertical_wkt
     
-    # Case 2: Vertical CRS only
+    # case 2: Vertical CRS only
     if getattr(pyproj_crs, 'is_vertical', False):
         vertical_wkt = pyproj_crs.to_wkt()
         return None, None, vertical_wkt
     
-    # Case 3: Horizontal CRS only (geographic or projected)
-    # This is the most common case for rasters
+    # case 3: Horizontal CRS only (geographic or projected)
+    # this is the most common case for rasters
     horizontal_wkt = pyproj_crs.to_wkt()
     return None, horizontal_wkt, None
 
@@ -482,8 +478,8 @@ def transformer_with_epoch(
     src = _ensure_crs_obj(src_crs)
     dst = _ensure_crs_obj(dst_crs)
     
-    # Try epoch-aware transform first (pyproj >= 3.4.0)
-    # Correct parameter names are source_crs_epoch and target_crs_epoch
+    # try epoch-aware transform first (pyproj >= 3.4.0)
+    # correct parameter names are source_crs_epoch and target_crs_epoch
     try:
         transformer = Transformer.from_crs(
             src,
@@ -494,12 +490,12 @@ def transformer_with_epoch(
         )
         return transformer
     except TypeError:
-        # Fallback for older pyproj versions without epoch support
+        # fallback for older pyproj versions without epoch support
         pass
     except Exception as exc:
-        # Fallback for PROJ errors (CRSError, ProjError, RuntimeError) –
+        # fallback for PROJ errors (CRSError, ProjError, RuntimeError) –
         # e.g. missing deformation model grid for the requested epoch.
-        # Log a warning so the user knows epoch-awareness was dropped.
+        # log a warning so the user knows epoch-awareness was dropped.
         import warnings as _w
         _w.warn(
             f"Epoch-aware transformer failed ({type(exc).__name__}: {exc}); "
@@ -507,13 +503,11 @@ def transformer_with_epoch(
             stacklevel=2,
         )
 
-    # Fallback: standard transform without epoch awareness
+    # fallback: standard transform without epoch awareness
     return Transformer.from_crs(src, dst, always_xy=True)
 
 
-# ---------------------------------------------------------------------------
-# Unit scaling helpers
-# ---------------------------------------------------------------------------
+# unit scaling helpers
 
 _HORIZONTAL_UNIT_FACTORS = {
     "metre": 1.0,
@@ -576,9 +570,7 @@ def vertical_unit_scale(src_crs: Any, target_unit: str) -> Optional[float]:
     return src_m / tgt_m
 
 
-# ---------------------------------------------------------------------------
-# Vertical datum / dynamic helpers at geometry level
-# ---------------------------------------------------------------------------
+# vertical datum / dynamic helpers at geometry level
 
 
 @lru_cache(maxsize=64)
@@ -616,13 +608,13 @@ def apply_vertical_datum_transform(
     except Exception:
         return z
 
-    # Use cached transformer lookup (avoids repeated TransformerGroup construction)
+    # use cached Transformer lookup (avoids repeated TransformerGroup construction)
     transformer = _cached_vertical_transformer(src.to_wkt(), dst.to_wkt())
     if transformer is None:
         return z
 
     try:
-        # Optimization: pyproj broadcasts scalar x, y with array z, avoiding
+        # optimization: pyproj broadcasts scalar x, y with array z, avoiding
         # allocation of full dummy arrays. This is ~2x faster for large arrays.
         _, _, z_out = transformer.transform(0.0, 0.0, z.astype("float64"))
         return _np.asarray(z_out, dtype=z.dtype)
@@ -654,11 +646,9 @@ def apply_dynamic_transform(
         return x_out, y_out, z_out
 
 
-# ---------------------------------------------------------------------------
-# Vertical datum → CRS mapping
-# ---------------------------------------------------------------------------
+# vertical datum → CRS mapping
 
-# Mapping of vertical datum names (lowercase) to EPSG codes
+# mapping of vertical datum names (lowercase) to EPSG codes
 _VERTICAL_DATUM_EPSG = {
     "navd88": 5703,   # NAVD88 height (meters)
     "navd 88": 5703,
@@ -669,7 +659,7 @@ _VERTICAL_DATUM_EPSG = {
     "egm08": 3855,
 }
 
-# Geoid models that are NAVD88 realizations (US national geoids)
+# geoid models that are NAVD88 realizations (US national geoids)
 _NAVD88_GEOID_MODELS = frozenset({
     "geoid99", "geoid03", "geoid06", "geoid09",
     "geoid12a", "geoid12b", "geoid18",
@@ -705,24 +695,24 @@ def vertical_datum_to_crs(
     >>> vertical_datum_to_crs(None, "geoid18")
     <Vertical CRS: EPSG:5703 ...>
     """
-    # Ellipsoidal heights have no orthometric vertical CRS
+    # ellipsoidal heights have no orthometric vertical CRS
     if vertical_datum and "ellipsoid" in vertical_datum.lower():
         return None
 
-    # Try direct datum name lookup
+    # try direct datum name lookup
     if vertical_datum:
         key = vertical_datum.strip().lower()
         epsg = _VERTICAL_DATUM_EPSG.get(key)
         if epsg is not None:
             return _CRS.from_epsg(epsg)
 
-    # Try geoid model lookup
+    # try geoid model lookup
     if geoid_model:
         gm = geoid_model.strip().lower().replace("-", "").replace("_", "").replace(" ", "")
-        # Check if it's a known NAVD88 realization
+        # check if it's a known NAVD88 realization
         if gm in _NAVD88_GEOID_MODELS:
             return _CRS.from_epsg(5703)
-        # Check if it maps directly to a datum (e.g. "egm96")
+        # check if it maps directly to a datum (e.g. "egm96")
         epsg = _VERTICAL_DATUM_EPSG.get(gm)
         if epsg is not None:
             return _CRS.from_epsg(epsg)
@@ -771,10 +761,10 @@ def build_output_crs_wkt(
     else:
         output_crs = horiz_obj
 
-    # Convert to canonical WKT2:2019
+    # convert to canonical WKT2:2019
     output_wkt = crs_to_wkt2_2019(output_crs, pretty=False)
 
-    # Optionally wrap with epoch
+    # optionally wrap with epoch
     if epoch is not None:
         output_wkt = wrap_coordinate_metadata_wkt(output_crs, epoch)
 

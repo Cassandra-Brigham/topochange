@@ -1,18 +1,4 @@
-"""Data access utilities for OpenTopography and point cloud APIs.
-
-This module provides classes for querying and downloading data from
-OpenTopography's catalog API, including:
-- Interactive AOI definition via maps
-- Manual AOI definition via bounds or files
-- Catalog querying
-- DEM and point cloud download
-
-Integration with domain classes:
-- Raster: CRS-aware raster with metadata tracking
-- PointCloud: CRS-aware point cloud with metadata tracking
-- RasterPair: Pair of rasters for differencing
-- PointCloudPair: Pair of point clouds for comparison
-"""
+"""data access utilities for OpenTopography and point cloud APIs."""
 
 from __future__ import annotations
 
@@ -46,11 +32,11 @@ import hashlib
 import time
 import logging
 
-# Set up logging
+# set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Optional boto3 for S3 access
+# optional boto3 for S3 access
 try:
     import boto3
     from botocore import UNSIGNED
@@ -61,7 +47,7 @@ except ImportError:
     boto3 = None
 
 
-# Optional PDAL - use wrapper for Colab compatibility
+# optional PDAL - use wrapper for Colab compatibility
 try:
     from .pdal_wrapper import pdal
     _PDAL_AVAILABLE = True
@@ -76,9 +62,7 @@ except ImportError:
 gdal.UseExceptions()
 
 
-# =============================================================================
-# Domain Class Imports (optional - graceful degradation if not available)
-# =============================================================================
+# domain Class Imports
 try:
     from .raster import Raster
     from .pointcloud import PointCloud
@@ -112,7 +96,7 @@ except ImportError:
     RasterPair = None
     PointCloudPair = None
     CRSHistory = None
-    # Fallback definitions
+    # fallback definitions
     UnitInfo = None
     UNKNOWN_UNIT = None
     METER = None
@@ -120,9 +104,7 @@ except ImportError:
     US_SURVEY_FOOT = None
 
 
-# =============================================================================
-# Helper Functions
-# =============================================================================
+# helper Functions
 
 def _date_to_decimal_year(d: Union[date, datetime, None]) -> Optional[float]:
     """
@@ -150,11 +132,11 @@ def _date_to_decimal_year(d: Union[date, datetime, None]) -> Optional[float]:
     
     if isinstance(d, datetime):
         year = d.year
-        # Day of year (1-366)
+        # day of year (1-366)
         doy = d.timetuple().tm_yday
-        # Add fractional day from time
+        # add fractional day from time
         fractional_day = (d.hour + d.minute / 60.0 + d.second / 3600.0) / 24.0
-        # Days in year (account for leap years)
+        # days in year (account for leap years)
         days_in_year = 366 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 365
         return year + (doy - 1 + fractional_day) / days_in_year
     elif isinstance(d, date):
@@ -194,12 +176,12 @@ def _parse_vertical_crs_string(vertical_str: Optional[str]) -> Dict[str, Any]:
         - 'units': str or None (e.g., "meter", "foot", "us_survey_foot")
         - 'unit_info': UnitInfo or None (enhanced unit metadata)
     """
-    # Handle None, NaN, empty strings
+    # handle None, NaN, empty strings
     if vertical_str is None:
         return {'is_orthometric': None, 'vertical_datum': None, 'geoid_model': None, 
                 'units': None, 'unit_info': UNKNOWN_UNIT if _UNIT_UTILS_AVAILABLE else None}
     
-    # Check for pandas NaN
+    # check for pandas NaN
     try:
         if pd.isna(vertical_str):
             return {'is_orthometric': None, 'vertical_datum': None, 'geoid_model': None, 
@@ -207,7 +189,7 @@ def _parse_vertical_crs_string(vertical_str: Optional[str]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         pass
     
-    # Handle empty or whitespace-only strings
+    # handle empty or whitespace-only strings
     vertical_str = str(vertical_str).strip()
     if not vertical_str or vertical_str.lower() == 'nan':
         return {'is_orthometric': None, 'vertical_datum': None, 'geoid_model': None, 
@@ -215,23 +197,23 @@ def _parse_vertical_crs_string(vertical_str: Optional[str]) -> Dict[str, Any]:
     
     v = vertical_str.lower()
     
-    # Check for ellipsoidal heights
+    # check for ellipsoidal heights
     # NOTE: Ellipsoidal heights can be in ANY unit (feet, meters, etc.)
-    # The datum is independent of the unit system. We should NOT assume meters.
+    # the datum is independent of the unit system. We should NOT assume meters.
     if 'ellipsoid' in v:
-        # First, try to extract unit from the string (e.g., "Ellipsoid (ftUS)")
+        # first, try to extract unit from the string (e.g., "Ellipsoid (ftUS)")
         extracted_unit = None
         extracted_unit_info = UNKNOWN_UNIT if _UNIT_UTILS_AVAILABLE else None
         
-        # Check for unit indicators in the string
+        # check for unit indicators in the string
         if _UNIT_UTILS_AVAILABLE:
-            # Use the catalog parser which handles various unit formats
+            # use the catalog parser which handles various unit formats
             parsed_unit = parse_catalog_vertical_units(vertical_str)
             if parsed_unit.name != "unknown":
                 extracted_unit = parsed_unit.name
                 extracted_unit_info = parsed_unit
         
-        # Fallback: check for common unit patterns manually
+        # fallback: check for common unit patterns manually
         if extracted_unit is None:
             unit_patterns = [
                 (r'\(ftus\)', 'us_survey_foot'),
@@ -250,8 +232,8 @@ def _parse_vertical_crs_string(vertical_str: Optional[str]) -> Dict[str, Any]:
                         extracted_unit_info = lookup_unit(unit_name)
                     break
         
-        # Return with whatever unit we found (or UNKNOWN if none detected)
-        # Do NOT default to meters - that's a dangerous assumption
+        # return with whatever unit we found (or UNKNOWN if None detected)
+        # do NOT default to meters - that's a dangerous assumption
         return {
             'is_orthometric': False, 
             'vertical_datum': 'ellipsoidal', 
@@ -260,20 +242,20 @@ def _parse_vertical_crs_string(vertical_str: Optional[str]) -> Dict[str, Any]:
             'unit_info': extracted_unit_info  # UNKNOWN_UNIT if not detected
         }
     
-    # Parse orthometric heights with geoid model
+    # parse orthometric heights with geoid model
     result = {'is_orthometric': True, 'vertical_datum': None, 'geoid_model': None, 
               'units': None, 'unit_info': UNKNOWN_UNIT if _UNIT_UTILS_AVAILABLE else None}
     
-    # Use unit_utils for enhanced unit parsing if available
+    # use unit_utils for enhanced unit parsing if available
     if _UNIT_UTILS_AVAILABLE:
         unit_info = parse_catalog_vertical_units(vertical_str)
         result['unit_info'] = unit_info
         if unit_info.name != "unknown":
             result['units'] = unit_info.name
     else:
-        # Fallback to manual parsing
-        # Extract units from the string
-        # Common patterns: "(metre)", "(meter)", "(m)", "(ftUS)", "(foot)", "(feet)", "(ft)"
+        # fallback to manual parsing
+        # extract units from the string
+        # common patterns: "(metre)", "(meter)", "(m)", "(ftUS)", "(foot)", "(feet)", "(ft)"
         unit_patterns = [
             (r'\(ftus\)', 'us_survey_foot'),
             (r'\(us\s*survey\s*foot\)', 'us_survey_foot'),
@@ -293,7 +275,7 @@ def _parse_vertical_crs_string(vertical_str: Optional[str]) -> Dict[str, Any]:
                 result['units'] = unit_name
                 break
     
-    # Extract vertical datum
+    # extract vertical datum
     if 'navd88' in v or 'navd 88' in v:
         result['vertical_datum'] = 'NAVD88'
     elif 'ngvd29' in v or 'ngvd 29' in v:
@@ -305,11 +287,11 @@ def _parse_vertical_crs_string(vertical_str: Optional[str]) -> Dict[str, Any]:
         result['vertical_datum'] = 'EGM2008'
         result['geoid_model'] = 'egm2008'
     
-    # Look for geoid model ANYWHERE in the string (not just in parentheses)
-    # Common patterns: "Geoid12B", "Geoid 12B", "GEOID18", "geoid09", etc.
+    # look for geoid model ANYWHERE in the string (not just in parentheses)
+    # common patterns: "Geoid12B", "Geoid 12B", "GEOID18", "geoid09", etc.
     
-    # First, try to find geoid patterns in the full string
-    # Match "geoid" followed by version number (with optional space/dash)
+    # first, try to find geoid patterns in the full string
+    # match "geoid" followed by version number (with optional space/dash)
     geoid_patterns = [
         r'geoid\s*[-_]?\s*18',      # geoid18, geoid 18, geoid-18
         r'geoid\s*[-_]?\s*12\s*b',  # geoid12b, geoid 12b, geoid12B
@@ -335,17 +317,17 @@ def _parse_vertical_crs_string(vertical_str: Optional[str]) -> Dict[str, Any]:
             result['geoid_model'] = geoid_name
             break
     
-    # If no geoid found yet, check for parenthetical content that's NOT a unit
+    # if no geoid found yet, check for parenthetical content that's NOT a unit
     if result['geoid_model'] is None:
         paren_match = re.search(r'\(([^)]+)\)', vertical_str)
         if paren_match:
             paren_content = paren_match.group(1).strip().lower()
-            # Skip if it's just a unit (meter, metre, foot, feet, etc.)
+            # skip if it's just a unit (meter, metre, foot, feet, etc.)
             unit_patterns = ['meter', 'metre', 'foot', 'feet', 'ft', 'm']
             is_unit = any(paren_content == u or paren_content.startswith(u + ' ') for u in unit_patterns)
             
             if not is_unit and 'geoid' in paren_content:
-                # Extract geoid name from parentheses
+                # extract geoid name from parentheses
                 for pattern, geoid_name in geoid_mapping.items():
                     if re.search(pattern, paren_content, re.IGNORECASE):
                         result['geoid_model'] = geoid_name
@@ -380,11 +362,11 @@ def _normalize_unit_name(units: str) -> str:
         if unit_info is not None:
             return unit_info.name
     
-    # Fallback to manual normalization
+    # fallback to manual normalization
     valid_units = ['meter', 'foot', 'us_survey_foot']
     units_lower = units.lower().replace(' ', '_').replace('-', '_')
     
-    # Normalize unit names
+    # normalize unit names
     if units_lower in ['m', 'meters', 'metre', 'metres']:
         return 'meter'
     elif units_lower in ['ft', 'feet', 'foot']:
@@ -555,9 +537,7 @@ class DataAccess:
         self.polygon = dict(merged_polygon=merged, all_polys=list(gdf.geometry))
         return self.bounds
 
-# ----------------------------------------------------------------------
-# OpenTopographyQuery
-# ----------------------------------------------------------------------
+# openTopographyQuery
 class OpenTopographyQuery:
     def __init__(self, data_access: DataAccess):
         """Create a new query object tied to a particular AOI.
@@ -643,18 +623,18 @@ class OpenTopographyQuery:
             coverage = meta.get("temporalCoverage")
 
             if isinstance(coverage, str):
-                # Handle the string format, e.g., "2018-01-13 / 2018-06-11"
+                # handle the string format, e.g., "2018-01-13 / 2018-06-11"
                 if "/" in coverage:
                     parts = coverage.split("/")
                     start_date_str = parts[0].strip()
                     end_date_str = parts[1].strip()
                 else:
-                    # Handle a single date string, e.g., "2002-09-18"
+                    # handle a single date string, e.g., "2002-09-18"
                     start_date_str = coverage.strip()
                     end_date_str = coverage.strip()
             
             elif isinstance(coverage, dict):
-                # Handle the dictionary format for robustness
+                # handle the dictionary format for robustness
                 start_date_str = coverage.get("startDate")
                 end_date_str = coverage.get("endDate")
 
@@ -685,8 +665,6 @@ class OpenTopographyQuery:
         return self.catalog_df
     
     
-        
-
     # shorthand to select compare / reference rows by DataFrame index
     def pick(self, idx_compare: int, idx_reference: int):
         """Select the compare and reference datasets by row index.
@@ -732,7 +710,7 @@ class OpenTopographyQuery:
         compare_end = df["EndDate"].iloc[idx_compare]
         if compare_start and compare_end:
             self.compare_epoch = compare_start + (compare_end - compare_start) / 2
-            # Also store as decimal year for compatibility with Raster/PointCloud
+            # also store as decimal year for compatibility with Raster/PointCloud
             self.compare_epoch_decimal = _date_to_decimal_year(self.compare_epoch)
         else:
             self.compare_epoch = None
@@ -747,62 +725,62 @@ class OpenTopographyQuery:
             self.reference_epoch = None
             self.reference_epoch_decimal = None
         
-        # Parse vertical CRS info for easier access
+        # parse vertical CRS info for easier access
         self.compare_vertical_info = _parse_vertical_crs_string(self.compare_vertical_crs)
         self.reference_vertical_info = _parse_vertical_crs_string(self.reference_vertical_crs)
         
-        # Log vertical CRS info for debugging
+        # log vertical CRS info for debugging
         logger.debug(f"Compare vertical CRS string: '{self.compare_vertical_crs}'")
         logger.debug(f"Compare vertical info parsed: {self.compare_vertical_info}")
         logger.debug(f"Reference vertical CRS string: '{self.reference_vertical_crs}'")
         logger.debug(f"Reference vertical info parsed: {self.reference_vertical_info}")
         
-        # Print warnings about vertical CRS
+        # print warnings about vertical CRS
         if self.compare["Vertical Coordinates"] != self.reference["Vertical Coordinates"]:
-            print("⚠️  Vertical CRSs differ between datasets")
+            print("WARNING: Vertical CRSs differ between datasets")
         
-        # Print geoid info for user
+        # print geoid info for user
         compare_geoid = self.compare_vertical_info.get('geoid_model')
         reference_geoid = self.reference_vertical_info.get('geoid_model')
         if compare_geoid:
-            print(f"🔹 Compare Geoid: {compare_geoid}")
+            print(f"Compare Geoid: {compare_geoid}")
         else:
-            print(f"⚠️  Compare vertical CRS: '{self.compare_vertical_crs}' - geoid not detected, use set_compare_geoid()")
+            print(f"WARNING: Compare vertical CRS: '{self.compare_vertical_crs}' - geoid not detected, use set_compare_geoid()")
         if reference_geoid:
-            print(f"🔹 Reference Geoid: {reference_geoid}")
+            print(f"Reference Geoid: {reference_geoid}")
         else:
-            print(f"⚠️  Reference vertical CRS: '{self.reference_vertical_crs}' - geoid not detected, use set_reference_geoid()")
+            print(f"WARNING: Reference vertical CRS: '{self.reference_vertical_crs}' - geoid not detected, use set_reference_geoid()")
         
-        # Print units info for user (use UnitInfo if available for better display)
+        # print units info for user (use UnitInfo if available for better display)
         compare_unit_info = self.compare_vertical_info.get('unit_info')
         reference_unit_info = self.reference_vertical_info.get('unit_info')
         compare_units = self.compare_vertical_info.get('units')
         reference_units = self.reference_vertical_info.get('units')
         
         if compare_unit_info is not None and hasattr(compare_unit_info, 'display_name') and compare_unit_info.name != 'unknown':
-            print(f"🔹 Compare Units: {compare_unit_info.display_name}")
+            print(f"Compare Units: {compare_unit_info.display_name}")
         elif compare_units:
-            print(f"🔹 Compare Units: {compare_units}")
+            print(f"Compare Units: {compare_units}")
         else:
-            print(f"⚠️  Compare units NOT DETECTED from catalog string: '{self.compare_vertical_crs}'")
+            print(f"WARNING: Compare units NOT DETECTED from catalog string: '{self.compare_vertical_crs}'")
             print(f"    → Use set_compare_units('us_survey_foot') or set_compare_units('meter') to specify")
         
         if reference_unit_info is not None and hasattr(reference_unit_info, 'display_name') and reference_unit_info.name != 'unknown':
-            print(f"🔹 Reference Units: {reference_unit_info.display_name}")
+            print(f"Reference Units: {reference_unit_info.display_name}")
         elif reference_units:
-            print(f"🔹 Reference Units: {reference_units}")
+            print(f"Reference Units: {reference_units}")
         else:
-            print(f"⚠️  Reference units NOT DETECTED from catalog string: '{self.reference_vertical_crs}'")
+            print(f"WARNING: Reference units NOT DETECTED from catalog string: '{self.reference_vertical_crs}'")
             print(f"    → Use set_reference_units('us_survey_foot') or set_reference_units('meter') to specify")
         
-        # Warn about unit mismatch or unknown units
+        # warn about unit mismatch or unknown units
         if compare_units and reference_units and compare_units != reference_units:
-            print(f"⚠️  UNIT MISMATCH: Compare is {compare_units}, Reference is {reference_units} - conversion will be needed!")
+            print(f"WARNING: UNIT MISMATCH: Compare is {compare_units}, Reference is {reference_units} - conversion will be needed!")
         elif (compare_units is None or reference_units is None) and (compare_units != reference_units):
-            print(f"⚠️  UNIT CHECK REQUIRED: One or both units unknown - verify data values match expected ranges")
+            print(f"WARNING: UNIT CHECK REQUIRED: One or both units unknown - verify data values match expected ranges")
         
-        print(f"🔹 Compare Epoch: {self.compare_epoch} ({self.compare_epoch_decimal:.4f})" if self.compare_epoch_decimal else f"🔹 Compare Epoch: {self.compare_epoch}")
-        print(f"🔹 Reference Epoch: {self.reference_epoch} ({self.reference_epoch_decimal:.4f})" if self.reference_epoch_decimal else f"🔹 Reference Epoch: {self.reference_epoch}")
+        print(f"Compare Epoch: {self.compare_epoch} ({self.compare_epoch_decimal:.4f})" if self.compare_epoch_decimal else f"Compare Epoch: {self.compare_epoch}")
+        print(f"Reference Epoch: {self.reference_epoch} ({self.reference_epoch_decimal:.4f})" if self.reference_epoch_decimal else f"Reference Epoch: {self.reference_epoch}")
         
         return self.compare, self.reference
     
@@ -862,16 +840,14 @@ class OpenTopographyQuery:
         else:
             raise ValueError(f"dataset must be 'compare' or 'reference', got '{dataset}'")
 
-# ------------------------------------------------------------------------------------------
-# Download data and make DEMs
-# ------------------------------------------------------------------------------------------
+# download data and make DEMs
 class GetDEMs:
     """Generate DEMs from local LAZ/point files or AWS EPT sources."""
 
     def __init__(self, data_access, ot_query):
         self.da = data_access
         self.ot = ot_query
-        # Reusable HTTP session for connection pooling (avoids per-request TLS handshakes)
+        # reusable HTTP session for connection pooling (avoids per-request TLS handshakes)
         self._session = requests.Session()
         self._session.headers.update({
             'User-Agent': 'topochange/1.0',
@@ -986,7 +962,7 @@ class GetDEMs:
         band = ds.GetRasterBand(1)
         arr = band.ReadAsArray()
         
-        # Check for NaN or infinite values
+        # check for NaN or infinite values
         nan_mask = np.isnan(arr) | np.isinf(arr)
         nan_count = np.sum(nan_mask)
         
@@ -996,7 +972,7 @@ class GetDEMs:
             band.WriteArray(arr)
             modified = True
         
-        # Ensure nodata value is set in metadata
+        # ensure nodata value is set in metadata
         current_nodata = band.GetNoDataValue()
         if current_nodata != nodata:
             logger.info(f"Setting nodata value to {nodata} (was {current_nodata})")
@@ -1008,9 +984,6 @@ class GetDEMs:
         
         return modified
 
-    # =========================================================================
-    # Point Cloud Download Methods (EPT/S3-based)
-    # =========================================================================
     
     def download_file(self, url: str, output_path: Path, retry_count: int = 3) -> Dict[str, Any]:
         """
@@ -1040,12 +1013,12 @@ class GetDEMs:
             'success': False
         }
         
-        # Check if the file already exists and is complete (or can be resumed)
+        # check if the file already exists and is complete (or can be resumed)
         existing_size = output_path.stat().st_size if output_path.exists() else 0
 
         for attempt in range(retry_count):
             try:
-                # Use Range header to resume partial downloads
+                # use Range header to resume partial downloads
                 headers = {}
                 if existing_size > 0:
                     headers['Range'] = f'bytes={existing_size}-'
@@ -1053,7 +1026,7 @@ class GetDEMs:
                 logger.info(f"Downloading: {url}" + (f" (resuming from {existing_size:,} bytes)" if existing_size else ""))
                 response = self._session.get(url, stream=True, timeout=30, headers=headers)
 
-                # If server returns 416 Range Not Satisfiable, file is already complete
+                # if server returns 416 Range Not Satisfiable, file is already complete
                 if response.status_code == 416:
                     logger.info(f"File already complete: {output_path.name}")
                     file_metadata['size_bytes'] = existing_size
@@ -1062,16 +1035,16 @@ class GetDEMs:
 
                 response.raise_for_status()
 
-                # Validate existing file against Content-Length for non-resumed downloads
+                # validate existing file against Content-Length for non-resumed downloads
                 if existing_size > 0 and response.status_code == 200:
-                    # Server didn't support Range — check if existing file is complete
+                    # server didn't support Range : check if existing file is complete
                     content_length = response.headers.get('Content-Length')
                     if content_length and existing_size >= int(content_length):
                         logger.info(f"File already exists: {output_path.name}")
                         file_metadata['size_bytes'] = existing_size
                         file_metadata['success'] = True
                         return file_metadata
-                    # Server ignored Range header — need to re-download from scratch
+                    # server ignored Range header : need to re-download from scratch
                     existing_size = 0
 
                 output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1089,7 +1062,7 @@ class GetDEMs:
 
             except Exception as e:
                 logger.warning(f"Attempt {attempt + 1} failed for {url}: {e}")
-                # Update existing_size for next resume attempt
+                # update existing_size for next resume attempt
                 existing_size = output_path.stat().st_size if output_path.exists() else 0
                 if attempt < retry_count - 1:
                     time.sleep(2 ** attempt)
@@ -1121,7 +1094,7 @@ class GetDEMs:
         from collections import deque
         intersecting_nodes = []
 
-        # Start with root node
+        # start with root node
         queue = deque(['0-0-0-0'])
         visited = set()
 
@@ -1132,14 +1105,14 @@ class GetDEMs:
                 continue
             visited.add(node_key)
             
-            # Parse node key (D-X-Y-Z format)
+            # parse node key (D-X-Y-Z format)
             parts = node_key.split('-')
             if len(parts) != 4:
                 continue
                 
             depth, x, y, z = map(int, parts)
             
-            # Calculate node bounds
+            # calculate node bounds
             scale = 2 ** depth
             node_minx = bounds[0] + (bounds[3] - bounds[0]) * x / scale
             node_maxx = bounds[0] + (bounds[3] - bounds[0]) * (x + 1) / scale
@@ -1148,11 +1121,11 @@ class GetDEMs:
             
             node_box = box(node_minx, node_miny, node_maxx, node_maxy)
             
-            # Check intersection with AOI
+            # check intersection with AOI
             if not node_box.intersects(aoi_geom):
                 continue
             
-            # Try to get hierarchy file for this node
+            # try to get hierarchy file for this node
             hierarchy_url = f"{base_url}/ept-hierarchy/{node_key}.json"
             
             try:
@@ -1160,12 +1133,12 @@ class GetDEMs:
                 if response.status_code == 200:
                     hierarchy_data = response.json()
                     
-                    # Add nodes with points
+                    # add nodes with points
                     for key, value in hierarchy_data.items():
                         if value > 0:  # Node has points
                             intersecting_nodes.append(key)
                             
-                            # Add child nodes to queue for deeper exploration
+                            # add child nodes to queue for deeper exploration
                             if depth < 10:  # Limit depth
                                 key_parts = key.split('-')
                                 if len(key_parts) == 4:
@@ -1207,18 +1180,18 @@ class GetDEMs:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Get AOI geometry in appropriate CRS
+        # get AOI geometry in appropriate CRS
         aoi_geom = self.da.polygon.get("merged_polygon")
         if aoi_geom is None:
             raise ValueError("AOI polygon not defined")
         
-        # USGS EPT base URL
+        # uSGS EPT base URL
         base_url = f"https://s3-us-west-2.amazonaws.com/usgs-lidar-public/{dataset_id}"
         
         downloaded_files = []
         
         try:
-            # Get EPT metadata
+            # get EPT metadata
             response = self._session.get(f"{base_url}/ept.json", timeout=10)
             response.raise_for_status()
             ept_meta = response.json()
@@ -1228,7 +1201,7 @@ class GetDEMs:
                 logger.error(f"Invalid EPT bounds for {dataset_id}")
                 return []
             
-            # Transform AOI to EPT CRS if needed
+            # transform AOI to EPT CRS if needed
             ept_srs = ept_meta.get('srs', {}).get('horizontal', 'EPSG:4326')
             try:
                 transformer = Transformer.from_crs("EPSG:4326", ept_srs, always_xy=True)
@@ -1237,7 +1210,7 @@ class GetDEMs:
             except Exception:
                 aoi_transformed = aoi_geom
             
-            # Get intersecting nodes
+            # get intersecting nodes
             nodes = self.get_ept_hierarchy_nodes(base_url, bounds, aoi_transformed, max_nodes=max_tiles)
             logger.info(f"Found {len(nodes)} EPT nodes intersecting AOI")
             
@@ -1245,7 +1218,7 @@ class GetDEMs:
                 logger.warning(f"No intersecting nodes found for {dataset_id}")
                 return []
             
-            # Download LAZ files in parallel
+            # download LAZ files in parallel
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
                 for node in nodes[:max_tiles]:
@@ -1300,7 +1273,7 @@ class GetDEMs:
         
         downloaded_files = []
         
-        # Get EPT URL from STAC
+        # get EPT URL from STAC
         stac_url = f"https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/entwine/stac/DigitalCoast_mission_{dataset_id}.json"
         
         try:
@@ -1318,7 +1291,7 @@ class GetDEMs:
             ept_url = stac_data['assets']['ept']['href']
             base_url = ept_url.replace('/ept.json', '')
 
-            # Get EPT metadata
+            # get EPT metadata
             response = self._session.get(ept_url, timeout=10)
             response.raise_for_status()
             ept_meta = response.json()
@@ -1328,7 +1301,7 @@ class GetDEMs:
                 logger.error(f"Invalid EPT bounds for {dataset_id}")
                 return []
             
-            # Transform AOI to EPT CRS if needed
+            # transform AOI to EPT CRS if needed
             ept_srs = ept_meta.get('srs', {}).get('horizontal', 'EPSG:4326')
             try:
                 transformer = Transformer.from_crs("EPSG:4326", ept_srs, always_xy=True)
@@ -1337,7 +1310,7 @@ class GetDEMs:
             except Exception:
                 aoi_transformed = aoi_geom
             
-            # Get intersecting nodes
+            # get intersecting nodes
             nodes = self.get_ept_hierarchy_nodes(base_url, bounds, aoi_transformed, max_nodes=max_tiles)
             logger.info(f"Found {len(nodes)} EPT nodes intersecting AOI")
             
@@ -1345,7 +1318,7 @@ class GetDEMs:
                 logger.warning(f"No intersecting nodes found for {dataset_id}")
                 return []
             
-            # Download LAZ files in parallel
+            # download LAZ files in parallel
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
                 for node in nodes[:max_tiles]:
@@ -1412,7 +1385,7 @@ class GetDEMs:
         
         downloaded_files = []
 
-        # Reuse or create S3 client for OpenTopography (connection pooling)
+        # reuse or create S3 client for OpenTopography (connection pooling)
         if not hasattr(self, '_ot_s3_client'):
             s3_config = Config(
                 signature_version=UNSIGNED,
@@ -1427,11 +1400,11 @@ class GetDEMs:
         s3_client = self._ot_s3_client
         
         try:
-            # FIRST: Do a targeted search for tile index files at the root level
+            # fIRST: Do a targeted search for tile index files at the root level
             tile_index_candidates = []
             subdirs = []
             
-            # List just the first level (no recursive deep dive yet)
+            # list just the first level (no recursive deep dive yet)
             root_response = s3_client.list_objects_v2(
                 Bucket='pc-bulk',
                 Prefix=f"{short_name}/",
@@ -1439,7 +1412,7 @@ class GetDEMs:
                 MaxKeys=1000
             )
             
-            # Check direct files at root level for tile index
+            # check direct files at root level for tile index
             for obj in root_response.get('Contents', []):
                 key = obj['Key']
                 filename = Path(key).name.lower()
@@ -1459,17 +1432,17 @@ class GetDEMs:
                         tile_index_candidates.append(('shp', key))
                         logger.info(f"Found tile index candidate: {key}")
             
-            # Get subdirectories
+            # get subdirectories
             subdirs = [p['Prefix'] for p in root_response.get('CommonPrefixes', [])]
             if subdirs:
                 logger.info(f"Found subdirectories: {subdirs}")
             
-            # Log root level files
+            # log root level files
             root_files = [Path(obj['Key']).name for obj in root_response.get('Contents', [])]
             if root_files:
                 logger.info(f"Root level files: {root_files}")
             
-            # Try each tile index candidate
+            # try each tile index candidate
             tile_index_found = False
             for idx_type, tile_index_key in tile_index_candidates:
                 if tile_index_found:
@@ -1527,15 +1500,15 @@ class GetDEMs:
                                     futures = []
                                     
                                     for idx, tile in intersecting_tiles.iterrows():
-                                        # Initialize variables for this tile
+                                        # initialize variables for this tile
                                         url_val = None
                                         filename = None
                                         s3_key = None
                                         
-                                        # Check URL column first - parse full S3 path
+                                        # check URL column first - parse full S3 path
                                         if 'URL' in tile.index and pd.notna(tile['URL']):
                                             url_val = str(tile['URL']).strip()
-                                            # Parse the URL to extract S3 key
+                                            # parse the URL to extract S3 key
                                             # URL format: https://opentopography.s3.sdsc.edu/pc-bulk/dataset/subdir/file.las
                                             if 'pc-bulk/' in url_val:
                                                 s3_key = url_val.split('pc-bulk/')[-1]
@@ -1547,7 +1520,7 @@ class GetDEMs:
                                                 s3_key = url_val.split('pc-bulk/')[-1]
                                                 filename = Path(s3_key).name
                                         
-                                        # If no URL or no s3_key from URL, try filename columns
+                                        # if no URL or no s3_key from URL, try filename columns
                                         if not filename:
                                             for field in ['Filename', 'filename', 'file', 'name', 'file_name',
                                                          'tilename', 'File', 'Name']:
@@ -1560,15 +1533,15 @@ class GetDEMs:
                                         if not filename or not filename.lower().endswith(('.laz', '.las')):
                                             continue
                                         
-                                        # If we don't have s3_key from URL, search for it
+                                        # if we don't have s3_key from URL, search for it
                                         if not s3_key:
                                             s3_key = f"{short_name}/{filename}"
                                             
-                                            # Check if file exists at root level
+                                            # check if file exists at root level
                                             try:
                                                 s3_client.head_object(Bucket='pc-bulk', Key=s3_key)
                                             except:
-                                                # Search in subdirectories
+                                                # search in subdirectories
                                                 found_in_subdir = False
                                                 for subdir in subdirs:
                                                     subdir_key = f"{subdir}{filename}"
@@ -1600,12 +1573,12 @@ class GetDEMs:
                     logger.warning(f"Failed to process tile index {tile_index_key}: {e}")
                     continue
             
-            # Fallback if no tile index worked
+            # fallback if no tile index worked
             if not tile_index_found:
                 if not tile_index_candidates:
                     logger.warning(f"No tile index files found for {short_name}")
                 
-                # List LAZ files for fallback filtering
+                # list LAZ files for fallback filtering
                 if dataset_epsg:
                     logger.info("Falling back to filename-based tile filtering...")
                     logger.info("Listing all LAZ files in bucket...")
@@ -1827,7 +1800,7 @@ class GetDEMs:
             A PDAL pipeline specification representing the requested
             operations.
         """
-        # Initialize the pipeline with reading and cropping stages
+        # initialize the Pipeline with reading and cropping stages
         pointcloud_pipeline = [
             {
                 "type": "readers.las",
@@ -1839,14 +1812,14 @@ class GetDEMs:
             }
         ]
 
-        # Optionally add a noise filter stage
+        # optionally add a noise filter stage
         if filterNoise:
             pointcloud_pipeline.append({
                 "type": "filters.range",
                 "limits": "Classification![7:7], Classification![18:18]"
             })
 
-        # Optionally add reclassification stages
+        # optionally add reclassification stages
         if reclassify:
             pointcloud_pipeline += [
                 {"type": "filters.assign", "value": "Classification = 0"},
@@ -1854,13 +1827,13 @@ class GetDEMs:
                 {"type": "filters.range", "limits": "Classification[2:2]"}
             ]
 
-        # Add reprojection stage
+        # add reprojection stage
         pointcloud_pipeline.append({
             "type": "filters.reprojection",
             "out_srs": outCRS,
         })
 
-        # Optionally add a save point cloud stage
+        # optionally add a save point cloud stage
         if savePointCloud:
             if pc_outType not in ['las', 'laz']:
                 raise Exception("pc_outType must be 'las' or 'laz'.")
@@ -1928,21 +1901,21 @@ class GetDEMs:
         dict
             A PDAL pipeline dictionary describing the steps to generate the DEM.
         """
-        # Build the base point cloud pipeline using the provided parameters
+        # build the base point cloud Pipeline using the provided parameters
         pointcloud_pipeline = self.build_pdal_pipeline_from_file(filename, extent, filterNoise, reclassify, savePointCloud, outCRS, pc_outName, pc_outType, output_crs_wkt=output_crs_wkt)
         
-        # Prepare the base pipeline dictionary
+        # prepare the base Pipeline dictionary
         dem_pipeline = {
             "pipeline": pointcloud_pipeline
         }
 
-        # Add appropriate stages based on DEM type
-        # Use full WKT2 CRS (with vertical + epoch) when available,
+        # add appropriate stages based on DEM type
+        # use full WKT2 CRS (with vertical + epoch) when available,
         # otherwise fall back to the plain EPSG/CRS string.
         gdal_srs = output_crs_wkt if output_crs_wkt else outCRS
 
         if demType == 'dsm':
-            # Directly add the DSM writer stage
+            # directly add the DSM writer stage
             dem_pipeline['pipeline'].append({
                 "type": "writers.gdal",
                 "filename": f"{dem_outName}.{dem_outExt}",
@@ -1956,13 +1929,13 @@ class GetDEMs:
             })
 
         elif demType == 'dtm':
-            # Add a filter to keep only ground points
+            # add a filter to keep only ground points
             dem_pipeline['pipeline'].append({
                 "type": "filters.range",
                 "limits": "Classification[2:2]"
             })
 
-            # Add the DTM writer stage
+            # add the DTM writer stage
             dem_pipeline['pipeline'].append({
                 "type": "writers.gdal",
                 "filename": f"{dem_outName}.{dem_outExt}",
@@ -1979,7 +1952,7 @@ class GetDEMs:
         
         return dem_pipeline
 
-    # ----------------------- AWS EPT pipeline helpers -----------------
+    # ----------------------- AWS EPT Pipeline helpers -----------------
     @staticmethod
     def build_aws_pdal_pipeline(extent_epsg3857, property_ids, pc_resolution, data_source, filterNoise = False,
                             reclassify = False, savePointCloud = True, outCRS = 'EPSG:3857', pc_outName = 'filter_test',
@@ -2108,7 +2081,7 @@ class GetDEMs:
             else:
                 raise Exception("pc_outType must be 'las' or 'laz'.")
 
-            # Assign explicit CRS to the output file header
+            # assign explicit CRS to the output file header
             if output_crs_wkt is not None:
                 savePC_stage["a_srs"] = output_crs_wkt
 
@@ -2174,7 +2147,7 @@ class GetDEMs:
                                                 output_crs_wkt=output_crs_wkt)
         
         
-        # Use full WKT2 CRS (with vertical + epoch) when available,
+        # use full WKT2 CRS (with vertical + epoch) when available,
         # otherwise fall back to the plain EPSG/CRS string.
         gdal_srs = output_crs_wkt if output_crs_wkt else outCRS
 
@@ -2241,7 +2214,7 @@ class GetDEMs:
         return utm_crs
 
     
-    # Add the transform_options parameter with a default value of None
+    # add the transform_options parameter with a default value of None
     @staticmethod
     def reproject_polygon(
         polygon: Polygon | MultiPolygon,
@@ -2251,11 +2224,11 @@ class GetDEMs:
     ) -> Polygon | MultiPolygon:
         """Reproject a shapely Polygon or MultiPolygon to a new CRS."""
         
-        # Helper function to handle the optional dictionary
+        # helper function to handle the optional dictionary
         def _if_not_none(value, default):
             return default if value is None else value
 
-        # Pass the unpacked options dictionary to the transformer
+        # pass the unpacked options dictionary to the Transformer
         proj_transformer = Transformer.from_crs(
             source_crs,
             target_crs,
@@ -2279,14 +2252,14 @@ class GetDEMs:
         reclassify = False,         
         savePointCloud = False,         
         pc_resolution = 0.1,            # The desired resolution of the pointcloud based on the following definition: 
-                                        #        A point resolution limit to select, expressed as a grid cell edge length. 
-                                        #        Units correspond to resource coordinate system units. For example, 
-                                        #        for a coordinate system expressed in meters, a resolution value of 0.1 
-                                        #        will select points up to a ground resolution of 100 points per square meter.
-                                        #        The resulting resolution may not be exactly this value: the minimum possible 
-                                        #        resolution that is at least as precise as the requested resolution will be selected. 
-                                        #        Therefore the result may be a bit more precise than requested. 
-                                        # Source: https://pdal.io/stages/readers.ept.html#readers-ept
+                                        # a point resolution limit to select, expressed as a grid cell edge length.
+                                        # units correspond to resource coordinate system units. For example,
+                                        # for a coordinate system expressed in meters, a resolution value of 0.1
+                                        # will select points up to a ground resolution of 100 points per square meter.
+                                        # the resulting resolution may not be exactly this value: the minimum possible
+                                        # resolution that is at least as precise as the requested resolution will be selected.
+                                        # therefore the result may be a bit more precise than requested.
+                                        # source: https://pdal.io/stages/readers.ept.html#readers-ept
         outCRS = "WGS84 UTM",           # Output coordinate reference systemt (CRS), specified by ESPG code (e.g., 3857 - Web Mercator)
         method="idw",                   # method for gap-filling
         nodata=-9999,                   # no data values
@@ -2386,7 +2359,7 @@ class GetDEMs:
         else:
             horiz_crs = CRS.from_user_input(outCRS)
 
-        # Build compound CRS (horizontal + vertical) with optional epoch
+        # build compound CRS (horizontal + vertical) with optional epoch
         # using proper WKT2:2019 instead of PROJ4 strings.
         from topochange.crs_utils import vertical_datum_to_crs, build_output_crs_wkt
 
@@ -2414,8 +2387,8 @@ class GetDEMs:
             final_out_crs_wkt = horiz_crs.to_wkt()
 
         if data_source_ == 'ot':
-            # Download OpenTopography data via S3 (no Enterprise API key required)
-            # This uses the publicly accessible S3 bucket at opentopography.s3.sdsc.edu
+            # download OpenTopography data via S3 (no Enterprise API key required)
+            # this uses the publicly accessible S3 bucket at opentopography.s3.sdsc.edu
             
             if not _BOTO3_AVAILABLE:
                 raise ImportError(
@@ -2423,14 +2396,14 @@ class GetDEMs:
                     "Install with: pip install boto3"
                 )
             
-            # Get the short_name for S3 bucket path
+            # get the short_name for S3 bucket path
             if dataset_type == "compare":
                 short_name = getattr(self.ot, 'compare_short_name', None)
             else:
                 short_name = getattr(self.ot, 'reference_short_name', None)
             
             if short_name is None or pd.isna(short_name):
-                # Fallback: use clean_name or property_id
+                # fallback: use clean_name or property_id
                 if dataset_type == "compare":
                     short_name = getattr(self.ot, 'compare_clean_name', None) or dataset_id
                 else:
@@ -2439,7 +2412,7 @@ class GetDEMs:
             
             logger.info(f"Downloading OpenTopography dataset via S3: {short_name}")
             
-            # Setup S3 client for OpenTopography (unsigned access)
+            # setup S3 client for OpenTopography (unsigned access)
             s3_config = Config(
                 signature_version=UNSIGNED,
                 retries={'max_attempts': 3, 'mode': 'standard'},
@@ -2451,20 +2424,20 @@ class GetDEMs:
                 config=s3_config
             )
             
-            # Create output directory for point cloud tiles
+            # create output directory for point cloud tiles
             pc_output_dir = Path(folder) / f"{output_name}_{dataset_type}_tiles"
             pc_output_dir.mkdir(parents=True, exist_ok=True)
             
             downloaded_laz_files = []
             
             try:
-                # FIRST: Do a targeted search for tile index files at the root level
-                # These are typically named *TileIndex.zip, *tileindex.zip, *_tiles.zip, etc.
+                # fIRST: Do a targeted search for tile index files at the root level
+                # these are typically named *TileIndex.zip, *tileindex.zip, *_tiles.zip, etc.
                 # and are at the root of the dataset folder, not in subdirectories
                 tile_index_candidates = []
                 
-                # List just the first level (no recursive deep dive yet)
-                # Use Delimiter to get only direct children
+                # list just the first level (no recursive deep dive yet)
+                # use Delimiter to get only direct children
                 root_response = s3_client.list_objects_v2(
                     Bucket='pc-bulk',
                     Prefix=f"{short_name}/",
@@ -2472,12 +2445,12 @@ class GetDEMs:
                     MaxKeys=1000
                 )
                 
-                # Check direct files at root level for tile index
+                # check direct files at root level for tile index
                 for obj in root_response.get('Contents', []):
                     key = obj['Key']
                     filename = Path(key).name.lower()
                     
-                    # Check for tile index patterns (case-insensitive due to .lower())
+                    # check for tile index patterns (case-insensitive due to .lower())
                     if filename.endswith('.zip'):
                         if any(pattern in filename for pattern in [
                             'tileindex', 'tile_index', 'tiles', 'index',
@@ -2493,19 +2466,19 @@ class GetDEMs:
                             tile_index_candidates.append(('shp', key))
                             logger.info(f"Found tile index candidate: {key}")
                 
-                # Also get subdirectories (CommonPrefixes)
+                # also get subdirectories (CommonPrefixes)
                 subdirs = [p['Prefix'] for p in root_response.get('CommonPrefixes', [])]
                 if subdirs:
                     logger.info(f"Found subdirectories: {subdirs}")
                 
-                # Log root level files for debugging
+                # log root level files for debugging
                 root_files = [Path(obj['Key']).name for obj in root_response.get('Contents', [])]
                 if root_files:
                     logger.info(f"Root level files: {root_files}")
                 
                 aoi_geom = self.da.polygon.get("merged_polygon")
                 
-                # Try each tile index candidate
+                # try each tile index candidate
                 tile_index_found = False
                 for idx_type, tile_index_key in tile_index_candidates:
                     if tile_index_found:
@@ -2516,7 +2489,7 @@ class GetDEMs:
                             temp_path = Path(temp_dir)
                             
                             if idx_type == 'zip':
-                                # Download and extract zip file
+                                # download and extract zip file
                                 zip_path = temp_path / 'tileindex.zip'
                                 logger.info(f"Downloading tile index zip: {tile_index_key}")
                                 s3_client.download_file('pc-bulk', tile_index_key, str(zip_path))
@@ -2524,10 +2497,10 @@ class GetDEMs:
                                 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                                     zip_ref.extractall(temp_path)
                                 
-                                # Find shapefile in extracted contents
+                                # find shapefile in extracted contents
                                 shp_files = list(temp_path.rglob('*.shp'))
                             else:
-                                # Direct shapefile - need to download all components (.shp, .shx, .dbf, .prj)
+                                # direct shapefile - need to download all components (.shp, .shx, .dbf, .prj)
                                 logger.info(f"Downloading tile index shapefile: {tile_index_key}")
                                 base_key = tile_index_key[:-4]  # Remove .shp
                                 for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
@@ -2542,12 +2515,12 @@ class GetDEMs:
                                 logger.info(f"Reading shapefile: {shp_files[0].name}")
                                 tiles_gdf = gpd.read_file(shp_files[0])
                                 
-                                # Log shapefile columns for debugging
+                                # log shapefile columns for debugging
                                 logger.info(f"Tile index columns: {list(tiles_gdf.columns)}")
                                 
                                 tiles_gdf = tiles_gdf.to_crs('EPSG:4326')
                                 
-                                # Find intersecting tiles
+                                # find intersecting tiles
                                 intersecting_tiles = tiles_gdf[tiles_gdf.intersects(aoi_geom)]
                                 logger.info(f"Found {len(intersecting_tiles)} tiles intersecting with AOI "
                                            f"(out of {len(tiles_gdf)} total)")
@@ -2555,11 +2528,11 @@ class GetDEMs:
                                 if len(intersecting_tiles) > 0:
                                     tile_index_found = True
                                     
-                                    # Log first tile's data for debugging
+                                    # log first tile's data for debugging
                                     first_tile = intersecting_tiles.iloc[0]
                                     logger.info(f"First tile data: {dict(first_tile.drop('geometry') if 'geometry' in first_tile.index else first_tile)}")
                                     
-                                    # Download tiles
+                                    # download tiles
                                     def download_s3_tile(s3_key, local_path):
                                         try:
                                             if local_path.exists():
@@ -2576,19 +2549,19 @@ class GetDEMs:
                                         futures = []
                                         
                                         for idx, tile in intersecting_tiles.iterrows():
-                                            # Initialize variables for this tile
+                                            # initialize variables for this tile
                                             url_val = None
                                             filename = None
                                             s3_key = None
                                             
-                                            # Check URL column first - parse full S3 path from URL
+                                            # check URL column first - parse full S3 path from URL
                                             if 'URL' in tile.index and pd.notna(tile['URL']):
                                                 url_val = str(tile['URL']).strip()
                                                 logger.info(f"URL column value: {url_val}")
                                                 
-                                                # Parse the URL to extract S3 key
+                                                # parse the URL to extract S3 key
                                                 # URL format: https://opentopography.s3.sdsc.edu/pc-bulk/IN_2011_2013/East_IN/Randolph/file.las
-                                                # We need: IN_2011_2013/East_IN/Randolph/file.las
+                                                # we need: IN_2011_2013/East_IN/Randolph/file.las
                                                 if 'pc-bulk/' in url_val:
                                                     s3_key = url_val.split('pc-bulk/')[-1]
                                                     filename = Path(s3_key).name
@@ -2599,7 +2572,7 @@ class GetDEMs:
                                                     s3_key = url_val.split('pc-bulk/')[-1]
                                                     filename = Path(s3_key).name
                                             
-                                            # Check Filename column (for output naming)
+                                            # check Filename column (for output naming)
                                             if not filename:
                                                 if 'Filename' in tile.index and pd.notna(tile['Filename']):
                                                     filename = str(tile['Filename']).strip()
@@ -2614,19 +2587,19 @@ class GetDEMs:
                                                 logger.debug(f"Skipping non-LAZ file: {filename}")
                                                 continue
                                             
-                                            # If we already have s3_key from URL parsing, use it directly
-                                            # Otherwise, search for the file
+                                            # if we already have s3_key from URL parsing, use it directly
+                                            # otherwise, search for the file
                                             if not s3_key:
-                                                # Try to find the file - first at root, then in subdirectories
+                                                # try to find the file - first at root, then in subdirectories
                                                 root_key = f"{short_name}/{filename}"
                                                 
-                                                # Check root level
+                                                # check root level
                                                 try:
                                                     s3_client.head_object(Bucket='pc-bulk', Key=root_key)
                                                     s3_key = root_key
                                                     logger.debug(f"Found at root: {s3_key}")
                                                 except Exception:
-                                                    # Try alternate extension at root
+                                                    # try alternate extension at root
                                                     if filename.lower().endswith('.las'):
                                                         alt_filename = filename[:-4] + '.laz'
                                                     else:
@@ -2638,11 +2611,11 @@ class GetDEMs:
                                                         filename = alt_filename
                                                         logger.debug(f"Found at root with alternate extension: {s3_key}")
                                                     except Exception:
-                                                        # Search in subdirectories
+                                                        # search in subdirectories
                                                         logger.info(f"Not at root, searching subdirs: {subdirs}")
                                                         for subdir in subdirs:
                                                             # subdir is like "IN_2011_2013/East_IN/"
-                                                            # We want to try "IN_2011_2013/East_IN/filename.las"
+                                                            # we want to try "IN_2011_2013/East_IN/filename.las"
                                                             subdir_key = f"{subdir}{filename}"
                                                             logger.info(f"Trying: {subdir_key}")
                                                             try:
@@ -2651,7 +2624,7 @@ class GetDEMs:
                                                                 logger.info(f"Found in subdirectory: {s3_key}")
                                                                 break
                                                             except Exception as e:
-                                                                # Try alternate extension (.las <-> .laz)
+                                                                # try alternate extension (.LAS <-> .LAZ)
                                                                 if filename.lower().endswith('.las'):
                                                                     alt_filename = filename[:-4] + '.laz'
                                                                 else:
@@ -2693,15 +2666,15 @@ class GetDEMs:
                         logger.warning(f"Failed to process tile index {tile_index_key}: {e}")
                         continue
                 
-                # Fallback if no tile index worked
+                # fallback if no tile index worked
                 if not tile_index_found:
                     if not tile_index_candidates:
                         logger.warning(f"No tile index files found for {short_name}")
                     
-                    # Now we need to list LAZ files and try filename-based filtering
+                    # now we need to list LAZ files and try filename-based filtering
                     logger.info("Falling back to filename-based tile filtering...")
                     
-                    # Get the dataset's horizontal CRS from catalog
+                    # get the dataset's horizontal CRS from catalog
                     if dataset_type == "compare":
                         dataset_epsg = self.ot.compare_horizontal_crs
                     else:
@@ -2709,7 +2682,7 @@ class GetDEMs:
                     
                     logger.info(f"Dataset horizontal CRS: EPSG:{dataset_epsg}")
                     
-                    # Transform AOI to dataset CRS for intersection testing
+                    # transform AOI to dataset CRS for intersection testing
                     try:
                         dataset_epsg_int = int(dataset_epsg) if dataset_epsg else None
                     except (ValueError, TypeError):
@@ -2720,7 +2693,7 @@ class GetDEMs:
                         logger.error("No valid EPSG code available, cannot spatially filter tiles")
                         raise RuntimeError(f"Cannot download OT dataset without valid CRS. EPSG={dataset_epsg}")
                     
-                    # List all LAZ files (including subdirectories)
+                    # list all LAZ files (including subdirectories)
                     laz_files_in_bucket = []
                     logger.info("Listing all LAZ files in bucket (this may take a moment)...")
                     
@@ -2742,17 +2715,17 @@ class GetDEMs:
                     if not laz_files_in_bucket:
                         raise RuntimeError(f"No LAZ files found in bucket {short_name}/")
                     
-                    # Show sample filenames for debugging
+                    # show sample filenames for debugging
                     sample_files = [Path(k).name for k in laz_files_in_bucket[:5]]
                     logger.info(f"Sample filenames: {sample_files}")
                     
-                    # Transform AOI to dataset CRS
+                    # transform AOI to dataset CRS
                     try:
                         transformer = Transformer.from_crs(
                             "EPSG:4326", f"EPSG:{dataset_epsg_int}", 
                             always_xy=True
                         )
-                        # Transform AOI bounds to dataset CRS
+                        # transform AOI bounds to dataset CRS
                         aoi_bounds_4326 = aoi_geom.bounds  # (minx, miny, maxx, maxy)
                         aoi_min_transformed = transformer.transform(aoi_bounds_4326[0], aoi_bounds_4326[1])
                         aoi_max_transformed = transformer.transform(aoi_bounds_4326[2], aoi_bounds_4326[3])
@@ -2765,17 +2738,17 @@ class GetDEMs:
                         logger.info(f"AOI in EPSG:{dataset_epsg_int}: "
                                    f"({aoi_minx:.0f}, {aoi_miny:.0f}) - ({aoi_maxx:.0f}, {aoi_maxy:.0f})")
                         
-                        # Try multiple filename patterns
-                        # Pattern 1: XXXXXX_YYYYYYYY.laz (standard UTM coords)
-                        # Pattern 2: prefix_XXXXXXYYYYYY_suffix.laz (combined coords)
-                        # Pattern 3: Any 6-8 digit numbers that could be coords
+                        # try multiple filename patterns
+                        # pattern 1: XXXXXX_YYYYYYYY.laz (standard UTM coords)
+                        # pattern 2: prefix_XXXXXXYYYYYY_suffix.laz (combined coords)
+                        # pattern 3: Any 6-8 digit numbers that could be coords
                         
                         coord_patterns = [
-                            # Standard: 490000_4332000.laz
+                            # standard: 490000_4332000.laz
                             re.compile(r'(\d{6})_(\d{7})\.la[sz]$', re.IGNORECASE),
-                            # With prefix: ot_in2012_04901935_12.las -> extract 0490, 1935
+                            # with prefix: ot_in2012_04901935_12.las -> extract 0490, 1935
                             re.compile(r'_(\d{3})(\d{5})_\d+\.la[sz]$', re.IGNORECASE),
-                            # State plane style: look for any large numbers
+                            # state plane style: look for any large numbers
                             re.compile(r'(\d{5,7})_(\d{5,8})\.la[sz]$', re.IGNORECASE),
                         ]
                         
@@ -2789,11 +2762,11 @@ class GetDEMs:
                                 match = pattern.search(filename)
                                 if match:
                                     try:
-                                        # Handle different coordinate scales
+                                        # handle different coordinate scales
                                         coord1 = float(match.group(1))
                                         coord2 = float(match.group(2))
                                         
-                                        # Heuristic: if coords are too small, they might need scaling
+                                        # heuristic: if coords are too small, they might need scaling
                                         # UTM eastings are typically 100,000-900,000
                                         # UTM northings are typically 0-10,000,000
                                         if coord1 < 1000:
@@ -2804,7 +2777,7 @@ class GetDEMs:
                                         tile_easting = coord1
                                         tile_northing = coord2
                                         
-                                        # Check if tile intersects AOI
+                                        # check if tile intersects AOI
                                         tile_minx = tile_easting
                                         tile_miny = tile_northing
                                         tile_maxx = tile_easting + tile_size
@@ -2820,7 +2793,7 @@ class GetDEMs:
                         if matching_files:
                             logger.info(f"Found {len(matching_files)} tiles intersecting AOI")
                             
-                            # Download matching tiles
+                            # download matching tiles
                             for key in matching_files:
                                 filename = Path(key).name
                                 output_path = pc_output_dir / filename
@@ -2849,12 +2822,12 @@ class GetDEMs:
             
             logger.info(f"Downloaded {len(downloaded_laz_files)} LAZ tiles")
             
-            # Now create DEMs from the downloaded tiles
-            # If multiple tiles, we need to merge them first or process together
+            # now create DEMs from the downloaded tiles
+            # if multiple tiles, we need to merge them first or process together
             if len(downloaded_laz_files) == 1:
                 input_laz = downloaded_laz_files[0]
             else:
-                # Merge tiles into a single LAZ file using PDAL
+                # merge tiles into a single LAZ file using PDAL
                 merged_laz = folder + output_name + '_' + dataset_type + '_merged.laz'
                 
                 merge_writer = {"type": "writers.las", "filename": merged_laz}
@@ -2872,11 +2845,11 @@ class GetDEMs:
                 
                 logger.info(f"Merging {len(downloaded_laz_files)} tiles into {merged_laz}")
                 merge_pipe = pdal.Pipeline(json.dumps(merge_pipeline))
-                # Use streaming execution for memory efficiency when merging large tiles
+                # use streaming execution for memory efficiency when merging large tiles
                 merge_pipe.execute_streaming(chunk_size=1000000)
                 input_laz = merged_laz
             
-            # Create DTM
+            # create DTM
             ot_dtm_pipeline = self.make_DEM_pipeline_from_file(
                 input_laz, bounds_polygon_epsg_initial_crs, dem_resolution,
                 filterNoise=filterNoise, reclassify=reclassify, savePointCloud=savePointCloud,
@@ -2891,7 +2864,7 @@ class GetDEMs:
             self.cleanup_raster_nodata(dtm_path, nodata=nodata)
             logger.info(f"Created DTM: {dtm_path}")
 
-            # Create DSM
+            # create DSM
             ot_dsm_pipeline = self.make_DEM_pipeline_from_file(
                 input_laz, bounds_polygon_epsg_initial_crs, dem_resolution,
                 filterNoise=filterNoise, reclassify=reclassify, savePointCloud=savePointCloud,
@@ -2955,11 +2928,11 @@ class GetDEMs:
         else:
             raise ValueError(f"Unknown data source: {data_source_}")
         
-        # Store metadata about the created DEMs for later integration
-        # IMPORTANT: Merge with existing metadata to preserve user overrides 
+        # store metadata about the created DEMs for later integration
+        # iMPORTANT: Merge with existing metadata to preserve user overrides
         # (e.g., units_override from set_compare_units())
         if dataset_type == "compare":
-            # Preserve any existing overrides
+            # preserve any existing overrides
             existing = getattr(self, '_compare_metadata', {})
             preserved_keys = {
                 'units_override': existing.get('units_override'),
@@ -2977,12 +2950,12 @@ class GetDEMs:
                 'gridding_method_dtm': 'idw',
                 'gridding_method_dsm': 'max',
             }
-            # Restore preserved overrides
+            # restore preserved overrides
             for key, value in preserved_keys.items():
                 if value is not None:
                     self._compare_metadata[key] = value
         else:
-            # Preserve any existing overrides
+            # preserve any existing overrides
             existing = getattr(self, '_reference_metadata', {})
             preserved_keys = {
                 'units_override': existing.get('units_override'),
@@ -3000,7 +2973,7 @@ class GetDEMs:
                 'gridding_method_dtm': 'idw',
                 'gridding_method_dsm': 'max',
             }
-            # Restore preserved overrides
+            # restore preserved overrides
             for key, value in preserved_keys.items():
                 if value is not None:
                     self._reference_metadata[key] = value
@@ -3023,7 +2996,7 @@ class GetDEMs:
         USGS EPT, or NOAA EPT), merges them using PDAL streaming, and
         writes a single LAZ file per dataset.  Unlike
         :meth:`dem_download_workflow`, it does **not** grid the points
-        into DEM rasters—it stops after producing the merged point cloud
+        into DEM rasters:it stops after producing the merged point cloud
         so that downstream code can apply CRS transformations, ICP
         alignment, and DEM creation via the ``PointCloud`` /
         ``PointCloudPair`` API.
@@ -3095,7 +3068,7 @@ class GetDEMs:
         else:
             horiz_crs = CRS.from_user_input(outCRS)
 
-        # Build compound CRS (horizontal + vertical) with optional epoch
+        # build compound CRS (horizontal + vertical) with optional epoch
         # using proper WKT2:2019 instead of PROJ4 strings.
         from topochange.crs_utils import vertical_datum_to_crs, build_output_crs_wkt
 
@@ -3146,7 +3119,7 @@ class GetDEMs:
 
             logger.info(f"Downloading OpenTopography dataset via S3: {short_name}")
 
-            # Setup S3 client (unsigned access)
+            # setup S3 client (unsigned access)
             s3_config = Config(
                 signature_version=UNSIGNED,
                 retries={"max_attempts": 3, "mode": "standard"},
@@ -3164,7 +3137,7 @@ class GetDEMs:
             downloaded_laz_files = []
 
             try:
-                # Search for tile index files at root level
+                # search for tile index files at root level
                 tile_index_candidates = []
                 root_response = s3_client.list_objects_v2(
                     Bucket="pc-bulk",
@@ -3345,7 +3318,7 @@ class GetDEMs:
                         logger.warning(f"Failed to process tile index {tile_index_key}: {e}")
                         continue
 
-                # Fallback: filename-based filtering
+                # fallback: filename-based filtering
                 if not tile_index_found:
                     if not tile_index_candidates:
                         logger.warning(f"No tile index files found for {short_name}")
@@ -3450,9 +3423,9 @@ class GetDEMs:
 
             logger.info(f"Downloaded {len(downloaded_laz_files)} LAZ tiles")
 
-            # Merge tiles (with crop + optional noise filter + reproject) into single LAZ
+            # merge tiles (with crop + optional noise filter + reproject) into single LAZ
             if len(downloaded_laz_files) == 1:
-                # Single tile — still reproject into target CRS
+                # single tile : still reproject into target CRS
                 single_pipeline = {
                     "pipeline": self.build_pdal_pipeline_from_file(
                         downloaded_laz_files[0],
@@ -3469,7 +3442,7 @@ class GetDEMs:
                 pipe = pdal.Pipeline(json.dumps(single_pipeline))
                 pipe.execute_streaming(chunk_size=1000000)
             else:
-                # Multi-tile: merge then crop/reproject/write
+                # multi-tile: merge then crop/reproject/write
                 merge_pipeline = {
                     "pipeline": [
                         {"type": "readers.las", "filename": f}
@@ -3557,7 +3530,7 @@ class GetDEMs:
 
         logger.info(f"Point cloud saved: {output_laz}")
 
-        # Store path on instance for later retrieval
+        # store path on instance for later retrieval
         if dataset_type == "compare":
             self.compare_pc_path = output_laz
         else:
@@ -3585,12 +3558,12 @@ class GetDEMs:
         if not hasattr(self, '_compare_metadata'):
             self._compare_metadata = {}
         
-        # Update vertical_crs_string to include geoid
+        # update vertical_crs_string to include geoid
         current = self._compare_metadata.get('vertical_crs_string', 'NAVD88')
         if geoid_model.lower() not in str(current).lower():
             self._compare_metadata['vertical_crs_string'] = f"NAVD88 ({geoid_model})"
         
-        # Also store explicit override
+        # also store explicit override
         self._compare_metadata['geoid_model_override'] = geoid_model
         logger.info(f"Set compare geoid model to: {geoid_model}")
 
@@ -3641,7 +3614,7 @@ class GetDEMs:
         
         self._compare_metadata['units_override'] = normalized_unit
         
-        # Also store UnitInfo if available
+        # also store UnitInfo if available
         unit_info = _get_unit_info(normalized_unit)
         if unit_info is not None:
             self._compare_metadata['unit_info_override'] = unit_info
@@ -3668,7 +3641,7 @@ class GetDEMs:
         
         self._reference_metadata['units_override'] = normalized_unit
         
-        # Also store UnitInfo if available
+        # also store UnitInfo if available
         unit_info = _get_unit_info(normalized_unit)
         if unit_info is not None:
             self._reference_metadata['unit_info_override'] = unit_info
@@ -3676,9 +3649,7 @@ class GetDEMs:
         else:
             logger.info(f"Set reference vertical units to: {normalized_unit}")
 
-    # =========================================================================
-    # Integration with Domain Classes (Raster, PointCloud, RasterPair, etc.)
-    # =========================================================================
+    # integration with Domain Classes (Raster, PointCloud, RasterPair, etc.)
 
     def _load_dem_as_raster(
         self,
@@ -3743,7 +3714,7 @@ class GetDEMs:
         if not os.path.exists(dem_path):
             raise FileNotFoundError(f"DEM file not found: {dem_path}")
         
-        # Convert epoch to decimal year
+        # convert epoch to decimal year
         if isinstance(epoch, (date, datetime)):
             epoch_decimal = _date_to_decimal_year(epoch)
         elif isinstance(epoch, (int, float)):
@@ -3751,13 +3722,13 @@ class GetDEMs:
         else:
             epoch_decimal = None
         
-        # Parse vertical CRS info
+        # parse vertical CRS info
         vert_info = _parse_vertical_crs_string(vertical_crs_string)
         
-        # Apply geoid override if provided
+        # apply geoid override if provided
         effective_geoid = geoid_model_override or vert_info.get('geoid_model')
         
-        # Apply units override if provided, get UnitInfo if available
+        # apply units override if provided, get UnitInfo if available
         effective_units = units_override or vert_info.get('units') or 'meter'  # Default to meters
         effective_unit_info = None
         
@@ -3769,7 +3740,7 @@ class GetDEMs:
             else:
                 effective_unit_info = METER  # Default to meters
         
-        # Build metadata dictionary
+        # build metadata dictionary
         metadata = {
             'epoch': epoch_decimal,
             'geoid_model': effective_geoid,
@@ -3780,32 +3751,32 @@ class GetDEMs:
             'vertical_datum_string': vertical_crs_string,
         }
         
-        # Load raster with Raster.from_file
+        # load Raster with Raster.from_file
         raster = Raster.from_file(dem_path, rtype=rtype, metadata=metadata)
         
-        # Set additional attributes from parsed vertical info
+        # set additional attributes from parsed vertical info
         if vert_info.get('is_orthometric') is not None:
             raster.is_orthometric = vert_info['is_orthometric']
         
-        # Set geoid model (using override if provided)
+        # set geoid model (using override if provided)
         if effective_geoid:
             raster.original_geoid_model = effective_geoid
             raster.current_geoid_model = effective_geoid
         
-        # Set vertical units - use UnitInfo if available
+        # set vertical units - use UnitInfo if available
         if effective_unit_info is not None and hasattr(raster, 'vertical_unit'):
-            # New enhanced approach with UnitInfo
+            # new enhanced approach with UnitInfo
             raster.original_vertical_unit = effective_unit_info
             raster.current_vertical_unit = effective_unit_info
             raster.original_vertical_units = effective_unit_info.display_name
             raster.current_vertical_units = effective_unit_info.display_name
         else:
-            # Fallback to string-based units
+            # fallback to string-based units
             raster.vertical_units = effective_units
             raster.original_vertical_units = effective_units
             raster.current_vertical_units = effective_units
         
-        # Record the interpolation used during DEM creation
+        # record the interpolation used during DEM creation
         if raster.crs_history is not None and gridding_method:
             try:
                 raster.crs_history.record_interpolation_entry(
@@ -4069,18 +4040,18 @@ class GetDEMs:
         if not os.path.exists(pc_path):
             raise FileNotFoundError(f"Point cloud file not found: {pc_path}")
         
-        # Create and load point cloud
+        # create and load point cloud
         pc = PointCloud(pc_path)
         pc.from_file()
         
-        # Set epoch if provided
+        # set epoch if provided
         if epoch is not None:
             if isinstance(epoch, (date, datetime)):
                 pc.epoch = _date_to_decimal_year(epoch)
             elif isinstance(epoch, (int, float)):
                 pc.epoch = float(epoch)
         
-        # Parse and set vertical CRS info
+        # parse and set vertical CRS info
         if vertical_crs_string:
             vert_info = _parse_vertical_crs_string(vertical_crs_string)
             if vert_info.get('is_orthometric') is not None:
@@ -4088,14 +4059,14 @@ class GetDEMs:
             if vert_info.get('geoid_model'):
                 pc.geoid_model = vert_info['geoid_model']
             
-            # Set unit info from catalog string if not overridden
+            # set unit info from catalog string if not overridden
             if not units_override and _UNIT_UTILS_AVAILABLE:
                 unit_info = vert_info.get('unit_info')
                 if unit_info is not None and hasattr(pc, 'vertical_unit'):
                     pc.vertical_unit = unit_info
                     pc.vertical_units = unit_info.display_name
         
-        # Apply units override if provided
+        # apply units override if provided
         if units_override and _UNIT_UTILS_AVAILABLE:
             unit_info = lookup_unit(units_override)
             if unit_info is not None and hasattr(pc, 'vertical_unit'):

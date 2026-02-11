@@ -4,15 +4,14 @@ Verifies that writer stages include proper ``a_srs`` CRS parameters
 when ``output_crs_wkt`` is provided.
 
 These tests use unittest.mock to patch heavy imports (osgeo/gdal)
-so that the test can run without GDAL installed.
-"""
+so that the test can run without GDAL installed."""
 import sys
 import types
 import pytest
 from unittest.mock import MagicMock
 from shapely.geometry import box
 
-# Patch osgeo/gdal before importing data_access (they are top-level imports)
+# patch osgeo/gdal before importing data_access (they are top-level imports)
 _osgeo_mock = types.ModuleType("osgeo")
 _osgeo_mock.gdal = MagicMock()
 sys.modules.setdefault("osgeo", _osgeo_mock)
@@ -21,7 +20,7 @@ sys.modules.setdefault("osgeo.gdal", _osgeo_mock.gdal)
 from topochange.data_access import GetDEMs  # noqa: E402
 
 
-# A representative WKT2 compound CRS string for testing
+# a representative WKT2 compound CRS string for testing
 _SAMPLE_CRS_WKT = (
     'COMPOUNDCRS["WGS 84 / UTM zone 13N + NAVD88 height",'
     'PROJCRS["WGS 84 / UTM zone 13N",'
@@ -40,13 +39,11 @@ _SAMPLE_CRS_WKT = (
     'UNIT["metre",1]]]'
 )
 
-# A simple bounding polygon in EPSG:3857
+# a simple bounding Polygon in EPSG:3857
 _EXTENT_3857 = box(-11700000, 4500000, -11690000, 4510000)
 
 
-# ==============================================================================
 # _writer_las tests
-# ==============================================================================
 
 class TestWriterLasAsrs:
     """Verify _writer_las() includes a_srs when provided."""
@@ -74,9 +71,7 @@ class TestWriterLasAsrs:
             GetDEMs._writer_las("test", "xyz")
 
 
-# ==============================================================================
 # build_pdal_pipeline_from_file tests
-# ==============================================================================
 
 class TestBuildPipelineFromFileAsrs:
     """Verify build_pdal_pipeline_from_file passes a_srs to the writer stage."""
@@ -94,7 +89,7 @@ class TestBuildPipelineFromFileAsrs:
             pc_outType="laz",
             output_crs_wkt=_SAMPLE_CRS_WKT,
         )
-        # pipeline is a list of stage dicts
+        # Pipeline is a list of stage dicts
         writer_stages = [s for s in pipeline if s.get("type") == "writers.las"]
         assert len(writer_stages) == 1
         assert writer_stages[0]["a_srs"] == _SAMPLE_CRS_WKT
@@ -123,9 +118,7 @@ class TestBuildPipelineFromFileAsrs:
         assert len(writer_stages) == 0
 
 
-# ==============================================================================
 # build_aws_pdal_pipeline tests
-# ==============================================================================
 
 class TestBuildAwsPipelineAsrs:
     """Verify build_aws_pdal_pipeline passes a_srs to the writer stage."""
@@ -166,9 +159,7 @@ class TestBuildAwsPipelineAsrs:
         assert "a_srs" not in writer_stages[0]
 
 
-# ==============================================================================
 # _writer_gdal override_srs tests
-# ==============================================================================
 
 class TestWriterGdalOverrideSrs:
     """Verify _writer_gdal() includes override_srs when provided."""
@@ -312,3 +303,4 @@ class TestMakeDemPipelineAwsGdalSrs:
         ]
         assert len(gdal_stages) == 1
         assert gdal_stages[0]["override_srs"] == "EPSG:32613"
+

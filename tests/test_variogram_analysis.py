@@ -5,8 +5,7 @@ Tests the model fitting infrastructure in src/topochange/variogram.py, specifica
 2. VariogramModelSelector class
 3. VariogramAnalysis.compute_matheron static method
 
-Uses synthetic data (no actual raster files required).
-"""
+Uses synthetic data (no actual raster files required)."""
 
 import pytest
 import numpy as np
@@ -22,9 +21,7 @@ from topochange.variogram import (
 )
 
 
-# ============================================================================
-# Fixtures: Synthetic Data
-# ============================================================================
+# fixtures: Synthetic Data
 
 
 @pytest.fixture
@@ -41,12 +38,12 @@ def synthetic_variogram_data():
     true_sill = 2.0
     true_range = 100.0
 
-    # Generate from spherical model with small noise
+    # generate from spherical model with small noise
     empirical = spherical(lags, true_sill, true_range)
     empirical += np.random.normal(0, 0.05, len(lags))
     empirical = np.maximum(empirical, 0)  # ensure non-negative
 
-    # Create synthetic bin counts (more pairs at shorter lags)
+    # create synthetic bin counts (more pairs at shorter lags)
     bin_counts = np.maximum(100 - np.linspace(0, 50, len(lags)), 10).astype(int)
 
     return {
@@ -70,7 +67,7 @@ def synthetic_matheron_data():
     np.random.seed(42)
     bin_counts = np.array([100, 95, 80, 60, 40, 20, 10, 5])
 
-    # Create SSD array from known semivariances
+    # create SSD array from known semivariances
     true_gamma = np.array([0.5, 0.8, 1.0, 1.2, 1.3, 1.4, 1.45, 1.48])
     ssd = 2.0 * true_gamma * bin_counts  # SSD = 2*N*gamma
 
@@ -81,9 +78,7 @@ def synthetic_matheron_data():
     }
 
 
-# ============================================================================
-# Test Suite 1: Matheron Estimator
-# ============================================================================
+# test Suite 1: Matheron Estimator
 
 
 class TestMatheronEstimator:
@@ -97,7 +92,7 @@ class TestMatheronEstimator:
             min_pairs=5
         )
 
-        # Should match expected gamma values
+        # should match expected gamma values
         assert_allclose(
             gamma_est,
             synthetic_matheron_data['expected_gamma'],
@@ -113,7 +108,7 @@ class TestMatheronEstimator:
             min_pairs=min_pairs
         )
 
-        # Bins with count < min_pairs should be NaN
+        # bins with count < min_pairs should be NaN
         valid = synthetic_matheron_data['bin_counts'] >= min_pairs
         assert np.all(np.isnan(gamma_est[~valid]))
         assert np.all(np.isfinite(gamma_est[valid]))
@@ -125,10 +120,10 @@ class TestMatheronEstimator:
 
         gamma_est = VariogramAnalysis.compute_matheron(bin_counts, ssd, min_pairs=10)
 
-        # Bins with zero counts should be NaN
+        # bins with zero counts should be NaN
         assert np.isnan(gamma_est[1])
         assert np.isnan(gamma_est[3])
-        # Others should be finite
+        # others should be finite
         assert np.isfinite(gamma_est[0])
         assert np.isfinite(gamma_est[2])
 
@@ -143,9 +138,7 @@ class TestMatheronEstimator:
         assert_allclose(gamma_est[0], 50.0 / (2.0 * 100))
 
 
-# ============================================================================
-# Test Suite 2: VariogramModelSelector Construction
-# ============================================================================
+# test Suite 2: VariogramModelSelector Construction
 
 
 class TestVariogramModelSelectorConstruction:
@@ -192,16 +185,14 @@ class TestVariogramModelSelectorConstruction:
 
         selector = VariogramModelSelector(lags, empirical, sigma=sigma)
 
-        # First should be unchanged
+        # first should be unchanged
         assert selector.sigma[0] == 0.1
-        # Others should be >= eps
+        # others should be >= eps
         assert selector.sigma[1] > 0
         assert selector.sigma[2] > 0
 
 
-# ============================================================================
-# Test Suite 3: Candidate Generation
-# ============================================================================
+# test Suite 3: Candidate Generation
 
 
 class TestCandidateGeneration:
@@ -229,10 +220,10 @@ class TestCandidateGeneration:
         cand1 = selector.generate_candidates(max_components=1)
         cand2 = selector.generate_candidates(max_components=2)
 
-        # More components should give more candidates (or equal)
+        # more components should give more candidates (or equal)
         assert len(cand2) >= len(cand1)
 
-        # Check that all single-component models are in both lists
+        # check that all single-component models are in both lists
         cand1_names = [c.component_names for c in cand1]
         cand2_names = [c.component_names for c in cand2]
 
@@ -249,7 +240,7 @@ class TestCandidateGeneration:
         cand_with_nugget = selector.generate_candidates(include_nugget=True)
         cand_no_nugget = selector.generate_candidates(include_nugget=False)
 
-        # All with-nugget models should have nugget
+        # all with-nugget models should have nugget
         assert all(c.include_nugget for c in cand_with_nugget)
         assert all(not c.include_nugget for c in cand_no_nugget)
 
@@ -263,7 +254,7 @@ class TestCandidateGeneration:
         cand_with_unbounded = selector.generate_candidates(include_unbounded=True)
         cand_no_unbounded = selector.generate_candidates(include_unbounded=False)
 
-        # Check if any unbounded models are present
+        # check if any unbounded models are present
         # (may be empty if registry doesn't have unbounded models)
         has_unbounded_with = any(
             not all(
@@ -281,15 +272,13 @@ class TestCandidateGeneration:
             for c in cand_no_unbounded
         )
 
-        # With unbounded enabled might have some unbounded (or not, depends on data)
-        # Without unbounded should have none
+        # with unbounded enabled might have some unbounded (or not, depends on data)
+        # without unbounded should have None
         if has_unbounded_with:
             assert has_unbounded_without is False  # exclusive check
 
 
-# ============================================================================
-# Test Suite 4: Model Fitting on Synthetic Data
-# ============================================================================
+# test Suite 4: Model Fitting on Synthetic Data
 
 
 class TestModelFitting:
@@ -303,7 +292,7 @@ class TestModelFitting:
             weights=synthetic_variogram_data['bin_counts']
         )
 
-        # Create single spherical model
+        # create single spherical model
         model = CompositeVariogramModel(['spherical'], include_nugget=False)
         fitted = selector.fit_model(model)
 
@@ -322,14 +311,14 @@ class TestModelFitting:
         model = CompositeVariogramModel(['spherical'], include_nugget=False)
         fitted = selector.fit_model(model)
 
-        # Extract sill and range
+        # extract sill and range
         fitted_sill = fitted.params[0]
         fitted_range = fitted.params[1]
 
         true_sill = synthetic_variogram_data['true_sill']
         true_range = synthetic_variogram_data['true_range']
 
-        # Check within 20% of true values
+        # check within 20% of True values
         assert abs(fitted_sill - true_sill) / true_sill < 0.2
         assert abs(fitted_range - true_range) / true_range < 0.2
 
@@ -363,9 +352,7 @@ class TestModelFitting:
         assert np.isfinite(fitted.bic)
 
 
-# ============================================================================
-# Test Suite 5: Information Criteria
-# ============================================================================
+# test Suite 5: Information Criteria
 
 
 class TestInformationCriteria:
@@ -393,7 +380,7 @@ class TestInformationCriteria:
             weights=synthetic_variogram_data['bin_counts']
         )
 
-        # Fit two models: spherical and spherical+exponential
+        # fit two models: spherical and spherical+exponential
         model_1 = CompositeVariogramModel(['spherical'], include_nugget=False)
         model_2 = CompositeVariogramModel(['spherical', 'exponential'], include_nugget=False)
 
@@ -401,18 +388,16 @@ class TestInformationCriteria:
         fitted_2 = selector.fit_model(model_2)
 
         if fitted_1 and fitted_2:
-            # More parameters should increase BIC more than AIC (relative to likelihood)
+            # more parameters should increase BIC more than AIC (relative to likelihood)
             bic_diff = fitted_2.bic - fitted_1.bic
             aic_diff = fitted_2.aic - fitted_1.aic
 
-            # BIC penalty should be larger
+            # bIC penalty should be larger
             # (Note: this is probabilistic, may not always hold with noise)
             assert fitted_2.composite_model.n_params > fitted_1.composite_model.n_params
 
 
-# ============================================================================
-# Test Suite 6: Model Selection
-# ============================================================================
+# test Suite 6: Model Selection
 
 
 class TestModelSelection:
@@ -469,9 +454,7 @@ class TestModelSelection:
             selector.select_best(criterion='invalid')
 
 
-# ============================================================================
-# Test Suite 7: Cross-Validation
-# ============================================================================
+# test Suite 7: Cross-Validation
 
 
 class TestCrossValidation:
@@ -507,14 +490,12 @@ class TestCrossValidation:
         rmse_2 = selector.cross_validate(fitted, k=2, seed=42)
         rmse_5 = selector.cross_validate(fitted, k=5, seed=42)
 
-        # Both should be finite positive
+        # both should be finite positive
         assert rmse_2 > 0 and np.isfinite(rmse_2)
         assert rmse_5 > 0 and np.isfinite(rmse_5)
 
 
-# ============================================================================
-# Test Suite 8: Akaike Weights
-# ============================================================================
+# test Suite 8: Akaike Weights
 
 
 class TestAkaikeWeights:
@@ -562,9 +543,7 @@ class TestAkaikeWeights:
         assert best_weight >= np.max(selector.model_weights[selector.model_weights < best_weight + 1e-10])
 
 
-# ============================================================================
-# Test Suite 9: BMA Variogram
-# ============================================================================
+# test Suite 9: BMA Variogram
 
 
 class TestBMAVariogram:
@@ -611,9 +590,7 @@ class TestBMAVariogram:
             selector.get_bma_variogram()
 
 
-# ============================================================================
-# Test Suite 10: Bootstrap Uncertainty
-# ============================================================================
+# test Suite 10: Bootstrap Uncertainty
 
 
 class TestBootstrapUncertainty:
@@ -654,9 +631,7 @@ class TestBootstrapUncertainty:
         assert len(selector.best_model.param_samples) > 0
 
 
-# ============================================================================
-# Test Suite 11: FittedVariogramModel
-# ============================================================================
+# test Suite 11: FittedVariogramModel
 
 
 class TestFittedVariogramModel:
@@ -692,7 +667,7 @@ class TestFittedVariogramModel:
         model = CompositeVariogramModel(['spherical'], include_nugget=False)
         fitted = selector.fit_model(model)
 
-        # No bootstrap samples yet
+        # no bootstrap samples yet
         with pytest.raises(ValueError, match="No bootstrap samples"):
             fitted.get_param_percentiles()
 
@@ -711,18 +686,16 @@ class TestFittedVariogramModel:
 
         percentiles = selector.best_model.get_param_percentiles([16, 50, 84])
 
-        # Should have dict with parameter names as keys
+        # should have dict with parameter names as keys
         assert isinstance(percentiles, dict)
         assert len(percentiles) == selector.best_model.composite_model.n_params
 
-        # Each value should have 3 elements (16th, 50th, 84th percentile)
+        # each value should have 3 elements (16th, 50th, 84th percentile)
         for key, vals in percentiles.items():
             assert len(vals) == 3
 
 
-# ============================================================================
-# Test Suite 12: Initial Guess
-# ============================================================================
+# test Suite 12: Initial Guess
 
 
 class TestInitialGuess:
@@ -773,7 +746,7 @@ class TestInitialGuess:
             nugget=True
         )
 
-        # All parameters should be non-negative
+        # all parameters should be non-negative
         assert np.all(guess >= 0)
 
     def test_initial_guess_reasonable_ranges(self, synthetic_variogram_data):
@@ -788,13 +761,11 @@ class TestInitialGuess:
             nugget=False
         )
 
-        # Range (second param) should be < max_lag
+        # range (second param) should be < max_lag
         assert guess[1] < max_lag
 
 
-# ============================================================================
-# Test Suite 13: Fit All Candidates
-# ============================================================================
+# test Suite 13: Fit All Candidates
 
 
 class TestFitAllCandidates:
@@ -823,7 +794,7 @@ class TestFitAllCandidates:
 
         selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=True)
 
-        # At least some models should have CV scores
+        # at least some models should have CV scores
         has_cv = any(m.cv_rmse is not None for m in selector.fitted_models)
         assert has_cv
 
@@ -837,13 +808,11 @@ class TestFitAllCandidates:
 
         selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)
 
-        # All models should have None for cv_rmse
+        # all models should have None for cv_rmse
         assert all(m.cv_rmse is None for m in selector.fitted_models)
 
 
-# ============================================================================
-# Integration Tests
-# ============================================================================
+# integration Tests
 
 
 class TestIntegration:
@@ -858,7 +827,7 @@ class TestIntegration:
             sigma=np.full_like(synthetic_variogram_data['empirical'], 0.05)
         )
 
-        # Fit candidates
+        # fit candidates
         selector.fit_all_candidates(
             max_components=2,
             include_nugget=True,
@@ -867,15 +836,15 @@ class TestIntegration:
             seed=42
         )
 
-        # Select best
+        # select best
         best = selector.select_best(criterion='aic')
         assert best is not None
 
-        # Bootstrap
+        # bootstrap
         samples = selector.bootstrap_best_model(n_boot=30, seed=42)
         assert len(samples) > 0
 
-        # Get percentiles
+        # get percentiles
         percentiles = best.get_param_percentiles([16, 50, 84])
         assert len(percentiles) > 0
 
@@ -890,14 +859,15 @@ class TestIntegration:
         selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)
         bma_func = selector.get_bma_variogram()
 
-        # BMA should average predictions
+        # bMA should average predictions
         test_lag = 100.0
         bma_pred = bma_func(np.array([test_lag]))[0]
 
-        # Should be within range of individual model predictions
+        # should be within range of individual model predictions
         individual_preds = [m.predict(np.array([test_lag]))[0] for m in selector.fitted_models]
         assert min(individual_preds) <= bma_pred <= max(individual_preds)
 
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+

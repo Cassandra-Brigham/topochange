@@ -1,22 +1,4 @@
-"""
-PDAL Wrapper for Google Colab Compatibility.
-
-This module provides a drop-in replacement for the pdal module that works
-in Google Colab where the native Python 3.12 kernel cannot use conda-installed
-PDAL bindings (which are built for Python 3.11).
-
-Usage:
-    # Instead of: import pdal
-    from .pdal_wrapper import pdal
-
-    # Then use normally:
-    pipeline = pdal.Pipeline(json.dumps({...}))
-    pipeline.execute()
-
-The wrapper automatically detects the environment:
-- In Colab with condacolab: Uses subprocess to call Python 3.11
-- Locally or when native pdal works: Uses native pdal module
-"""
+"""PDAL wrapper for Colab compatibility with conda-installed bindings."""
 
 import subprocess
 import json
@@ -26,7 +8,7 @@ import tempfile
 import numpy as np
 from typing import Optional, List, Dict, Any
 
-# Detect environment
+# detect environment
 IN_COLAB = 'google.colab' in sys.modules
 CONDA_PYTHON = '/usr/local/bin/python'
 PROJ_LIB = '/usr/local/share/proj/'
@@ -37,12 +19,12 @@ def _get_conda_env() -> Dict[str, str]:
     """Get environment variables needed for conda PDAL to work."""
     env = {**os.environ}
     env['PROJ_LIB'] = PROJ_LIB
-    # Prepend conda lib path to ensure conda's SQLite/GDAL are used
+    # prepend conda lib path to ensure conda's SQLite/GDAL are used
     existing_ld_path = os.environ.get('LD_LIBRARY_PATH', '')
     env['LD_LIBRARY_PATH'] = f"{CONDA_LIB}:{existing_ld_path}" if existing_ld_path else CONDA_LIB
     return env
 
-# Try to import native pdal first
+# try to import native PDAL first
 _NATIVE_PDAL_AVAILABLE = False
 _native_pdal = None
 
@@ -153,16 +135,16 @@ class PipelineWrapper:
 
     def _execute_subprocess(self) -> int:
         """Execute using subprocess with conda's Python."""
-        # If we have input arrays, we need to serialize them and pass to subprocess
+        # if we have input arrays, we need to serialize them and pass to subprocess
         if self._input_arrays is not None:
             return self._execute_subprocess_with_arrays()
 
-        # Use file-based transfer for arrays to avoid JSON memory issues
+        # use file-based transfer for arrays to avoid JSON memory issues
         with tempfile.NamedTemporaryFile(suffix='.npz', delete=False) as tmp:
             arrays_file = tmp.name
 
         try:
-            # Create a temporary script that saves arrays to file instead of JSON
+            # create a temporary script that saves arrays to file instead of JSON
             script = f'''
 import pdal
 import json
@@ -172,7 +154,7 @@ pipeline_json = {repr(self.pipeline_json)}
 pipeline = pdal.Pipeline(pipeline_json)
 count = pipeline.execute()
 
-# Save arrays to temp file instead of JSON serialization (more memory efficient)
+# save arrays to temp file instead of JSON serialization (more memory efficient)
 save_dict = {{'num_arrays': np.array([len(pipeline.arrays)])}}
 for i, arr in enumerate(pipeline.arrays):
     for name in arr.dtype.names:
@@ -180,7 +162,7 @@ for i, arr in enumerate(pipeline.arrays):
     save_dict[f'arr{{i}}_dtype'] = str(arr.dtype)
 np.savez({repr(arrays_file)}, **save_dict)
 
-# Only print metadata as JSON (small)
+# only print metadata as JSON (small)
 result = {{
     "count": count,
     "metadata": pipeline.metadata,
@@ -206,7 +188,7 @@ print(json.dumps(result))
             self._metadata = data['metadata']
             self._log = data.get('log', '')
 
-            # Load arrays from temp file (more memory efficient than JSON)
+            # load arrays from temp file (more memory efficient than JSON)
             self._arrays = []
             if os.path.exists(arrays_file):
                 import re
@@ -215,15 +197,15 @@ print(json.dumps(result))
 
                 for i in range(num_arrays):
                     dtype_str = str(npz_data[f'arr{i}_dtype'])
-                    # Parse dtype string to get field names
+                    # parse dtype string to get field names
                     fields = re.findall(r"\('(\w+)'", dtype_str)
 
                     if fields:
-                        # Get first field to determine length
+                        # get first field to determine length
                         first_field = npz_data[f'arr{i}_{fields[0]}']
                         n_points = len(first_field)
 
-                        # Build dtype from actual data
+                        # build dtype from actual data
                         dtype_list = []
                         for name in fields:
                             arr_data = npz_data[f'arr{i}_{name}']
@@ -237,52 +219,52 @@ print(json.dumps(result))
             return self._count
 
         finally:
-            # Clean up temp file
+            # clean up temp file
             if os.path.exists(arrays_file):
                 os.remove(arrays_file)
 
     def _execute_subprocess_with_arrays(self) -> int:
         """Execute using subprocess with input arrays passed via temp file."""
-        # Save input arrays to a temporary numpy file to pass to subprocess
+        # save input arrays to a temporary numpy file to pass to subprocess
         with tempfile.NamedTemporaryFile(suffix='.npz', delete=False) as tmp:
             arrays_file = tmp.name
 
         try:
-            # Save each input array with metadata about its dtype
+            # save each input array with metadata about its dtype
             save_dict = {}
             for i, arr in enumerate(self._input_arrays):
-                # Save the array data
+                # save the array data
                 for name in arr.dtype.names:
                     save_dict[f'arr{i}_{name}'] = arr[name]
-                # Save dtype info as string
+                # save dtype info as string
                 save_dict[f'arr{i}_dtype'] = str(arr.dtype)
 
             save_dict['num_arrays'] = np.array([len(self._input_arrays)])
             np.savez(arrays_file, **save_dict)
 
-            # Create script that loads arrays and runs pipeline
+            # create script that loads arrays and runs Pipeline
             script = f'''
 import pdal
 import json
 import numpy as np
 
-# Load input arrays from temp file
+# load input arrays from temp file
 data = np.load({repr(arrays_file)}, allow_pickle=True)
 num_arrays = int(data['num_arrays'][0])
 
 input_arrays = []
 for i in range(num_arrays):
-    # Reconstruct structured array
+    # reconstruct structured array
     dtype_str = str(data[f'arr{{i}}_dtype'])
-    # Parse dtype string to get field names
+    # parse dtype string to get field names
     import re
     fields = re.findall(r"\\('(\\w+)'", dtype_str)
 
-    # Get first field to determine length
+    # get first field to determine length
     first_field = data[f'arr{{i}}_{{fields[0]}}']
     n_points = len(first_field)
 
-    # Build dtype from actual data
+    # build dtype from actual data
     dtype_list = []
     for name in fields:
         arr_data = data[f'arr{{i}}_{{name}}']
@@ -297,7 +279,7 @@ pipeline_json = {repr(self.pipeline_json)}
 pipeline = pdal.Pipeline(pipeline_json, arrays=input_arrays)
 count = pipeline.execute()
 
-# Get output arrays (usually empty for writers)
+# get output arrays (usually empty for writers)
 arrays_data = []
 for arr in pipeline.arrays:
     arr_dict = {{name: arr[name].tolist() for name in arr.dtype.names}}
@@ -333,7 +315,7 @@ print(json.dumps(result))
             return self._count
 
         finally:
-            # Clean up temp file
+            # clean up temp file
             if os.path.exists(arrays_file):
                 os.remove(arrays_file)
 
@@ -393,7 +375,7 @@ pipeline_json = {repr(self.pipeline_json)}
 pipeline = pdal.Pipeline(pipeline_json)
 count = pipeline.execute()
 
-# Only return metadata - skip expensive array serialization
+# only return metadata - skip expensive array serialization
 result = {{
     "count": count,
     "metadata": pipeline.metadata,
@@ -466,7 +448,7 @@ pipeline_json = {repr(self.pipeline_json)}
 pipeline = pdal.Pipeline(pipeline_json)
 count = pipeline.execute_streaming(chunk_size={chunk_size})
 
-# Only return metadata - no arrays in streaming mode anyway
+# only return metadata - no arrays in streaming mode anyway
 result = {{
     "count": count,
     "metadata": pipeline.metadata,
@@ -555,7 +537,7 @@ class PdalModule:
         return PipelineWrapper(pipeline_json, arrays=arrays)
 
 
-# Create the module-level instance
+# create the module-level instance
 pdal = PdalModule()
 
 
@@ -576,5 +558,6 @@ def get_pdal_status() -> Dict[str, Any]:
     }
 
 
-# For backwards compatibility, also expose Pipeline at module level
+# for backwards compatibility, also expose Pipeline at module level
 Pipeline = pdal.Pipeline
+

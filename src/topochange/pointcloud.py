@@ -1,8 +1,7 @@
 """Point cloud loading, metadata extraction, and transformation.
 
 Provides the PointCloud class for loading LAS/LAZ files, extracting CRS and
-time metadata, and performing coordinate transformations via PDAL pipelines.
-"""
+time metadata, and performing coordinate transformations via PDAL pipelines."""
 from __future__ import annotations
 
 import datetime
@@ -17,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
-# Use pdal_wrapper for Colab compatibility (falls back to native pdal locally)
+# use pdal_wrapper for Colab compatibility (falls back to native PDAL locally)
 try:
     from .pdal_wrapper import pdal
 except ImportError:
@@ -62,7 +61,7 @@ from .unit_utils import (
     parse_unit_string,
     format_value_with_unit,
     describe_unit,
-    # Backward-compatible functions
+    # backward-compatible functions
     horizontal_unit_scale,
     vertical_unit_scale,
 )
@@ -80,7 +79,7 @@ from .deformation_utils import select_velocity_model
 if TYPE_CHECKING:
     from .raster import Raster
 
-# Module-level cache for pyproj Transformers (avoids repeated PROJ database lookups)
+# module-level cache for pyproj Transformers (avoids repeated PROJ database lookups)
 from functools import lru_cache as _lru_cache
 
 @_lru_cache(maxsize=32)
@@ -145,7 +144,7 @@ def _determine_utm_epsg(poly4326: Polygon) -> str:
     epsg = CRS_(proj.srs).to_epsg()
     if epsg is not None:
         return str(epsg)
-    # Fallback if EPSG cannot be determined from PROJ
+    # fallback if EPSG cannot be determined from PROJ
     return str(32600 + zone if hemi == "north" else 32700 + zone)
 
 
@@ -205,7 +204,7 @@ def get_true_extent(pc: "PointCloud", edge_size: float = 5.0) -> Tuple[int, Poly
     from shapely import wkt
     from shapely.geometry import Polygon as ShapelyPolygon, MultiPolygon
 
-    # Try hexbin approach (streaming-compatible, gives true data polygon)
+    # try hexbin approach (streaming-compatible, gives True data Polygon)
     try:
         hexbin_pipe = pdal.Pipeline(
             json.dumps(
@@ -221,7 +220,7 @@ def get_true_extent(pc: "PointCloud", edge_size: float = 5.0) -> Tuple[int, Poly
                 }
             )
         )
-        # Use streaming execution if available
+        # use streaming execution if available
         if hasattr(hexbin_pipe, 'execute_streaming_metadata'):
             hexbin_pipe.execute_streaming_metadata(chunk_size=100000)
         elif hasattr(hexbin_pipe, 'execute_metadata_only'):
@@ -233,26 +232,26 @@ def get_true_extent(pc: "PointCloud", edge_size: float = 5.0) -> Tuple[int, Poly
         boundary_wkt = hexbin_md.get("boundary")
 
         if boundary_wkt:
-            # Parse WKT boundary (in native CRS)
+            # parse WKT boundary (in native CRS)
             poly_native = wkt.loads(boundary_wkt)
 
-            # Handle MultiPolygon by taking the largest polygon
+            # handle MultiPolygon by taking the largest Polygon
             if isinstance(poly_native, MultiPolygon):
                 poly_native = max(poly_native.geoms, key=lambda p: p.area)
 
-            # Shrink the polygon inward by half the edge_size to compensate for
+            # shrink the Polygon inward by half the edge_size to compensate for
             # hex cells extending beyond actual point locations
             shrink_distance = edge_size / 2.0
             poly_native_shrunk = poly_native.buffer(-shrink_distance)
 
-            # Handle case where shrinking results in MultiPolygon or empty
+            # handle case where shrinking results in MultiPolygon or empty
             if poly_native_shrunk.is_empty:
-                # Fall back to original if shrinking made it empty
+                # fall back to original if shrinking made it empty
                 poly_native_shrunk = poly_native
             elif isinstance(poly_native_shrunk, MultiPolygon):
                 poly_native_shrunk = max(poly_native_shrunk.geoms, key=lambda p: p.area)
 
-            # Transform to EPSG:4326
+            # transform to EPSG:4326
             src_crs_wkt = (
                 getattr(pc, "current_horizontal_crs", None)
                 or getattr(pc, "original_horizontal_crs", None)
@@ -302,16 +301,14 @@ class PointCloud:
 
     def __init__(self, filename: str):
         self.filename = filename
-        # Will be initialized in from_file() once metadata is known
+        # will be initialized in from_file() once metadata is known
         self.crs_history = None
         
-        # Unit info objects - initialized to unknown until from_file() is called
+        # unit info objects - initialized to unknown until from_file() is called
         self.horizontal_unit: UnitInfo = UNKNOWN_UNIT
         self.vertical_unit: UnitInfo = UNKNOWN_UNIT
 
-    # -------------------------------------------------------------------------
-    # Metadata loading
-    # -------------------------------------------------------------------------
+    # metadata loading
     def from_file(self, lightweight: bool = False, bbox_only: bool = False) -> None:
         """
         Load point cloud from LAS/LAZ file with metadata extraction.
@@ -341,10 +338,8 @@ class PointCloud:
         - Includes garbage collection between pipeline executions
         """
 
-        # ------------------------------------------------------------------
         # 1) PDAL metadata: basic CRS, units, counts, bounds, etc.
-        #    (count=0 means no points loaded - very efficient)
-        # ------------------------------------------------------------------
+        # (count=0 means no points loaded - very efficient)
         pipeline_meta = pdal.Pipeline(
             json.dumps(
                 {
@@ -364,7 +359,7 @@ class PointCloud:
 
         las_md = md.get("readers.las", {})
 
-        # Extract CRS information
+        # extract CRS information
         srs_md = las_md.get("srs", {}) or {}
 
         self.original_compound_crs = srs_md.get("compoundwkt")
@@ -373,24 +368,24 @@ class PointCloud:
         self.original_pretty_wkt = srs_md.get("prettywkt")
         self.original_proj_string = srs_md.get("proj4")
 
-        # Set current CRS to original
+        # set current CRS to original
         self.current_compound_crs = self.original_compound_crs
         self.current_horizontal_crs = self.original_horizontal_crs
         self.current_vertical_crs = self.original_vertical_crs
         self.current_pretty_wkt = self.original_pretty_wkt
         self.current_proj_string = self.original_proj_string
 
-        # Orthometric or ellipsoidal heights?
+        # orthometric or ellipsoidal heights?
         if self.original_vertical_crs is not None:
             self.is_orthometric = is_orthometric(self.original_vertical_crs)
         else:
             self.is_orthometric = False
 
-        # Geoid
+        # geoid
         geoid_info = parse_geoid_info(md)
         self.geoid_model = geoid_info.get("geoid_model")
 
-        # Get point count and bounds
+        # get point count and bounds
         self.total_points = las_md.get("count")
         self.maxx = las_md.get("maxx")
         self.maxy = las_md.get("maxy")
@@ -398,21 +393,19 @@ class PointCloud:
         self.miny = las_md.get("miny")
         self.bounds = (self.minx, self.miny, self.maxx, self.maxy)
 
-        # Creation date (needed for GPS time conversion)
+        # creation date (needed for GPS time conversion)
         self.creation_doy = las_md.get("creation_doy")
         self.creation_year = las_md.get("creation_year")
 
-        # Save srs_md for unit parsing (needed after cleanup)
+        # save srs_md for unit parsing (needed after cleanup)
         _srs_md = srs_md
 
-        # Clean up Pipeline 1
+        # clean up Pipeline 1
         del pipeline_meta, meta_root, md, las_md, srs_md
         gc.collect()
 
-        # ------------------------------------------------------------------
-        # Helper function to extract point cloud extent polygon
-        # Defined here so both lightweight and full modes can use it
-        # ------------------------------------------------------------------
+        # helper function to extract point cloud extent Polygon
+        # defined here so both lightweight and full modes can use it
         def _get_pointcloud_extent(pc: PointCloud) -> Tuple[str, Polygon, Polygon]:
             """
             Extract point cloud boundary polygon using streaming hexbin filter.
@@ -420,7 +413,7 @@ class PointCloud:
             This approach is memory-efficient because hexbin works incrementally
             and only stores hex cell occupancy, not all point coordinates.
             """
-            # Try hexbin approach first (streaming-compatible, gives true data polygon)
+            # try hexbin approach first (streaming-compatible, gives True data Polygon)
             try:
                 hexbin_pipe = pdal.Pipeline(
                     json.dumps(
@@ -436,7 +429,7 @@ class PointCloud:
                         }
                     )
                 )
-                # Use streaming execution - processes points in chunks, very memory efficient
+                # use streaming execution - processes points in chunks, very memory efficient
                 if hasattr(hexbin_pipe, 'execute_streaming_metadata'):
                     hexbin_pipe.execute_streaming_metadata(chunk_size=100000)
                 elif hasattr(hexbin_pipe, 'execute_metadata_only'):
@@ -448,11 +441,11 @@ class PointCloud:
                 boundary_wkt = hexbin_md.get("boundary")
 
                 if boundary_wkt:
-                    # Parse WKT boundary (in native CRS)
+                    # parse WKT boundary (in native CRS)
                     from shapely import wkt
                     poly_native = wkt.loads(boundary_wkt)
 
-                    # Transform to EPSG:4326
+                    # transform to EPSG:4326
                     src_crs_wkt = (
                         getattr(pc, "current_horizontal_crs", None)
                         or getattr(pc, "original_horizontal_crs", None)
@@ -466,7 +459,7 @@ class PointCloud:
                         tf = _get_transformer(src_crs, dst_crs)
                         poly_4326 = transform(lambda x, y, z=None: tf.transform(x, y), poly_native)
                     else:
-                        # Assume already in 4326 if no CRS info
+                        # assume already in 4326 if no CRS info
                         poly_4326 = poly_native
 
                     if not poly_4326.is_empty:
@@ -477,7 +470,7 @@ class PointCloud:
             except Exception:
                 pass  # Fall through to fallback methods
 
-            # Fallback: Try filters.stats for EPSG:4326 boundary (loads all points)
+            # fallback: Try filters.stats for EPSG:4326 boundary (loads all points)
             try:
                 meta_pipe = pdal.Pipeline(
                     json.dumps(
@@ -490,7 +483,7 @@ class PointCloud:
                         }
                     )
                 )
-                # Use metadata-only execution to avoid array serialization
+                # use metadata-only execution to avoid array serialization
                 if hasattr(meta_pipe, 'execute_metadata_only'):
                     meta_pipe.execute_metadata_only()
                 else:
@@ -500,7 +493,7 @@ class PointCloud:
                 md2 = meta_root2.get("metadata", {})
                 stats_md = md2.get("filters.stats", {})
 
-                # Try to use PDAL's EPSG:4326 boundary if available
+                # try to use PDAL's EPSG:4326 boundary if available
                 bbox = stats_md.get("bbox", {})
                 bbox_4326 = bbox.get("EPSG:4326", {})
                 boundary = bbox_4326.get("boundary", {})
@@ -516,7 +509,7 @@ class PointCloud:
             except Exception:
                 pass  # Fall through to bounding box fallback
 
-            # Final fallback: construct rectangle from LAS header bounds (no point loading)
+            # final fallback: construct rectangle from LAS header bounds (no point loading)
             if pc.bounds is None:
                 raise ValueError(
                     "No EPSG:4326 bbox in PDAL metadata and pc.bounds is not set; "
@@ -554,11 +547,9 @@ class PointCloud:
             poly_utm = _reproject_poly(poly_4326, 4326, epsg_utm)
             return epsg_utm, poly_utm, poly_4326
 
-        # ------------------------------------------------------------------
-        # LIGHTWEIGHT MODE: Skip expensive pipelines
-        # ------------------------------------------------------------------
+        # lIGHTWEIGHT MODE: Skip expensive pipelines
         if lightweight:
-            # Parse units from saved srs_md
+            # parse units from saved srs_md
             self.horizontal_unit, self.vertical_unit = parse_pdal_units(_srs_md)
             if self.horizontal_unit.name == "unknown" and self.original_horizontal_crs:
                 self.horizontal_unit = get_horizontal_unit(self.original_horizontal_crs)
@@ -568,7 +559,7 @@ class PointCloud:
             self.vertical_units = self.vertical_unit.display_name
 
             if bbox_only:
-                # Build bounding box polygon from header bounds (no point loading)
+                # build bounding box Polygon from header bounds (no point loading)
                 src_crs_wkt = (
                     self.original_horizontal_crs
                     or self.original_compound_crs
@@ -590,11 +581,11 @@ class PointCloud:
                 self.epsg_utm = _determine_utm_epsg(self.poly_4326)
                 self.poly_utm = _reproject_poly(self.poly_4326, 4326, self.epsg_utm)
             else:
-                # Use hexbin for true data polygon (loads points but accurate)
+                # use hexbin for True data Polygon (loads points but accurate)
                 self.epsg_utm, self.poly_utm, self.poly_4326 = _get_pointcloud_extent(self)
                 self.bbox_4326 = self.poly_4326.bounds
 
-            # Set GPS/epoch attributes to None (not computed in lightweight mode)
+            # set GPS/epoch attributes to None (not computed in lightweight mode)
             self.gps_time_mean_raw = None
             self.gps_time_min_raw = None
             self.gps_time_max_raw = None
@@ -608,13 +599,13 @@ class PointCloud:
             self.decimal_year_max_utc = None
             self.epoch = None
 
-            # Set classification attributes to empty (not computed in lightweight mode)
+            # set classification attributes to empty (not computed in lightweight mode)
             self.classification = {}
             self.class_values = []
             self.class_counts = []
             self.has_ground_class = False
 
-            # Initialize CRS history
+            # initialize CRS history
             try:
                 from .crs_history import CRSHistory
                 if getattr(self, "crs_history", None) is None:
@@ -626,44 +617,38 @@ class PointCloud:
             gc.collect()
             return  # Early return for lightweight mode
 
-        # ------------------------------------------------------------------
-        # 2) Point cloud extent polygon (in UTM)
-        #    Uses streaming hexbin filter for memory efficiency while still
-        #    capturing the true data footprint (not just bounding box)
-        #    (function defined earlier in from_file for use by lightweight mode)
-        # ------------------------------------------------------------------
+        # 2) Point cloud extent Polygon (in UTM)
+        # uses streaming hexbin filter for memory efficiency while still
+        # capturing the True data footprint (not just bounding box)
+        # (function defined earlier in from_file for use by lightweight mode)
         self.epsg_utm, self.poly_utm, self.poly_4326 = _get_pointcloud_extent(self)
         self.bbox_4326 = self.poly_4326.bounds  # (min_lon, min_lat, max_lon, max_lat)
 
-        # Clean up Pipeline 2
+        # clean up Pipeline 2
         gc.collect()
 
-        # ------------------------------------------------------------------
-        # Units - Enhanced with UnitInfo objects
-        # ------------------------------------------------------------------
-        # Parse units from PDAL metadata (srs.units.horizontal/vertical)
+        # units - Enhanced with UnitInfo objects
+        # parse units from PDAL metadata (srs.units.horizontal/vertical)
         self.horizontal_unit, self.vertical_unit = parse_pdal_units(_srs_md)
 
-        # If PDAL didn't provide units, try to extract from CRS
+        # if PDAL didn't provide units, try to extract from CRS
         if self.horizontal_unit.name == "unknown" and self.original_horizontal_crs:
             self.horizontal_unit = get_horizontal_unit(self.original_horizontal_crs)
 
         if self.vertical_unit.name == "unknown" and self.original_vertical_crs:
             self.vertical_unit = get_vertical_unit(self.original_vertical_crs)
 
-        # Backward compatible string properties
+        # backward compatible string properties
         self.horizontal_units = self.horizontal_unit.display_name
         self.vertical_units = self.vertical_unit.display_name
 
-        # Clean up _srs_md
+        # clean up _srs_md
         del _srs_md
 
-        # ------------------------------------------------------------------
         # 3) GPS time stats (and conversion to GPS seconds if needed)
-        #    Uses execute_metadata_only() to avoid array serialization overhead
-        # ------------------------------------------------------------------
-        #
-        # For original survey LAS files, we expect valid GpsTime and derive
+        # uses execute_metadata_only() to avoid array serialization overhead
+        # 
+        # for original survey LAS files, we expect valid GpsTime and derive
         # an epoch. For derived products (e.g., after PROJ pipelines), GpsTime
         # may be missing, NaN, or nonsense. In that case, we *gracefully*
         # fall back to epoch=None instead of raising.
@@ -682,7 +667,7 @@ class PointCloud:
                     }
                 )
             )
-            # Use streaming execution for memory efficiency with large files
+            # use streaming execution for memory efficiency with large files
             if hasattr(pipeline_gps_time, 'execute_streaming_metadata'):
                 pipeline_gps_time.execute_streaming_metadata(chunk_size=100000)
             elif hasattr(pipeline_gps_time, 'execute_metadata_only'):
@@ -695,7 +680,7 @@ class PointCloud:
             stats_list = gps_md.get("statistic", [])
 
             if not stats_list:
-                # No GPS stats at all – treat as "no GPS time"
+                # no GPS stats at all – treat as "no GPS time"
                 self.gps_time_mean_raw = None
                 self.gps_time_min_raw = None
                 self.gps_time_max_raw = None
@@ -726,7 +711,7 @@ class PointCloud:
                     self.gps_time_mean_raw,
                 ]
 
-                # If any are non-finite, treat as "no usable GPS"
+                # if any are non-finite, treat as "no usable GPS"
                 if any(
                     (v is None) or not math.isfinite(float(v))
                     for v in raw_vals
@@ -743,7 +728,7 @@ class PointCloud:
                     gps_time_type = None
 
                 else:
-                    # Now we know we have finite numbers
+                    # now we know we have finite numbers
                     self.gps_time_min_raw = float(self.gps_time_min_raw)
                     self.gps_time_max_raw = float(self.gps_time_max_raw)
                     self.gps_time_mean_raw = float(self.gps_time_mean_raw)
@@ -755,7 +740,7 @@ class PointCloud:
                     )
 
                     if gps_time_type not in ("gt", "gst", "gws"):
-                        # Unknown format → treat as "no epoch"
+                        # unknown format → treat as "no epoch"
                         self.gps_time_mean = None
                         self.gps_time_min = None
                         self.gps_time_max = None
@@ -768,7 +753,7 @@ class PointCloud:
                         gps_time_type = None
 
                     elif gps_time_type == "gws":
-                        # Need to set start_date for week seconds
+                        # need to set start_date for week seconds
                         creation_year = self.creation_year
                         creation_doy = self.creation_doy
                         if creation_year is None or creation_doy is None:
@@ -780,7 +765,7 @@ class PointCloud:
                         )
                         start_date_str = start_date.strftime("%Y-%m-%d")
 
-                        # Convert GPS time in-place: write to temp file, then replace original
+                        # convert GPS time in-place: write to temp file, then replace original
                         file_ext = os.path.splitext(self.filename)[1]
                         with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp:
                             temp_filename = tmp.name
@@ -808,10 +793,10 @@ class PointCloud:
                             )
                             pipeline_gps_convert.execute()
 
-                            # Replace original file with converted file
+                            # replace original file with converted file
                             shutil.move(temp_filename, self.filename)
 
-                            # Get stats from the updated file
+                            # get stats from the updated file
                             pipeline_gps_converted = pdal.Pipeline(
                                 json.dumps(
                                     {
@@ -838,12 +823,12 @@ class PointCloud:
                             self.gps_time_max = float(gps_stats2.get("maximum"))
                             self.gps_stddev = float(gps_stats2.get("stddev"))
                         finally:
-                            # Clean up temp file if it still exists
+                            # clean up temp file if it still exists
                             if os.path.exists(temp_filename):
                                 os.remove(temp_filename)
 
                     elif gps_time_type == "gst":
-                        # Convert GPS time in-place: write to temp file, then replace original
+                        # convert GPS time in-place: write to temp file, then replace original
                         file_ext = os.path.splitext(self.filename)[1]
                         with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp:
                             temp_filename = tmp.name
@@ -870,10 +855,10 @@ class PointCloud:
                             )
                             pipeline_gps_convert.execute()
 
-                            # Replace original file with converted file
+                            # replace original file with converted file
                             shutil.move(temp_filename, self.filename)
 
-                            # Get stats from the updated file
+                            # get stats from the updated file
                             pipeline_gps_converted = pdal.Pipeline(
                                 json.dumps(
                                     {
@@ -900,7 +885,7 @@ class PointCloud:
                             self.gps_time_max = float(gps_stats2.get("maximum"))
                             self.gps_stddev = float(gps_stats2.get("stddev"))
                         finally:
-                            # Clean up temp file if it still exists
+                            # clean up temp file if it still exists
                             if os.path.exists(temp_filename):
                                 os.remove(temp_filename)
 
@@ -910,7 +895,7 @@ class PointCloud:
                         self.gps_time_max = float(self.gps_time_max_raw)
                         self.gps_stddev = float(self.gps_stddev_raw)
 
-                    # If we successfully identified a GPS type, compute decimal years
+                    # if we successfully identified a GPS type, compute decimal years
                     if gps_time_type in ("gt", "gst", "gws"):
                         self.decimal_year_mean_utc = gps_seconds_to_decimal_year_utc(self.gps_time_mean)
                         self.decimal_year_min_utc = gps_seconds_to_decimal_year_utc(self.gps_time_min)
@@ -918,8 +903,8 @@ class PointCloud:
                         self.epoch = self.decimal_year_mean_utc
 
         except Exception:
-            # If anything in the GPS/epoch pipeline fails (missing GpsTime,
-            # NaNs, infinities, conversion errors), fall back to "no epoch".
+            # if anything in the GPS/epoch Pipeline fails (missing GpsTime,
+            # naNs, infinities, conversion errors), fall back to "no epoch".
             self.gps_time_mean = None
             self.gps_time_min = None
             self.gps_time_max = None
@@ -930,13 +915,11 @@ class PointCloud:
             self.decimal_year_max_utc = None
             self.epoch = None
 
-        # Clean up GPS time pipeline
+        # clean up GPS time Pipeline
         gc.collect()
 
-        # ------------------------------------------------------------------
         # 4) Classification stats
-        #    Uses execute_metadata_only() to avoid array serialization overhead
-        # ------------------------------------------------------------------
+        # uses execute_metadata_only() to avoid array serialization overhead
         pipeline_classification = pdal.Pipeline(
             json.dumps(
                 {
@@ -952,7 +935,7 @@ class PointCloud:
                 }
             )
         )
-        # Use streaming execution for memory efficiency with large files
+        # use streaming execution for memory efficiency with large files
         if hasattr(pipeline_classification, 'execute_streaming_metadata'):
             pipeline_classification.execute_streaming_metadata(chunk_size=100000)
         elif hasattr(pipeline_classification, 'execute_metadata_only'):
@@ -974,28 +957,24 @@ class PointCloud:
         self.class_values = class_values
         self.class_counts = class_counts
 
-        # Determine if ground points have been classified
+        # determine if ground points have been classified
         self.has_ground_class = 2 in self.class_values
 
-        # Clean up Classification pipeline
+        # clean up Classification Pipeline
         del pipeline_classification, class_root, class_md, class_stats_list, bins
         gc.collect()
 
-        # ------------------------------------------------------------------
         # 5) Initialize CRS history object for this point cloud
-        # ------------------------------------------------------------------
         try:
             from .crs_history import CRSHistory  # local import to avoid circulars
 
             if getattr(self, "crs_history", None) is None:
                 self.crs_history = CRSHistory(self)
         except Exception:
-            # Don't break loading if CRSHistory construction fails
+            # don't break loading if CRSHistory construction fails
             self.crs_history = None
 
-    # -------------------------------------------------------------------------
-    # Unit conversion methods
-    # -------------------------------------------------------------------------
+    # unit conversion methods
     def convert_z_to_meters(self, z_values: np.ndarray) -> np.ndarray:
         """
         Convert Z values from the point cloud's vertical unit to meters.
@@ -1017,7 +996,7 @@ class PointCloud:
         >>> z_meters = pc.convert_z_to_meters(pc.get_z_values())
         """
         if self.vertical_unit.name == "unknown":
-            # If unit is unknown, assume meters and warn
+            # if unit is unknown, assume meters and warn
             import warnings
             warnings.warn(
                 "Vertical unit is unknown, assuming meters. "
@@ -1090,9 +1069,7 @@ class PointCloud:
         v_metric = self.vertical_unit.name in ("meter", "kilometer", "centimeter", "millimeter")
         return h_metric, v_metric
 
-    # -------------------------------------------------------------------------
-    # Pretty printing
-    # -------------------------------------------------------------------------
+    # pretty printing
     def print_metadata(self) -> None:
         """Print point cloud metadata in table format."""
         print("\n--- CRS Information ---")
@@ -1156,9 +1133,7 @@ class PointCloud:
             factor = self.get_z_conversion_factor("meter")
             print(f"Z to meters factor:   {factor:.10f}")
 
-    # -------------------------------------------------------------------------
-    # Metadata editing
-    # -------------------------------------------------------------------------
+    # metadata editing
     def add_metadata(
         self,
         compound_CRS: Optional[Any] = None,
@@ -1197,9 +1172,7 @@ class PointCloud:
           - (start, end): 2-element iterable of dates/datetimes/decimal years
         """
 
-        # -------------------------------
-        # Helper: safely coerce to CRS
-        # -------------------------------
+        # helper: safely coerce to CRS
         def _crs_or_none(value: Any) -> Optional[CRS_]:
             if value is None:
                 return None
@@ -1208,9 +1181,7 @@ class PointCloud:
             except Exception:
                 return None
 
-        # -------------------------------
         # 1. Start from existing state
-        # -------------------------------
         existing_horiz = _crs_or_none(
             getattr(self, "current_horizontal_crs", None)
             or getattr(self, "original_horizontal_crs", None)
@@ -1232,10 +1203,8 @@ class PointCloud:
         geoid_changed = False
         epoch_changed = False
 
-        # -------------------------------
         # 2. Interpret compound_CRS, if any
-        # -------------------------------
-        # Helper to check if value is meaningful (not None, not empty string)
+        # helper to check if value is meaningful (not None, not empty string)
         def _is_valid_crs_input(val: Any) -> bool:
             if val is None:
                 return False
@@ -1247,7 +1216,7 @@ class PointCloud:
             comp = _ensure_crs_obj(compound_CRS)
 
             if comp.is_compound:
-                # Try to split into horizontal + vertical
+                # try to split into horizontal + vertical
                 sub = getattr(comp, "sub_crs_list", None) or []
                 horiz_candidate = sub[0] if len(sub) >= 1 else None
                 vert_candidate = sub[1] if len(sub) >= 2 else None
@@ -1265,23 +1234,21 @@ class PointCloud:
                 # and derive a synthetic 1D vertical CRS for the vertical_crs attribute
                 new_comp = comp
                 new_vert = extract_ellipsoidal_height_as_vertical_crs(comp)
-                # Horizontal stays as-is (user may have set it separately)
+                # horizontal stays as-is (user may have set it separately)
                 crs_changed = True
 
             else:
-                # Non-compound: decide whether horizontal or vertical
+                # non-compound: decide whether horizontal or vertical
                 if getattr(comp, "is_vertical", False):
                     new_vert = comp
                 else:
-                    # Geographic or projected -> horizontal
+                    # geographic or projected -> horizontal
                     new_horiz = comp
-                # Compound will be rebuilt later from horiz/vert
+                # compound will be rebuilt later from horiz/vert
                 new_comp = None
                 crs_changed = True
 
-        # -------------------------------
         # 3. Explicit horizontal / vertical overrides
-        # -------------------------------
         if _is_valid_crs_input(horizontal_CRS):
             new_horiz = _ensure_crs_obj(horizontal_CRS)
             new_comp = None
@@ -1290,9 +1257,9 @@ class PointCloud:
         if _is_valid_crs_input(vertical_CRS):
             vert_candidate = _ensure_crs_obj(vertical_CRS)
             
-            # Check if user passed a 3D geographic CRS (e.g., EPSG:4979) as vertical
+            # check if user passed a 3D geographic CRS (e.g., EPSG:4979) as vertical
             if is_3d_geographic_crs(vert_candidate):
-                # Use the 3D CRS as the full CRS, derive synthetic 1D vertical
+                # use the 3D CRS as the full CRS, derive synthetic 1D vertical
                 new_comp = vert_candidate
                 new_vert = extract_ellipsoidal_height_as_vertical_crs(vert_candidate)
             else:
@@ -1300,26 +1267,24 @@ class PointCloud:
                 new_comp = None
             crs_changed = True
 
-        # -------------------------------
         # 4. Rebuild compound if needed
-        # -------------------------------
         if new_comp is None:
             if new_horiz is not None and new_vert is not None:
-                # Check if new_vert is actually a 3D geographic CRS
+                # check if new_vert is actually a 3D geographic CRS
                 # (shouldn't happen after section 3, but defensive check)
                 if is_3d_geographic_crs(new_vert):
-                    # Use the 3D CRS directly as the full CRS
+                    # use the 3D CRS directly as the full CRS
                     new_comp = new_vert
                     new_vert = extract_ellipsoidal_height_as_vertical_crs(new_vert)
                 else:
-                    # Normal case: build true compound from 2D + 1D
+                    # normal case: build True compound from 2D + 1D
                     comp_name = f"{new_horiz.name} + {new_vert.name}"
                     new_comp = CompoundCRS(name=comp_name, components=[new_horiz, new_vert])
             elif new_horiz is not None:
-                # Horizontal only
+                # horizontal only
                 new_comp = new_horiz
             elif new_vert is not None:
-                # Vertical only - check if it's actually a 3D CRS
+                # vertical only - check if it's actually a 3D CRS
                 if is_3d_geographic_crs(new_vert):
                     new_comp = new_vert
                     new_vert = extract_ellipsoidal_height_as_vertical_crs(new_vert)
@@ -1328,36 +1293,32 @@ class PointCloud:
             else:
                 new_comp = existing_comp  # nothing better to do
 
-        # -------------------------------
         # 5. Write back CRS to PointCloud
-        # -------------------------------
         if new_comp is not None:
             self.current_compound_crs = new_comp.to_wkt()
         if new_horiz is not None:
             self.current_horizontal_crs = new_horiz.to_wkt()
-            # Update horizontal unit from new CRS
+            # update horizontal unit from new CRS
             self.horizontal_unit = get_horizontal_unit(new_horiz)
             self.horizontal_units = self.horizontal_unit.display_name
         if new_vert is not None:
             self.current_vertical_crs = new_vert.to_wkt()
-            # Update vertical unit from new CRS
+            # update vertical unit from new CRS
             self.vertical_unit = get_vertical_unit(new_vert)
             self.vertical_units = self.vertical_unit.display_name
 
-        # Orthometric flag can update when vertical changes
+        # orthometric flag can update when vertical changes
         if new_vert is not None:
             self.is_orthometric = is_orthometric(new_vert.to_wkt())
 
-        # -------------------------------
         # 6. Geoid model
-        # -------------------------------
         if geoid_model is not None:
             gm_str = str(geoid_model)
 
-            # Case A: looks like a file path or filename (e.g., "us_noaa_geoid03_conus.tif")
-            #         -> just store the basename, do NOT call select_geoid_grid again.
-            # Case B: looks like an alias (e.g., "GEOID03", "GEOID18")
-            #         -> resolve to a grid path via select_geoid_grid.
+            # case A: looks like a file path or filename (e.g., "us_noaa_geoid03_conus.tif")
+            # -> just store the basename, do NOT call select_geoid_grid again.
+            # case B: looks like an alias (e.g., "GEOID03", "GEOID18")
+            # -> resolve to a grid path via select_geoid_grid.
             if gm_str.lower().endswith(".tif") or "/" in gm_str or "\\" in gm_str:
                 self.geoid_model = Path(gm_str).name
             else:
@@ -1366,9 +1327,7 @@ class PointCloud:
 
             geoid_changed = True
 
-        # -------------------------------
         # 7. Epoch handling
-        # -------------------------------
         if epoch is not None:
 
             def _epoch_to_decimal_year(value: Any) -> float:
@@ -1382,7 +1341,7 @@ class PointCloud:
                 if isinstance(value, str):
                     parsed = _parse_epoch_string_to_decimal(value)
                     if isinstance(parsed, tuple):
-                        # If string itself is a range, we take the mid-point.
+                        # if string itself is a range, we take the mid-point.
                         return 0.5 * (parsed[0] + parsed[1])
                     return float(parsed)
                 raise TypeError(
@@ -1390,7 +1349,7 @@ class PointCloud:
                     "a string (date or 'start - end'), or a 2-element range of those."
                 )
 
-            # String range: "start - end"
+            # string range: "start - end"
             if isinstance(epoch, str):
                 parsed = _parse_epoch_string_to_decimal(epoch)
                 if isinstance(parsed, tuple):
@@ -1403,7 +1362,7 @@ class PointCloud:
                     self.epoch = epoch_dec
                     self.epoch_start = epoch_dec
                     self.epoch_end = epoch_dec
-            # Tuple/list range: (start, end)
+            # tuple/list range: (start, end)
             elif isinstance(epoch, (list, tuple)) and len(epoch) == 2:
                 start_dec = _epoch_to_decimal_year(epoch[0])
                 end_dec = _epoch_to_decimal_year(epoch[1])
@@ -1411,7 +1370,7 @@ class PointCloud:
                 self.epoch_end = max(start_dec, end_dec)
                 self.epoch = 0.5 * (self.epoch_start + self.epoch_end)
             else:
-                # Single value (numeric, date, datetime, etc.)
+                # single value (numeric, date, datetime, etc.)
                 epoch_dec = _epoch_to_decimal_year(epoch)
                 self.epoch = epoch_dec
                 self.epoch_start = epoch_dec
@@ -1419,11 +1378,9 @@ class PointCloud:
 
             epoch_changed = True
 
-        # -------------------------------
         # 8. Record a single CRSHistory entry summarizing all changes
-        # -------------------------------
         if getattr(self, "crs_history", None) is not None:
-            # Only pass updated pieces; CRSHistory keeps its own current state.
+            # only pass updated pieces; CRSHistory keeps its own current state.
             self.crs_history.add_manual_change_entry(
                 new_compound_crs_proj=new_comp if crs_changed else None,
                 new_horizontal_crs_proj=new_horiz if crs_changed else None,
@@ -1475,9 +1432,7 @@ class PointCloud:
                 self.vertical_unit = vertical_unit
             self.vertical_units = self.vertical_unit.display_name
 
-    # -------------------------------------------------------------------------
-    # Clipping / Cropping
-    # -------------------------------------------------------------------------
+    # clipping / Cropping
     def clip_to_polygon(
         self,
         polygon: Union["Polygon", str],
@@ -1511,7 +1466,7 @@ class PointCloud:
         """
         from shapely.geometry import Polygon as ShapelyPolygon
 
-        # Convert polygon to WKT if needed
+        # convert Polygon to WKT if needed
         if isinstance(polygon, str):
             polygon_wkt = polygon
         elif hasattr(polygon, 'wkt'):
@@ -1521,7 +1476,7 @@ class PointCloud:
                 f"polygon must be a shapely Polygon or WKT string, got {type(polygon)}"
             )
 
-        # Generate output path if not provided
+        # generate output path if not provided
         src_path = Path(self.filename)
         if output_path is None:
             output_path = src_path.with_name(src_path.stem + "_clipped" + src_path.suffix)
@@ -1531,7 +1486,7 @@ class PointCloud:
         if output_path.exists() and not overwrite:
             raise FileExistsError(f"Output file exists and overwrite=False: {output_path}")
 
-        # Build PDAL pipeline
+        # build PDAL Pipeline
         pipeline_spec = {
             "pipeline": [
                 {
@@ -1550,7 +1505,7 @@ class PointCloud:
         }
 
         pipe = pdal.Pipeline(json.dumps(pipeline_spec))
-        # Use streaming execution for memory efficiency - this pipeline writes to
+        # use streaming execution for memory efficiency - this Pipeline writes to
         # a file and doesn't need array data returned to Python
         count = pipe.execute_streaming(chunk_size=1000000)
 
@@ -1560,11 +1515,11 @@ class PointCloud:
                 f"No points found within the clip polygon. Output file may be empty."
             )
 
-        # Propagate metadata from source instead of re-running from_file()
-        # (avoids an expensive PDAL metadata pipeline on the file we just wrote)
+        # propagate metadata from source instead of re-running from_file()
+        # (avoids an expensive PDAL metadata Pipeline on the file we just wrote)
         clipped_pc = PointCloud(str(output_path))
         clipped_pc.total_points = count
-        # Derive bounds from the clip polygon (tighter than re-reading the header)
+        # derive bounds from the clip Polygon (tighter than re-reading the header)
         poly_bounds = polygon.bounds if hasattr(polygon, 'bounds') else None
         if poly_bounds:
             clipped_pc.minx, clipped_pc.miny = poly_bounds[0], poly_bounds[1]
@@ -1574,7 +1529,6 @@ class PointCloud:
             clipped_pc.maxx, clipped_pc.maxy = self.maxx, self.maxy
         clipped_pc.bounds = (clipped_pc.minx, clipped_pc.miny,
                              clipped_pc.maxx, clipped_pc.maxy)
-        # CRS & datum metadata
         clipped_pc.original_compound_crs = self.current_compound_crs
         clipped_pc.original_horizontal_crs = self.current_horizontal_crs
         clipped_pc.original_vertical_crs = self.current_vertical_crs
@@ -1588,18 +1542,18 @@ class PointCloud:
         clipped_pc.vertical_unit = self.vertical_unit
         clipped_pc.horizontal_units = getattr(self, 'horizontal_units', self.horizontal_unit.display_name)
         clipped_pc.vertical_units = getattr(self, 'vertical_units', self.vertical_unit.display_name)
-        # Polygon attributes — derive from clip polygon
+        # Polygon attributes : derive from clip Polygon
         clipped_pc.poly_4326 = getattr(self, 'poly_4326', None)
         clipped_pc.poly_utm = getattr(self, 'poly_utm', None)
         clipped_pc.epsg_utm = getattr(self, 'epsg_utm', None)
         clipped_pc.bbox_4326 = getattr(self, 'bbox_4326', None)
-        # GPS/epoch attributes (not recomputed)
+        # gPS/epoch attributes (not recomputed)
         for attr in ('gps_time_mean_raw', 'gps_time_min_raw', 'gps_time_max_raw',
                       'gps_stddev_raw', 'gps_time_mean', 'gps_time_min',
                       'gps_time_max', 'gps_stddev', 'decimal_year_mean_utc',
                       'decimal_year_min_utc', 'decimal_year_max_utc'):
             setattr(clipped_pc, attr, getattr(self, attr, None))
-        # Classification attributes
+        # classification attributes
         clipped_pc.classification = getattr(self, 'classification', {})
         clipped_pc.class_values = getattr(self, 'class_values', [])
         clipped_pc.class_counts = getattr(self, 'class_counts', [])
@@ -1607,9 +1561,7 @@ class PointCloud:
 
         return clipped_pc
 
-    # -------------------------------------------------------------------------
     # DEM creation
-    # -------------------------------------------------------------------------
     def create_dem(
         self,
         output_path: Union[str, os.PathLike],
@@ -1644,13 +1596,13 @@ class PointCloud:
 
         from .raster import Raster  # local import to avoid circulars
 
-        # Caching: if output file exists and overwrite=False, load and return it
+        # caching: if output file exists and overwrite=False, load and return it
         if os.path.exists(output_path) and not overwrite:
             import sys
             print(f"Loading existing DEM: {os.path.basename(str(output_path))}", file=sys.stderr)
             return Raster.from_file(str(output_path), rtype=dem_type, metadata={})
 
-        # Known interpolation keywords (not enforced, kept for reference)
+        # known interpolation keywords (not enforced, kept for reference)
         valid_interpolations = {
             "tin",
             "idw",
@@ -1665,7 +1617,7 @@ class PointCloud:
             "range",
         }
 
-        # Build pipeline
+        # build Pipeline
         pipeline_steps: List[Any] = []
         pipeline_steps.append(
             {
@@ -1674,7 +1626,7 @@ class PointCloud:
             }
         )
 
-        # Apply SMRF if requested
+        # apply SMRF if requested
         if use_smrf:
             defaults = {
                 "cell": 1.0,
@@ -1687,19 +1639,19 @@ class PointCloud:
             smrf_filter = {"type": "filters.smrf", **params}
             pipeline_steps.append(smrf_filter)
 
-        # Classification filtering
+        # classification filtering
         if classification_filter is not None:
             if classification_filter == "auto":
                 if dem_type == "dtm":
-                    # Ground only
+                    # ground only
                     filter_expr = "Classification[2:2]"
                 elif dem_type == "dsm":
-                    # First returns for any class 1–65
+                    # first returns for any class 1–65
                     filter_expr = "Classification[1:65],ReturnNumber[1:1]"
                 else:
                     filter_expr = None
             elif isinstance(classification_filter, (int, list, set, tuple)):
-                # Normalize to a list of unique integers (preserve order)
+                # normalize to a list of unique integers (preserve order)
                 classes_seq = (
                     [classification_filter]
                     if isinstance(classification_filter, int)
@@ -1731,10 +1683,10 @@ class PointCloud:
                     }
                 )
 
-        # Reprojection if needed
+        # reprojection if needed
         if output_crs is not None:
             target_crs = CRS_.from_user_input(output_crs)
-            # Compare using CRS objects (current_horizontal_crs is WKT/string)
+            # compare using CRS objects (current_horizontal_crs is WKT/string)
             try:
                 current_horiz = (
                     CRS_.from_user_input(self.current_horizontal_crs)
@@ -1752,7 +1704,7 @@ class PointCloud:
                     }
                 )
 
-        # Decide output path used by PDAL writer
+        # decide output path used by PDAL writer
         output_path = Path(output_path)
         temp_path = (
             str(output_path)
@@ -1760,12 +1712,10 @@ class PointCloud:
             else str(output_path) + ".tmp.tif"
         )
 
-        # Consistent NoData used for outputs we create directly here
+        # consistent NoData used for outputs we create directly here
         nodata_value = -9999.0
 
-        # ------------------------------------------------------------------
-        # TIN path: use filters.delaunay + filters.faceraster + writers.raster
-        # ------------------------------------------------------------------
+        # tIN path: use filters.delaunay + filters.faceraster + writers.raster
         if interpolation == "tin":
             pipeline_steps.append({"type": "filters.delaunay"})
             pipeline_steps.append(
@@ -1788,20 +1738,18 @@ class PointCloud:
             )
 
         else:
-            # ------------------------------------------------------------------
-            # Non-TIN path: writers.gdal
-            # ------------------------------------------------------------------
+            # non-TIN path: writers.gdal
             writer_options: Dict[str, Any] = {
                 "type": "writers.gdal",
                 "filename": temp_path,
                 "resolution": float(resolution),
                 "output_type": interpolation,
                 "data_type": "float32",
-                # Ensure NoData tag is present so post-processing can act on it
+                # ensure NoData tag is present so post-processing can act on it
                 "nodata": nodata_value,
             }
 
-            # IDW parameters
+            # iDW parameters
             if interpolation == "idw":
                 if window_size is not None:
                     writer_options["window_size"] = int(window_size)
@@ -1812,7 +1760,7 @@ class PointCloud:
             elif window_size is not None:
                 writer_options["window_size"] = int(window_size)
 
-            # Stats-type interpolations
+            # stats-type interpolations
             if interpolation in {
                 "min",
                 "max",
@@ -1828,7 +1776,7 @@ class PointCloud:
                     writer_options["window_size"] = int(window_size)
             elif interpolation == "bilinear":
                 # NOTE: This assumes PDAL/writers.gdal accepts 'bilinear' as output_type.
-                # If PDAL version does not, this will raise at pipeline execution.
+                # if PDAL version does not, this will raise at Pipeline execution.
                 writer_options["output_type"] = "bilinear"
                 if window_size is not None:
                     writer_options["window_size"] = int(window_size)
@@ -1852,17 +1800,15 @@ class PointCloud:
 
             pipeline_steps.append(writer_options)
 
-        # Execute pipeline
+        # execute Pipeline
         try:
             p = pdal.Pipeline(json.dumps({"pipeline": pipeline_steps}))
             points_processed = p.execute()
         except Exception as e:
             raise RuntimeError(f"PDAL pipeline failed: {e}")
 
-        # ------------------------------------------------------------------
-        # Normalize NaN/NoData for non-TIN outputs when not delegating to
+        # normalize NaN/NoData for non-TIN outputs when not delegating to
         # _postprocess_dem.
-        # ------------------------------------------------------------------
         if interpolation != "tin" and not (hole_filling or create_cog):
             if has_rasterio():
                 with rasterio.open(temp_path) as src:
@@ -1870,35 +1816,35 @@ class PointCloud:
                     profile = src.profile.copy()
                     existing_nodata = src.nodata
 
-                # Choose the output nodata we will enforce
+                # choose the output nodata we will enforce
                 out_nodata = (
                     existing_nodata
                     if (existing_nodata is not None and not np.isnan(existing_nodata))
                     else nodata_value
                 )
 
-                # Replace NaNs with NoData
+                # replace NaNs with NoData
                 if np.issubdtype(data.dtype, np.floating):
                     nan_mask = np.isnan(data)
                     if np.any(nan_mask):
                         data = data.copy()
                         data[nan_mask] = out_nodata
 
-                # Ensure profile nodata is set
+                # ensure profile nodata is set
                 profile["nodata"] = out_nodata
-                # Enable BIGTIFF for large files
+                # enable BIGTIFF for large files
                 profile["BIGTIFF"] = "IF_SAFER"
 
-                # Rewrite to the same path atomically
+                # rewrite to the same path atomically
                 tmp_fix = f"{temp_path}.nodatatmp.tif"
                 with rasterio.open(tmp_fix, "w", **profile) as dst:
                     dst.write(data, 1)
                 os.replace(tmp_fix, temp_path)
             else:
-                # If rasterio is not available, writers.gdal at least wrote with 'nodata'
+                # if rasterio is not available, writers.gdal at least wrote with 'nodata'
                 pass
 
-        # Post-processing (hole filling / COG)
+        # post-processing (hole filling / COG)
         if hole_filling or create_cog:
             self._postprocess_dem(
                 temp_path,
@@ -1909,7 +1855,7 @@ class PointCloud:
                 cog_overview_levels=cog_overview_levels,
             )
 
-        # Create raster object with metadata
+        # create Raster object with metadata
         dem = Raster.from_file(
             str(output_path),
             rtype=dem_type,
@@ -1927,7 +1873,7 @@ class PointCloud:
             },
         )
 
-        # Inherit units from source point cloud
+        # inherit units from source point cloud
         if hasattr(self, 'vertical_unit') and self.vertical_unit is not None:
             dem.current_vertical_unit = self.vertical_unit
             dem.original_vertical_unit = self.vertical_unit
@@ -1947,7 +1893,7 @@ class PointCloud:
                 dem.current_horizontal_units = self.horizontal_unit.display_name
                 dem.original_horizontal_units = self.horizontal_unit.display_name
 
-        # Inherit additional metadata from source point cloud
+        # inherit additional metadata from source point cloud
         dem.epoch = getattr(self, 'epoch', None)
         dem.current_geoid_model = getattr(self, 'geoid_model', None)
         dem.original_geoid_model = getattr(self, 'geoid_model', None)
@@ -1957,9 +1903,7 @@ class PointCloud:
 
         return dem
 
-    # -------------------------------------------------------------------------
     # DEM post-processing
-    # -------------------------------------------------------------------------
     def _postprocess_dem(
         self,
         input_path: str,
@@ -1976,7 +1920,7 @@ class PointCloud:
             profile = src.profile.copy()
             nodata = src.nodata
 
-        # Normalize NoData to NaN for processing
+        # normalize NoData to NaN for processing
         data = data.astype("float32", copy=False)
         if nodata is not None and not np.isnan(nodata):
             nodata_mask = data == nodata
@@ -1984,7 +1928,7 @@ class PointCloud:
                 data = data.copy()
                 data[nodata_mask] = np.nan
 
-        # Hole filling
+        # hole filling
         if hole_filling:
             if hole_filling_method == "interpolation":
                 # rasterio.fill.fillnodata expects mask=True where values are valid
@@ -1992,14 +1936,14 @@ class PointCloud:
                 filled = fillnodata(data, mask=valid_mask, max_search_distance=100.0)
                 data = filled
             elif hole_filling_method == "inpaint":
-                # Try OpenCV inpainting (fast, high quality) - optional dependency
+                # try OpenCV inpainting (fast, high quality) - optional dependency
                 try:
                     import cv2
                     mask = np.isnan(data).astype(np.uint8)
                     if np.any(mask):
-                        # Replace NaN with 0 for inpainting, then restore
+                        # replace NaN with 0 for inpainting, then restore
                         data_filled = np.nan_to_num(data, nan=0.0)
-                        # Telea method is faster than Navier-Stokes (cv2.INPAINT_NS)
+                        # telea method is faster than Navier-Stokes (cv2.INPAINT_NS)
                         filled = cv2.inpaint(
                             data_filled.astype(np.float32),
                             mask,
@@ -2008,28 +1952,28 @@ class PointCloud:
                         )
                         data[mask.astype(bool)] = filled[mask.astype(bool)]
                 except ImportError:
-                    # Fallback to rasterio fillnodata
+                    # fallback to rasterio fillnodata
                     valid_mask = ~np.isnan(data)
                     filled = fillnodata(data, mask=valid_mask, max_search_distance=100.0)
                     data = filled
             elif hole_filling_method in ["mean", "median", "min", "max"] and has_scipy():
-                # Optimized: use uniform_filter for mean (vectorized, ~10x faster)
+                # optimized: use uniform_filter for mean (vectorized, ~10x faster)
                 # or iterative morphological dilation for other methods
                 from scipy.ndimage import uniform_filter, maximum_filter, minimum_filter
 
                 mask = np.isnan(data)
                 if np.any(mask):
                     if hole_filling_method == "mean":
-                        # Vectorized mean filter - much faster than generic_filter
+                        # vectorized mean filter - much faster than generic_filter
                         data_zeroed = np.nan_to_num(data, nan=0.0)
                         valid_count = uniform_filter((~mask).astype(np.float32), size=3, mode="constant")
                         data_sum = uniform_filter(data_zeroed, size=3, mode="constant")
-                        # Avoid division by zero
+                        # avoid division by zero
                         valid_count = np.maximum(valid_count, 1e-10)
                         filled = data_sum / valid_count
                         data[mask] = filled[mask]
                     elif hole_filling_method == "max":
-                        # Iterative dilation until no holes remain (or max iterations)
+                        # iterative dilation until no holes remain (or max iterations)
                         data_filled = data.copy()
                         for _ in range(100):  # max iterations
                             remaining = np.isnan(data_filled)
@@ -2070,7 +2014,7 @@ class PointCloud:
                             data_filled[remaining] = dilated[remaining]
                         data = data_filled
 
-        # Update profile for COG
+        # update profile for COG
         if create_cog:
             profile.update(
                 {
@@ -2085,7 +2029,7 @@ class PointCloud:
                 }
             )
 
-        # Convert NaNs back to nodata value if nodata is defined
+        # convert NaNs back to nodata value if nodata is defined
         out_data = data
         if nodata is not None and not np.isnan(nodata):
             nan_mask = np.isnan(out_data)
@@ -2094,17 +2038,17 @@ class PointCloud:
                 out_data[nan_mask] = nodata
             profile["nodata"] = nodata  # ensure nodata is preserved in output
 
-        # Write output
+        # write output
         with rasterio.open(output_path, "w", **profile) as dst:
             dst.write(out_data, 1)
 
-            # Build overviews for COG
+            # build overviews for COG
             if create_cog:
-                # Use provided levels or compute based on raster dimensions
+                # use provided levels or compute based on Raster dimensions
                 if cog_overview_levels is not None:
                     factors = cog_overview_levels
                 else:
-                    # Auto-compute: include levels up to where min dimension >= 256
+                    # auto-compute: include levels up to where min dimension >= 256
                     max_dim = max(out_data.shape)
                     factors = []
                     level = 2
@@ -2135,16 +2079,16 @@ class PointCloud:
             if hasattr(self, attr):
                 setattr(target_pc, attr, getattr(self, attr))
         
-        # Classification information
+        # classification information
         for attr in ['classification', 'class_values', 'class_counts', 'has_ground_class']:
             if hasattr(self, attr):
                 setattr(target_pc, attr, getattr(self, attr))
         
-        # Preserve is_orthometric flag if not already set correctly
+        # preserve is_orthometric flag if not already set correctly
         if hasattr(self, 'is_orthometric') and not hasattr(target_pc, 'is_orthometric'):
             target_pc.is_orthometric = self.is_orthometric
         
-        # Preserve unit info objects - source is authoritative for transformations
+        # preserve unit info objects - source is authoritative for transformations
         # that don't explicitly change units. Always copy if source has known units.
         if hasattr(self, 'horizontal_unit') and self.horizontal_unit.name != "unknown":
             target_pc.horizontal_unit = self.horizontal_unit
@@ -2153,8 +2097,8 @@ class PointCloud:
             target_pc.vertical_unit = self.vertical_unit
             target_pc.vertical_units = self.vertical_unit.display_name
 
-        # Preserve CRS attributes if not set on target (fallback for metadata propagation)
-        # Only copy if source has a valid value and target doesn't
+        # preserve CRS attributes if not set on target (fallback for metadata propagation)
+        # only copy if source has a valid value and target doesn't
         def _has_valid_crs(obj, attr):
             val = getattr(obj, attr, None)
             return val is not None and (not isinstance(val, str) or val.strip())
@@ -2200,7 +2144,7 @@ class PointCloud:
         """
         from pyproj import CRS as _CRS
         
-        # Determine what transformations are needed
+        # determine what transformations are needed
         needs_epoch = dynamic_target_epoch is not None
         needs_vertical = (
             source_vertical_kind is not None or 
@@ -2213,10 +2157,10 @@ class PointCloud:
             target_compound_crs is not None
         )
         
-        # Count how many transformation types are requested
+        # count how many transformation types are requested
         transform_count = sum([needs_epoch, needs_vertical, needs_horizontal])
         
-        # If multiple transforms needed, use combined pipeline
+        # if multiple transforms needed, use combined Pipeline
         if transform_count > 1 or (needs_epoch and (needs_vertical or needs_horizontal)):
             return self._warp_combined(
                 target_horizontal_crs=target_horizontal_crs,
@@ -2232,7 +2176,7 @@ class PointCloud:
                 velocity_model_path=velocity_model_path,
             )
 
-        # Single transformation type - use existing specialized methods
+        # single transformation type - use existing specialized methods
         if needs_epoch:
             return self._warp_dynamic_epoch_core(
                 target_epoch=dynamic_target_epoch,
@@ -2260,7 +2204,7 @@ class PointCloud:
             )
         
         if needs_horizontal:
-            # Route horizontal-only transforms through _warp_combined
+            # route horizontal-only transforms through _warp_combined
             return self._warp_combined(
                 target_horizontal_crs=target_horizontal_crs,
                 target_compound_crs=target_compound_crs,
@@ -2269,7 +2213,7 @@ class PointCloud:
                 return_pipeline=return_pipeline,
             )
 
-        # No transformation needed
+        # no transformation needed
         return self
 
     def warp_vertical_datum(
@@ -2324,7 +2268,7 @@ class PointCloud:
         """
         from pyproj import CRS as _CRS
         
-        # Determine source CRS
+        # determine source CRS
         src_crs_wkt = self.current_compound_crs or self.original_compound_crs
         if not src_crs_wkt:
             src_crs_wkt = self.current_horizontal_crs or self.original_horizontal_crs
@@ -2333,14 +2277,14 @@ class PointCloud:
         
         src_crs_obj = _CRS.from_user_input(src_crs_wkt)
         
-        # Extract horizontal CRS from source
+        # extract horizontal CRS from source
         if src_crs_obj.is_compound and hasattr(src_crs_obj, 'sub_crs_list'):
             src_horiz_crs = src_crs_obj.sub_crs_list[0]
         else:
             src_horiz_crs = src_crs_obj
         src_horiz_str = src_horiz_crs.to_string()
         
-        # Determine target horizontal CRS
+        # determine target horizontal CRS
         if target_horizontal_crs is not None:
             dst_horiz_obj = _CRS.from_user_input(target_horizontal_crs)
             dst_horiz_str = dst_horiz_obj.to_string()
@@ -2353,11 +2297,11 @@ class PointCloud:
         else:
             dst_horiz_str = src_horiz_str
         
-        # Epochs
+        # epochs
         src_epoch = getattr(self, "epoch", None)
         dst_epoch = float(dynamic_target_epoch) if dynamic_target_epoch is not None else None
         
-        # Vertical parameters
+        # vertical parameters
         src_vertical_kind = source_vertical_kind
         if src_vertical_kind is None:
             is_ortho = getattr(self, 'is_orthometric', None)
@@ -2371,7 +2315,7 @@ class PointCloud:
         src_geoid = source_geoid_model or getattr(self, "geoid_model", None)
         dst_geoid = target_geoid_model or src_geoid
         
-        # Build output path
+        # build output path
         src_path = Path(self.filename)
         if output_path is None:
             parts = []
@@ -2382,7 +2326,7 @@ class PointCloud:
             if dst_horiz_str != src_horiz_str:
                 parts.append("reproj")
             tag = "_".join(parts) if parts else "warped"
-            # Always add "_transformed" suffix to indicate this is a transformed point cloud
+            # always add "_transformed" suffix to indicate this is a transformed point cloud
             output_path = src_path.with_name(src_path.stem + f"_{tag}_transformed" + src_path.suffix)
         else:
             output_path = Path(output_path)
@@ -2390,7 +2334,7 @@ class PointCloud:
         if output_path.exists() and not overwrite:
             raise ValueError(f"Output file exists and overwrite=False: {output_path}")
         
-        # Build CRSState objects
+        # build CRSState objects
         src_state = CRSState(
             crs=src_horiz_str,
             epoch=src_epoch,
@@ -2404,12 +2348,12 @@ class PointCloud:
             geoid_alias=dst_geoid,
         )
         
-        # Get deformation grids if epoch transform needed
+        # get deformation grids if epoch transform needed
         deformation_grids = None
         central_epoch = None
         if dst_epoch is not None and src_epoch is not None and abs(dst_epoch - src_epoch) > 0.001:
             if velocity_model_path is not None:
-                # User provided a custom velocity model
+                # user provided a custom velocity model
                 velocity_model_path = Path(velocity_model_path)
                 if not velocity_model_path.exists():
                     raise FileNotFoundError(
@@ -2419,7 +2363,7 @@ class PointCloud:
                 central_epoch = (src_epoch + dst_epoch) / 2.0
                 print(f"Using custom velocity model: {velocity_model_path}", file=sys.stderr)
             else:
-                # Automatic velocity model selection
+                # automatic velocity model selection
                 try:
                     bbox_4326 = self.bbox_4326
                 except Exception as e:
@@ -2437,7 +2381,7 @@ class PointCloud:
                 deformation_grids = vm.filepath
                 central_epoch = vm.central_epoch if vm.central_epoch is not None else src_epoch
         
-        # Build the combined pipeline
+        # build the combined Pipeline
         try:
             coord_op = build_complete_pipeline(
                 src_state,
@@ -2448,7 +2392,7 @@ class PointCloud:
         except ProjError as e:
             raise RuntimeError(f"Failed to build combined PROJ pipeline: {e}")
         
-        # Run PDAL
+        # run PDAL
         pipeline_spec = {
             "pipeline": [
                 {
@@ -2469,17 +2413,17 @@ class PointCloud:
         }
         
         pipe = pdal.Pipeline(json.dumps(pipeline_spec))
-        # Use streaming execution for memory efficiency - writes to file
+        # use streaming execution for memory efficiency - writes to file
         execute_count = pipe.execute_streaming(chunk_size=1000000)
 
-        # Verify output - try multiple methods to get point count
+        # verify output - try multiple methods to get point count
         out_count_val = 0
 
-        # Method 1: Check execute() return value
+        # method 1: Check execute() return value
         if execute_count and execute_count > 0:
             out_count_val = execute_count
 
-        # Method 2: Check metadata (arrays not available in streaming mode)
+        # method 2: Check metadata (arrays not available in streaming mode)
         if out_count_val == 0:
             md = pipe.metadata.get("metadata", {})
             writer_keys = [k for k in md.keys() if k.startswith("writers.las")]
@@ -2495,15 +2439,15 @@ class PointCloud:
             except Exception:
                 pass
 
-        # Method 4: Check if output file exists and has size
+        # method 4: Check if output file exists and has size
         if out_count_val == 0 and output_path.exists():
             if output_path.stat().st_size > 0:
-                # File exists with data - trust it worked
+                # file exists with data - trust it worked
                 out_count_val = 1  # Placeholder, will be updated when loading
 
         if out_count_val == 0:
             log_text = getattr(pipe, "log", "")
-            # Get more diagnostic info
+            # get more diagnostic info
             import os
             proj_lib = os.environ.get('PROJ_LIB', 'not set')
             output_exists = output_path.exists() if output_path else False
@@ -2517,12 +2461,12 @@ class PointCloud:
                 f"execute() returned: {execute_count}"
             )
         
-        # Load output and update metadata
+        # load output and update metadata
         out_pc = PointCloud(str(output_path))
         out_pc.from_file()
         
-        # Propagate CRS metadata to output
-        # Use source vertical CRS if no vertical transformation was done
+        # propagate CRS metadata to output
+        # use source vertical CRS if no vertical transformation was done
         src_vert_crs = (
             getattr(self, 'current_vertical_crs', None) or
             getattr(self, 'original_vertical_crs', None)
@@ -2535,13 +2479,13 @@ class PointCloud:
             geoid_model=dst_geoid,
         )
 
-        # Update vertical kind tracking
+        # update vertical kind tracking
         if dst_vertical_kind:
             out_pc.is_orthometric = (dst_vertical_kind.lower() == "orthometric")
 
         self._copy_metadata_attributes(out_pc)
         
-        # Record in CRS history
+        # record in CRS history
         if getattr(self, "crs_history", None) is not None:
             try:
                 self.crs_history.record_transformation_entry(
@@ -2582,7 +2526,7 @@ class PointCloud:
         """
         from pyproj import CRS as _CRS
 
-        # Validate vertical kinds
+        # validate vertical kinds
         source_kind = (source_kind or "").lower()
         target_kind = (target_kind or "").lower()
         if source_kind not in ("orthometric", "ellipsoidal"):
@@ -2590,7 +2534,7 @@ class PointCloud:
         if target_kind not in ("orthometric", "ellipsoidal"):
             raise ValueError("target_kind must be 'orthometric' or 'ellipsoidal'.")
 
-        # Determine output filename
+        # determine output filename
         src_path = Path(self.filename)
 
         if output_path is None:
@@ -2601,7 +2545,7 @@ class PointCloud:
                 and source_geoid_model != target_geoid_model
             ):
                 tag += f"_{source_geoid_model}_to_{target_geoid_model}"
-            # Always add "_transformed" suffix to indicate this is a transformed point cloud
+            # always add "_transformed" suffix to indicate this is a transformed point cloud
             output_path = src_path.with_name(src_path.stem + f"_{tag}_transformed" + src_path.suffix)
         else:
             output_path = Path(output_path)
@@ -2609,7 +2553,7 @@ class PointCloud:
         if output_path.exists() and not overwrite:
             raise ValueError(f"Output file already exists and overwrite=False: {output_path}")
 
-        # Determine a base horizontal CRS for PROJ
+        # determine a base horizontal CRS for PROJ
         if self.current_horizontal_crs:
             horiz_crs_obj = _CRS.from_user_input(self.current_horizontal_crs)
         elif self.current_compound_crs:
@@ -2632,7 +2576,7 @@ class PointCloud:
 
         base_crs_str = horiz_crs_obj.to_string()
 
-        # Determine target CRS string
+        # determine target CRS string
         if target_crs_proj is None:
             dst_crs_str = base_crs_str
         else:
@@ -2642,7 +2586,7 @@ class PointCloud:
                 dst_crs_obj = _CRS.from_user_input(target_crs_proj)
             dst_crs_str = dst_crs_obj.to_string()
 
-        # Build CRSState objects and call build_complete_pipeline
+        # build CRSState objects and call build_complete_pipeline
         src_state = CRSState(
             crs=base_crs_str,
             epoch=None,
@@ -2663,7 +2607,7 @@ class PointCloud:
                 f"Failed to build PROJ pipeline for vertical datum transformation: {e}"
             )
 
-        # Run PDAL with filters.projpipeline
+        # run PDAL with filters.projpipeline
         pipeline_spec = {
             "pipeline": [
                 {
@@ -2684,13 +2628,13 @@ class PointCloud:
         }
 
         pipe = pdal.Pipeline(json.dumps(pipeline_spec))
-        # Use streaming execution for memory efficiency - writes to file
+        # use streaming execution for memory efficiency - writes to file
         execute_count = pipe.execute_streaming(chunk_size=1000000)
 
-        # Determine how many points we actually wrote
+        # determine how many points we actually wrote
         out_count_val = execute_count if execute_count and execute_count > 0 else 0
 
-        # Fallback: check metadata
+        # fallback: check metadata
         if out_count_val == 0:
             md = pipe.metadata.get("metadata", {})
             writer_keys = [k for k in md.keys() if k.startswith("writers.las")]
@@ -2706,7 +2650,7 @@ class PointCloud:
             except Exception:
                 out_count_val = 0
 
-        # Fallback: check if output file exists with data
+        # fallback: check if output file exists with data
         if out_count_val == 0 and output_path.exists() and output_path.stat().st_size > 0:
             out_count_val = 1  # File has data, trust it worked
 
@@ -2719,11 +2663,11 @@ class PointCloud:
                 f"PDAL log:\n{log_text}"
             )
 
-        # Load transformed file and update metadata
+        # load transformed file and update metadata
         out_pc = PointCloud(str(output_path))
         out_pc.from_file()
 
-        # Propagate CRS metadata - preserve source vertical CRS
+        # propagate CRS metadata - preserve source vertical CRS
         src_vert_crs = (
             getattr(self, 'current_vertical_crs', None) or
             getattr(self, 'original_vertical_crs', None)
@@ -2735,7 +2679,7 @@ class PointCloud:
             geoid_model=target_geoid_model,
         )
 
-        # Update vertical kind tracking
+        # update vertical kind tracking
         out_pc.is_orthometric = (target_kind.lower() == "orthometric")
 
         self._copy_metadata_attributes(out_pc)
@@ -2781,7 +2725,7 @@ class PointCloud:
         """
         from pyproj import CRS as _CRS
 
-        # Source CRS and epochs
+        # source CRS and epochs
         src_crs_wkt = self.current_compound_crs or self.original_compound_crs
         if not src_crs_wkt:
             raise ValueError(
@@ -2801,7 +2745,7 @@ class PointCloud:
 
         dst_epoch = float(target_epoch)
 
-        # Destination CRS string
+        # destination CRS string
         if target_crs_proj is None:
             dst_crs_str = src_crs_str
         else:
@@ -2810,11 +2754,11 @@ class PointCloud:
             else:
                 dst_crs_str = str(target_crs_proj)
 
-        # Output filename
+        # output filename
         src_path = Path(self.filename)
         if output_path is None:
             tag = f"epoch{dst_epoch:.3f}".replace(".", "p")
-            # Always add "_transformed" suffix to indicate this is a transformed point cloud
+            # always add "_transformed" suffix to indicate this is a transformed point cloud
             output_path = src_path.with_name(src_path.stem + f"_{tag}_transformed" + src_path.suffix)
         else:
             output_path = Path(output_path)
@@ -2822,7 +2766,7 @@ class PointCloud:
         if output_path.exists() and not overwrite:
             raise ValueError(f"Output file already exists and overwrite=False: {output_path}")
 
-        # Geographic bbox in EPSG:4326
+        # geographic bbox in EPSG:4326
         try:
             bbox_4326 = self.bbox_4326
         except Exception as e:
@@ -2831,20 +2775,20 @@ class PointCloud:
                 "and _get_pointcloud_extent stores poly_4326."
             ) from e
 
-        # Velocity / deformation model selection
+        # velocity / deformation model selection
         if velocity_model_path is not None:
-            # User provided a custom velocity model
+            # user provided a custom velocity model
             velocity_model_path = Path(velocity_model_path)
             if not velocity_model_path.exists():
                 raise FileNotFoundError(
                     f"Custom velocity model not found: {velocity_model_path}"
                 )
             deformation_grids = str(velocity_model_path)
-            # For custom models, assume central epoch is the midpoint of transformation
+            # for custom models, assume central epoch is the midpoint of transformation
             central_epoch = (src_epoch + dst_epoch) / 2.0
             print(f"Using custom velocity model: {velocity_model_path}", file=sys.stderr)
         else:
-            # Automatic velocity model selection from registry
+            # automatic velocity model selection from registry
             vm, vm_candidates = select_velocity_model(
                 bbox_4326=bbox_4326,
                 src_epoch=float(src_epoch),
@@ -2855,7 +2799,7 @@ class PointCloud:
             deformation_grids = vm.filepath
             central_epoch = vm.central_epoch if vm.central_epoch is not None else src_epoch
 
-        # Normalize vertical kind / geoid aliases
+        # normalize vertical kind / geoid aliases
         def _norm_kind(k: Optional[str]) -> Optional[str]:
             if k is None:
                 return None
@@ -2872,7 +2816,7 @@ class PointCloud:
             or getattr(self, "geoid_model", None)
         )
 
-        # Build CRSState for source and destination
+        # build CRSState for source and destination
         src_state = CRSState(
             crs=src_crs_str,
             epoch=float(src_epoch),
@@ -2886,7 +2830,7 @@ class PointCloud:
             geoid_alias=dst_geoid_alias,
         )
 
-        # Build full pipeline
+        # build full Pipeline
         try:
             coord_op = build_complete_pipeline(
                 src_state,
@@ -2899,7 +2843,7 @@ class PointCloud:
                 f"Failed to build PROJ pipeline for dynamic epoch transformation: {e}"
             )
 
-        # Run PDAL with filters.projpipeline
+        # run PDAL with filters.projpipeline
         pipeline_spec = {
             "pipeline": [
                 {
@@ -2920,13 +2864,13 @@ class PointCloud:
         }
 
         pipe = pdal.Pipeline(json.dumps(pipeline_spec))
-        # Use streaming execution for memory efficiency - writes to file
+        # use streaming execution for memory efficiency - writes to file
         execute_count = pipe.execute_streaming(chunk_size=1000000)
 
-        # Sanity check: did we actually write any points?
+        # sanity check: did we actually write any points?
         out_count_val = execute_count if execute_count and execute_count > 0 else 0
 
-        # Fallback: check metadata
+        # fallback: check metadata
         if out_count_val == 0:
             meta = pipe.metadata
             md = meta.get("metadata", {})
@@ -2942,7 +2886,7 @@ class PointCloud:
             except Exception:
                 out_count_val = 0
 
-        # Fallback: check if output file exists with data
+        # fallback: check if output file exists with data
         if out_count_val == 0 and output_path.exists() and output_path.stat().st_size > 0:
             out_count_val = 1  # File has data, trust it worked
 
@@ -2955,13 +2899,13 @@ class PointCloud:
                 f"PDAL log:\n{log_text}"
             )
             
-        # Load as new PointCloud and update metadata
+        # load as new PointCloud and update metadata
         out_pc = PointCloud(str(output_path))
         out_pc.from_file()
 
         final_geoid = dst_state.geoid_alias
 
-        # Propagate CRS metadata - preserve source vertical CRS
+        # propagate CRS metadata - preserve source vertical CRS
         src_vert_crs = (
             getattr(self, 'current_vertical_crs', None) or
             getattr(self, 'original_vertical_crs', None)
@@ -2976,7 +2920,6 @@ class PointCloud:
 
         self._copy_metadata_attributes(out_pc)
 
-        # CRSHistory entry
         if getattr(self, "crs_history", None) is not None:
             try:
                 self.crs_history.record_transformation_entry(
@@ -3077,7 +3020,7 @@ class PointCloud:
                 import numpy as np
                 from rasterio.transform import from_bounds
 
-                # Create velocity grids (example: 0.1 degree resolution)
+                # create velocity grids (example: 0.1 degree resolution)
                 ve = np.zeros((100, 100), dtype=np.float32)  # East velocity (mm/yr)
                 vn = np.zeros((100, 100), dtype=np.float32)  # North velocity (mm/yr)
                 vu = np.zeros((100, 100), dtype=np.float32)  # Up velocity (mm/yr)
@@ -3189,7 +3132,7 @@ class PointCloud:
         warnings = []
         checks = {}
 
-        # Helper to safely get CRS EPSG code
+        # helper to safely get CRS EPSG code
         def _get_epsg(crs_val):
             if crs_val is None:
                 return None
@@ -3200,7 +3143,7 @@ class PointCloud:
             except Exception:
                 return str(crs_val)[:50] if crs_val else None
 
-        # Helper to compare CRS
+        # helper to compare CRS
         def _crs_match(crs1, crs2):
             if crs1 is None or crs2 is None:
                 return crs1 == crs2
@@ -3211,7 +3154,7 @@ class PointCloud:
             except Exception:
                 return str(crs1) == str(crs2)
 
-        # Gather current metadata
+        # gather current metadata
         current_metadata = {
             'filename': str(self.filename),
             'point_count': getattr(self, 'point_count', None),
@@ -3225,7 +3168,7 @@ class PointCloud:
             'vertical_unit': str(getattr(self, 'vertical_unit', None)),
         }
 
-        # Gather original metadata
+        # gather original metadata
         original_metadata = {
             'epoch': getattr(self, 'original_epoch', None) if hasattr(self, 'original_epoch') else None,
             'geoid_model': getattr(self, 'original_geoid_model', None) if hasattr(self, 'original_geoid_model') else None,
@@ -3234,7 +3177,7 @@ class PointCloud:
             'compound_crs': _get_epsg(getattr(self, 'original_compound_crs', None)),
         }
 
-        # Determine vertical kind from is_orthometric
+        # determine vertical kind from is_orthometric
         current_vertical_kind = None
         if current_metadata['is_orthometric'] is True:
             current_vertical_kind = "orthometric"
@@ -3242,7 +3185,7 @@ class PointCloud:
             current_vertical_kind = "ellipsoidal"
         current_metadata['vertical_kind'] = current_vertical_kind
 
-        # Get transformation history
+        # get transformation history
         transformations = []
         if hasattr(self, 'crs_history') and self.crs_history is not None:
             try:
@@ -3257,11 +3200,9 @@ class PointCloud:
             except Exception:
                 pass
 
-        # =====================================================================
-        # Validation checks
-        # =====================================================================
+        # validation checks
 
-        # Check 1: Epoch
+        # check 1: Epoch
         if expected_epoch is not None:
             actual_epoch = current_metadata['epoch']
             if actual_epoch is None:
@@ -3279,7 +3220,7 @@ class PointCloud:
                 warnings.append("Epoch not set on point cloud")
             checks['epoch'] = {'status': 'SKIP', 'actual': current_metadata['epoch']}
 
-        # Check 2: Horizontal CRS
+        # check 2: Horizontal CRS
         if expected_horizontal_crs is not None:
             actual_horiz = getattr(self, 'current_horizontal_crs', None)
             if _crs_match(actual_horiz, expected_horizontal_crs):
@@ -3301,7 +3242,7 @@ class PointCloud:
         else:
             checks['horizontal_crs'] = {'status': 'SKIP', 'actual': current_metadata['horizontal_crs']}
 
-        # Check 3: Vertical CRS
+        # check 3: Vertical CRS
         if expected_vertical_crs is not None:
             actual_vert = getattr(self, 'current_vertical_crs', None)
             if _crs_match(actual_vert, expected_vertical_crs):
@@ -3323,7 +3264,7 @@ class PointCloud:
         else:
             checks['vertical_crs'] = {'status': 'SKIP', 'actual': current_metadata['vertical_crs']}
 
-        # Check 4: Vertical kind (orthometric/ellipsoidal)
+        # check 4: Vertical kind (orthometric/ellipsoidal)
         if expected_vertical_kind is not None:
             expected_kind_lower = expected_vertical_kind.lower()
             if current_vertical_kind is None:
@@ -3354,7 +3295,7 @@ class PointCloud:
         else:
             checks['vertical_kind'] = {'status': 'SKIP', 'actual': current_vertical_kind}
 
-        # Check 5: Geoid model
+        # check 5: Geoid model
         if expected_geoid_model is not None:
             actual_geoid = current_metadata['geoid_model']
             if actual_geoid is None:
@@ -3383,14 +3324,14 @@ class PointCloud:
         else:
             checks['geoid_model'] = {'status': 'SKIP', 'actual': current_metadata['geoid_model']}
 
-        # Check 6: Transformation history exists
+        # check 6: Transformation history exists
         if len(transformations) > 1:  # More than just 'initial' entry
             checks['has_transformations'] = {'status': 'PASS', 'count': len(transformations)}
         else:
             warnings.append("No transformation history recorded")
             checks['has_transformations'] = {'status': 'WARN', 'count': len(transformations)}
 
-        # Build result
+        # build result
         is_valid = len(errors) == 0
         result = {
             'valid': is_valid,
@@ -3402,7 +3343,7 @@ class PointCloud:
             'checks': checks,
         }
 
-        # Print report if verbose
+        # print report if verbose
         if verbose:
             print("=" * 70, file=sys.stderr)
             print("POINT CLOUD TRANSFORMATION METADATA CHECK", file=sys.stderr)
@@ -3431,11 +3372,11 @@ class PointCloud:
             for check_name, check_result in checks.items():
                 status = check_result['status']
                 if status == 'PASS':
-                    icon = '✓'
+                    icon = 'PASS'
                 elif status == 'FAIL':
-                    icon = '✗'
+                    icon = 'FAIL'
                 elif status == 'WARN':
-                    icon = '⚠'
+                    icon = 'WARN'
                 else:
                     icon = '-'
 
@@ -3458,20 +3399,20 @@ class PointCloud:
             if errors:
                 print("ERRORS:", file=sys.stderr)
                 for err in errors:
-                    print(f"  ✗ {err}", file=sys.stderr)
+                    print(f"  FAIL: {err}", file=sys.stderr)
                 print(file=sys.stderr)
 
             if warnings:
                 print("WARNINGS:", file=sys.stderr)
                 for warn in warnings:
-                    print(f"  ⚠ {warn}", file=sys.stderr)
+                    print(f"  WARNING: {warn}", file=sys.stderr)
                 print(file=sys.stderr)
 
             print("=" * 70, file=sys.stderr)
             if is_valid:
-                print("RESULT: ✓ ALL CHECKS PASSED", file=sys.stderr)
+                print("RESULT: ALL CHECKS PASSED", file=sys.stderr)
             else:
-                print(f"RESULT: ✗ VALIDATION FAILED ({len(errors)} errors)", file=sys.stderr)
+                print(f"RESULT: FAIL: VALIDATION FAILED ({len(errors)} errors)", file=sys.stderr)
             print("=" * 70, file=sys.stderr)
 
         return result

@@ -1,5 +1,4 @@
-"""
-Shared test fixtures for topochange test suite.
+"""Shared test fixtures for topochange test suite.
 
 Provides:
   - Synthetic LAZ file generation with known geometry, CRS, and GPS time
@@ -7,8 +6,7 @@ Provides:
 
 All synthetic data is written using PDAL pipelines (the same library the
 project itself uses), so the test files are guaranteed to be readable by
-PointCloud.from_file() without any extra dependencies.
-"""
+PointCloud.from_file() without any extra dependencies."""
 
 import json
 import pytest
@@ -17,9 +15,7 @@ import numpy as np
 from skip_markers import HAS_PDAL
 
 
-# ---------------------------------------------------------------------------
-# Synthetic LAZ generation via PDAL
-# ---------------------------------------------------------------------------
+# synthetic LAZ generation via PDAL
 
 def _create_synthetic_laz(
     filepath: str,
@@ -39,7 +35,7 @@ def _create_synthetic_laz(
 
     The surface is a deterministic sum-of-sinusoids (rolling hills) so that
     two files created with identical seeds but different ``z_shift`` values
-    represent the *same* landscape with a known vertical offset — analogous
+    represent the *same* landscape with a known vertical offset : analogous
     to measuring the same terrain at two epochs with some real elevation
     change between them.
 
@@ -64,7 +60,7 @@ def _create_synthetic_laz(
     seed : int
         Random seed for reproducibility.
     """
-    # Import pdal the same way the project does
+    # import PDAL the same way the project does
     try:
         from topochange.pdal_wrapper import pdal
     except ImportError:
@@ -76,7 +72,7 @@ def _create_synthetic_laz(
     x_raw = rng.uniform(0, x_extent, n_points)
     y_raw = rng.uniform(0, y_extent, n_points)
 
-    # Deterministic terrain surface (rolling hills)
+    # deterministic terrain surface (rolling hills)
     z_terrain = (
         5.0 * np.sin(x_raw / 40.0) * np.cos(y_raw / 40.0)
         + 2.0 * np.sin(x_raw / 15.0) * np.sin(y_raw / 20.0)
@@ -95,8 +91,8 @@ def _create_synthetic_laz(
     classification = np.full(n_points, 2, dtype=np.uint8)
 
     # --- Build structured numpy array ---
-    # Point format 1 fields: X, Y, Z, Intensity, ReturnNumber,
-    # NumberOfReturns, Classification, GpsTime
+    # point format 1 fields: X, Y, Z, Intensity, ReturnNumber,
+    # numberOfReturns, Classification, GpsTime
     dtype = np.dtype([
         ("X", "f8"),
         ("Y", "f8"),
@@ -141,9 +137,7 @@ def _create_synthetic_laz(
     pipeline.execute()
 
 
-# ---------------------------------------------------------------------------
-# Session-scoped fixtures (one set of files for the whole test run)
-# ---------------------------------------------------------------------------
+# session-scoped fixtures (one set of files for the whole test run)
 
 @pytest.fixture(scope="session")
 def synthetic_test_data_dir(tmp_path_factory):
@@ -166,7 +160,7 @@ def synthetic_test_data_dir(tmp_path_factory):
       - GPS time ~2018  (gps_time_base = 1.2e9 adjusted seconds)
     """
     if not HAS_PDAL:
-        pytest.skip("PDAL is not installed — cannot generate synthetic LAZ")
+        pytest.skip("PDAL is not installed : cannot generate synthetic LAZ")
 
     d = tmp_path_factory.mktemp("synthetic_test_data")
 
@@ -201,9 +195,7 @@ def reference_laz_path(synthetic_test_data_dir):
     return str(synthetic_test_data_dir / "reference.laz")
 
 
-# ---------------------------------------------------------------------------
 # PointCloud fixtures (require PDAL)
-# ---------------------------------------------------------------------------
 
 @pytest.fixture
 def compare_pc(compare_laz_path):
@@ -232,3 +224,4 @@ def pc_pair(compare_pc, reference_pc):
     """PointCloudPair built from the two synthetic clouds."""
     from topochange import PointCloudPair
     return PointCloudPair(compare_pc, reference_pc)
+

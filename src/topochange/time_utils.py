@@ -1,8 +1,4 @@
-"""Time and epoch conversion utilities.
-
-Provides functions for converting between datetime formats, decimal years,
-GPS time, and parsing epoch strings from various formats.
-"""
+"""time and epoch conversion utilities."""
 import datetime
 import re
 from typing import Tuple, Union
@@ -37,11 +33,11 @@ def _parse_epoch_string_to_decimal(
 
     def _parse_date(text: str) -> datetime.datetime:
         text = text.strip()
-        # Try several common formats
+        # try several common formats
         fmts = [
             "%m/%d/%Y",   # 04/06/2006 (assumed MM/DD/YYYY)
             "%Y-%m-%d",   # 2006-04-06
-            "%d/%m/%Y",   # 06/04/2006 (DD/MM/YYYY) — fallback
+            "%d/%m/%Y",   # 06/04/2006 (DD/MM/YYYY) : fallback
             "%Y%m%d",     # 20060406
         ]
         last_err = None
@@ -52,8 +48,8 @@ def _parse_epoch_string_to_decimal(
                 last_err = e
         raise ValueError(f"Unable to parse date '{text}' in epoch string: {last_err}")
 
-    # Range "start - end"
-    # We split on '-' with optional spaces around it; dates themselves use '/'
+    # range "start - end"
+    # we split on '-' with optional spaces around it; dates themselves use '/'
     parts = re.split(r"\s*-\s*", s)
     if len(parts) == 2:
         start_dt = _parse_date(parts[0])
@@ -62,7 +58,7 @@ def _parse_epoch_string_to_decimal(
         end_dec = _datetime_to_decimal_year(end_dt)
         return (min(start_dec, end_dec), max(start_dec, end_dec))
 
-    # Single date string
+    # single date string
     dt = _parse_date(s)
     return _datetime_to_decimal_year(dt)
 
@@ -71,7 +67,7 @@ def _parse_epoch_string_to_decimal(
 
 GPS_EPOCH = datetime.datetime(1980, 1, 6, 0, 0, 0)
 
-# Leap-second table for UTC alignment (through 2017-01-01 = 18 s)
+# leap-second table for UTC alignment (through 2017-01-01 = 18 s)
 LEAP_SECONDS = [
     (datetime.datetime(1981, 7, 1), 1),  (datetime.datetime(1982, 7, 1), 2),
     (datetime.datetime(1983, 7, 1), 3),  (datetime.datetime(1985, 7, 1), 4),

@@ -1,35 +1,13 @@
-"""Topographic change detection and uncertainty quantification.
-
-This package provides tools for:
-- Loading and comparing raster DEMs and point clouds
-- CRS transformations including vertical datum conversions
-- Variogram-based uncertainty analysis
-- Regional uncertainty propagation
-- Interactive stable area identification
-
-Example usage:
-    from topochange import Raster, RasterPair, VariogramAnalysis
-
-    # Load two DEMs
-    dem1 = Raster.from_file("dem_2019.tif")
-    dem2 = Raster.from_file("dem_2023.tif")
-
-    # Create pair and compute difference
-    pair = RasterPair(dem1, dem2)
-    result = pair.compute_difference()
-"""
+"""topographic change detection and uncertainty quantification."""
 
 __version__ = "0.1.0"
 
-# Core raster classes
 from .raster import Raster
 from .rasterpair import RasterPair
 
-# Point cloud classes
 from .pointcloud import PointCloud
 from .pointcloudpair import PointCloudPair
 
-# Uncertainty analysis
 from .variogram import (
     RasterDataHandler,
     StatisticalAnalysis,
@@ -41,18 +19,15 @@ from .uncertainty import RegionalUncertaintyEstimator, DerivativeUncertaintyEsti
 from .variogram_models import MODEL_REGISTRY, VariogramModelRegistry
 from .composite_variogram import CompositeVariogramModel
 
-# Stable area analysis
 from .stable_area_analysis import (
     TopoMapInteractor,
     StableAreaRasterizer,
     StableAreaAnalyzer,
 )
 
-# CRS utilities
 from .crs_history import CRSHistory
 from .pipeline_builder import CRSState, build_vertical_pipeline
 
-# Alignment (ICP registration)
 from .alignment import (
     LandscapeAligner,
     RegistrationConfig,
@@ -60,7 +35,6 @@ from .alignment import (
     RegistrationMethod,
 )
 
-# Alignment utilities (shared with PointCloudPair)
 from .alignment_utils import (
     load_points_from_las,
     save_transformed_las,
@@ -70,15 +44,11 @@ from .alignment_utils import (
 )
 
 __all__ = [
-    # Version
     "__version__",
-    # Raster
     "Raster",
     "RasterPair",
-    # Point cloud
     "PointCloud",
     "PointCloudPair",
-    # Alignment
     "LandscapeAligner",
     "RegistrationConfig",
     "RegistrationResult",
@@ -88,7 +58,6 @@ __all__ = [
     "load_points_from_las",
     "save_transformed_las",
     "compute_alignment_quality",
-    # Variogram analysis
     "RasterDataHandler",
     "StatisticalAnalysis",
     "VariogramAnalysis",
@@ -97,15 +66,13 @@ __all__ = [
     "MODEL_REGISTRY",
     "VariogramModelRegistry",
     "CompositeVariogramModel",
-    # Uncertainty propagation
     "RegionalUncertaintyEstimator",
     "DerivativeUncertaintyEstimator",
-    # Stable areas
     "TopoMapInteractor",
     "StableAreaRasterizer",
     "StableAreaAnalyzer",
-    # CRS
     "CRSHistory",
     "CRSState",
     "build_vertical_pipeline",
 ]
+

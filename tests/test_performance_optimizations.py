@@ -1,5 +1,4 @@
-"""
-Tests for performance optimizations (R1–R10) and multi-resolution alignment (Rec #4).
+"""Tests for performance optimizations (R1–R10) and multi-resolution alignment (Rec #4).
 
 Organisation
 ------------
@@ -13,8 +12,7 @@ Organisation
 8. TestDownloadResume                 – R9 Range-header branching (mocked)
 9. TestDequeBFSOrdering               – R2 deque produces correct BFS traversal
 10. TestRunChainComposition           – R5 PDAL pipeline composition (needs PDAL)
-11. TestParallelCropEquivalence       – R6 ThreadPoolExecutor crop (needs PDAL)
-"""
+11. TestParallelCropEquivalence       – R6 ThreadPoolExecutor crop (needs PDAL)"""
 
 import os
 import time
@@ -30,9 +28,7 @@ import pytest
 from skip_markers import requires_small_gicp, requires_pdal, requires_gdal, HAS_PDAL
 
 
-# ======================================================================
-# Helpers shared across tests
-# ======================================================================
+# helpers shared across tests
 
 def _create_synthetic_terrain(n_points: int = 50_000, seed: int = 42) -> np.ndarray:
     """Rolling-hills terrain as (N, 3) float64 array."""
@@ -130,16 +126,14 @@ def _multi_resolution_align(
     return result
 
 
-# ======================================================================
 # 1. Multi-resolution convergence (Rec #4)
-# ======================================================================
 
 class TestMultiResolutionConvergence:
     """
     Multi-resolution alignment should converge for misalignments that are
     too large for single-resolution GICP to handle reliably.
 
-    Analogy: coarse-to-fine is like adjusting binoculars — you get the
+    Analogy: coarse-to-fine is like adjusting binoculars : you get the
     rough focus first, then refine.  Without the coarse pass, you might
     spin the fine knob forever without finding the target.
     """
@@ -198,7 +192,7 @@ class TestMultiResolutionConvergence:
         offset = np.array([1.5, -0.8, 0.3])
         source = target + offset
 
-        # Single-resolution
+        # single-resolution
         import small_gicp
         single_result = small_gicp.align(
             target, source,
@@ -208,7 +202,7 @@ class TestMultiResolutionConvergence:
             num_threads=4,
         )
 
-        # Multi-resolution
+        # multi-resolution
         multi_result = _multi_resolution_align(
             target, source,
             method="GICP",
@@ -219,7 +213,7 @@ class TestMultiResolutionConvergence:
         single_error = np.linalg.norm(single_result.T_target_source[:3, 3] - (-offset))
         multi_error = np.linalg.norm(multi_result.T_target_source[:3, 3] - (-offset))
 
-        # Multi-res should be within 2x of single-res (usually better)
+        # multi-res should be within 2x of single-res (usually better)
         assert multi_error < single_error * 2.0 + 0.01, (
             f"Multi-res error {multi_error:.4f} >> single-res error {single_error:.4f}"
         )
@@ -243,9 +237,7 @@ class TestMultiResolutionConvergence:
         assert error < 0.5, f"VGICP multi-res error {error:.3f}m"
 
 
-# ======================================================================
 # 2. Multi-resolution disabled
-# ======================================================================
 
 class TestMultiResolutionDisabled:
     """Verify that multi_resolution=False gives single-pass alignment."""
@@ -257,7 +249,7 @@ class TestMultiResolutionDisabled:
         offset = np.array([1.0, -0.5, 0.2])
         source = target + offset
 
-        # Single resolution (no multi-res loop)
+        # single resolution (no multi-res loop)
         result = _multi_resolution_align(
             target, source,
             method="GICP",
@@ -270,9 +262,7 @@ class TestMultiResolutionDisabled:
         assert error < 0.2, f"Single-res error {error:.3f}m"
 
 
-# ======================================================================
 # 3. Custom resolution stages
-# ======================================================================
 
 class TestMultiResolutionCustomStages:
     """Verify that custom resolution_stages are respected."""
@@ -314,9 +304,7 @@ class TestMultiResolutionCustomStages:
         assert error < 0.3, f"Custom 5-stage error {error:.3f}m"
 
 
-# ======================================================================
 # 4. Sign convention regression
-# ======================================================================
 
 class TestSignConventionRegression:
     """
@@ -348,7 +336,7 @@ class TestSignConventionRegression:
         assert result.converged
         recovered = result.T_target_source[:3, 3]
 
-        # The KEY assertion: sign must be flipped
+        # the KEY assertion: sign must be flipped
         for i, axis in enumerate(["X", "Y", "Z"]):
             assert recovered[i] < 0, (
                 f"T_target_source[{axis}] = {recovered[i]:.4f} should be negative "
@@ -386,9 +374,7 @@ class TestSignConventionRegression:
         np.testing.assert_allclose(recovered, -offset, atol=0.15)
 
 
-# ======================================================================
 # 5. PLANE_ICP synthetic test
-# ======================================================================
 
 class TestPlaneICPSynthetic:
     """
@@ -478,9 +464,7 @@ class TestPlaneICPSynthetic:
         assert error < 0.5, f"PLANE_ICP multi-res error {error:.3f}m"
 
 
-# ======================================================================
 # 6. CRS Transformer cache (R10)
-# ======================================================================
 
 class TestCRSTransformerCache:
     """
@@ -542,16 +526,14 @@ class TestCRSTransformerCache:
         from pyproj import CRS as CRS_
         from topochange.pointcloud import _get_transformer
 
-        # Create a CRS from raw WKT that may not resolve to an authority
+        # create a CRS from raw WKT that may not resolve to an authority
         custom_wkt = CRS_.from_epsg(32610).to_wkt()
-        # This should still work even if to_authority() returns None
+        # this should still work even if to_authority() returns None
         tf = _get_transformer(custom_wkt, "EPSG:4326")
         assert tf is not None
 
 
-# ======================================================================
 # 7. Noise and outlier resilience
-# ======================================================================
 
 class TestNoiseAndOutlierResilience:
     """
@@ -592,7 +574,7 @@ class TestNoiseAndOutlierResilience:
         offset = np.array([1.5, -0.8, 0.3])
         source = target + offset
 
-        # Corrupt 5% of source points with 10 m random jumps
+        # corrupt 5% of source points with 10 m random jumps
         n_outliers = int(len(source) * 0.05)
         outlier_idx = rng.choice(len(source), n_outliers, replace=False)
         source[outlier_idx] += rng.uniform(-10, 10, (n_outliers, 3))
@@ -636,9 +618,7 @@ class TestNoiseAndOutlierResilience:
         )
 
 
-# ======================================================================
-# 8. Download resume (R9) — mocked
-# ======================================================================
+# 8. Download resume (R9) : mocked
 
 @requires_gdal
 class TestDownloadResume:
@@ -678,7 +658,7 @@ class TestDownloadResume:
 
         assert result['success'] is True
         assert output.exists()
-        # Should NOT have sent Range header
+        # should NOT have sent Range header
         call_kwargs = obj._session.get.call_args
         headers_sent = call_kwargs.kwargs.get('headers', call_kwargs[1].get('headers', {}))
         assert 'Range' not in headers_sent
@@ -699,7 +679,7 @@ class TestDownloadResume:
         result = obj.download_file("https://example.com/test.laz", output)
 
         assert result['success'] is True
-        # Should have sent Range header
+        # should have sent Range header
         call_kwargs = obj._session.get.call_args
         headers_sent = call_kwargs.kwargs.get('headers', call_kwargs[1].get('headers', {}))
         assert 'Range' in headers_sent
@@ -733,7 +713,7 @@ class TestDownloadResume:
         obj = GetDEMs.__new__(GetDEMs)
         obj._session = MagicMock()
 
-        # Server returns 200 with Content-Length > existing size → full redownload
+        # server returns 200 with Content-Length > existing size → full redownload
         response = self._make_mock_response(
             200,
             content=b"complete_new_file",
@@ -746,9 +726,7 @@ class TestDownloadResume:
         assert result['success'] is True
 
 
-# ======================================================================
 # 9. Deque BFS ordering (R2)
-# ======================================================================
 
 class TestDequeBFSOrdering:
     """
@@ -781,7 +759,7 @@ class TestDequeBFSOrdering:
 
     def test_bfs_with_dynamic_appends(self):
         """BFS with children added during traversal produces same ordering."""
-        # Simple tree: root → [1,2], 1 → [3,4], 2 → [5,6]
+        # simple tree: root → [1,2], 1 → [3,4], 2 → [5,6]
         children = {0: [1, 2], 1: [3, 4], 2: [5, 6]}
 
         # list version
@@ -806,9 +784,7 @@ class TestDequeBFSOrdering:
         assert deque_order == [0, 1, 2, 3, 4, 5, 6], "BFS order incorrect"
 
 
-# ======================================================================
-# 10. run_chain pipeline composition (R5) — needs PDAL
-# ======================================================================
+# 10. run_chain Pipeline composition (R5) : needs PDAL
 
 @requires_pdal
 class TestRunChainComposition:
@@ -845,7 +821,7 @@ class TestRunChainComposition:
             overwrite=True,
         )
 
-        # The output file should be smaller than the input (5 m voxel is aggressive)
+        # the output file should be smaller than the input (5 m voxel is aggressive)
         input_size = os.path.getsize(compare_laz_path)
         output_size = os.path.getsize(result_path)
         assert output_size < input_size, (
@@ -857,7 +833,7 @@ class TestRunChainComposition:
         from topochange.alignment_utils import PointCloudPreprocessor
 
         output = str(tmp_path / "existing.laz")
-        # Create a dummy file
+        # create a dummy file
         Path(output).write_bytes(b"dummy")
 
         result_path = PointCloudPreprocessor.run_chain(
@@ -868,13 +844,11 @@ class TestRunChainComposition:
         )
 
         assert result_path == output
-        # File should still be "dummy" (not overwritten)
+        # file should still be "dummy" (not overwritten)
         assert Path(output).read_bytes() == b"dummy"
 
 
-# ======================================================================
-# 11. Parallel crop equivalence (R6) — needs PDAL
-# ======================================================================
+# 11. Parallel crop equivalence (R6) : needs PDAL
 
 @requires_pdal
 @requires_small_gicp
@@ -901,3 +875,4 @@ class TestParallelCropEquivalence:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+

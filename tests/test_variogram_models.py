@@ -1,23 +1,21 @@
-"""
-Comprehensive tests for variogram models and model registry.
+"""Comprehensive tests for variogram models and model registry.
 
 Tests cover:
 - Individual model functions (spherical, exponential, gaussian, matern, etc.)
 - Analytical values and mathematical properties
 - Boundary behavior and edge cases
 - Model registry and validation
-- Parameter specifications and bounds
-"""
+- Parameter specifications and bounds"""
 
 import pytest
 import numpy as np
 from scipy.special import gamma as gamma_func, kv as bessel_kv
 
-# Import directly from the module to avoid loading the full package
+# import directly from the module to avoid loading the full package
 import sys
 from pathlib import Path
 
-# Add src to path for direct imports
+# add src to path for direct imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from topochange.variogram_models import (
@@ -35,9 +33,7 @@ from topochange.variogram_models import (
 )
 
 
-# =============================================================================
-# Fixtures
-# =============================================================================
+# fixtures
 
 @pytest.fixture
 def registry():
@@ -58,9 +54,7 @@ def sample_variogram():
     return lags, np.array([0.0, 0.2, 0.4, 0.55, 0.65, 0.8, 0.9])
 
 
-# =============================================================================
-# Test Spherical Model
-# =============================================================================
+# test Spherical Model
 
 class TestSphericalModel:
     """Tests for the spherical variogram model."""
@@ -105,7 +99,7 @@ class TestSphericalModel:
         range_ = 2.0
         h_vals = np.linspace(0, 5, 50)
         result = spherical(h_vals, sill=sill, range_=range_)
-        # Check that differences are non-negative (monotone increasing)
+        # check that differences are non-negative (monotone increasing)
         diffs = np.diff(result)
         assert np.all(diffs >= -1e-10), "Spherical model should be monotone increasing"
 
@@ -143,9 +137,7 @@ class TestSphericalModel:
         np.testing.assert_allclose(result, np.full_like(h_vals, sill), rtol=1e-10)
 
 
-# =============================================================================
-# Test Exponential Model
-# =============================================================================
+# test Exponential Model
 
 class TestExponentialModel:
     """Tests for the exponential variogram model."""
@@ -173,7 +165,7 @@ class TestExponentialModel:
         range_ = 1.0
         h_large = np.array([50.0, 100.0, 1000.0])
         result = exponential(h_large, sill=sill, range_=range_)
-        # Should be very close to sill
+        # should be very close to sill
         np.testing.assert_allclose(result, np.full_like(h_large, sill),
                                    rtol=1e-5)
 
@@ -205,9 +197,7 @@ class TestExponentialModel:
         assert np.all(result <= sill + 1e-10)
 
 
-# =============================================================================
-# Test Gaussian Model
-# =============================================================================
+# test Gaussian Model
 
 class TestGaussianModel:
     """Tests for the Gaussian variogram model."""
@@ -254,7 +244,7 @@ class TestGaussianModel:
         h_small = np.array([0.01, 0.02])
         result = gaussian(h_small, sill=sill, range_=range_)
         expected = (sill / range_**2) * h_small**2
-        # Expect good agreement near origin
+        # expect good agreement near origin
         np.testing.assert_allclose(result, expected, rtol=0.01)
 
     def test_gaussian_array_input(self):
@@ -267,9 +257,7 @@ class TestGaussianModel:
         assert np.all(np.isfinite(result))
 
 
-# =============================================================================
-# Test Matérn Model
-# =============================================================================
+# test Matérn Model
 
 class TestMaternModel:
     """Tests for the Matérn variogram model."""
@@ -291,7 +279,7 @@ class TestMaternModel:
         matern_result = matern(h_vals, sill=sill, range_=range_, nu=0.5)
         exponential_result = exponential(h_vals, sill=sill, range_=range_)
 
-        # Should be very close (allowing for numerical precision)
+        # should be very close (allowing for numerical precision)
         np.testing.assert_allclose(matern_result, exponential_result, rtol=0.02)
 
     def test_matern_monotonicity(self):
@@ -337,9 +325,7 @@ class TestMaternModel:
         assert np.all(np.isfinite(result))
 
 
-# =============================================================================
-# Test Damped Hole-Effect Model
-# =============================================================================
+# test Damped Hole-Effect Model
 
 class TestDampedHoleEffectModel:
     """Tests for the damped hole-effect variogram model."""
@@ -359,7 +345,7 @@ class TestDampedHoleEffectModel:
         result = damped_hole_effect(h_vals, sill=sill, range_=range_,
                                      wavelength=wavelength)
 
-        # Check that we have both positive and potentially negative values
+        # check that we have both positive and potentially negative values
         # (though bounded by [0, sill*(1-exp(-h/r))*2])
         assert np.all(np.isfinite(result))
         assert np.min(result) >= -1e-10  # Slight numerical tolerance
@@ -372,7 +358,7 @@ class TestDampedHoleEffectModel:
         h_large = np.array([100.0])
         result = damped_hole_effect(h_large, sill=sill, range_=range_,
                                      wavelength=wavelength)
-        # At large h, exp(-h/r) ≈ 0, so γ ≈ C*(1 - 0) = C
+        # at large h, exp(-h/r) ≈ 0, so γ ≈ C*(1 - 0) = C
         np.testing.assert_allclose(result, [sill], rtol=0.01)
 
     def test_damped_hole_array_input(self):
@@ -402,9 +388,7 @@ class TestDampedHoleEffectModel:
                     assert np.all(np.isfinite(result))
 
 
-# =============================================================================
-# Test Power Model
-# =============================================================================
+# test Power Model
 
 class TestPowerModel:
     """Tests for the power (unbounded) variogram model."""
@@ -449,7 +433,7 @@ class TestPowerModel:
         h_vals = np.array([1.0, 10.0, 100.0, 1000.0])
         result = power(h_vals, scale=scale, exponent=exponent)
 
-        # Check that variance increases with distance
+        # check that variance increases with distance
         assert result[1] > result[0]
         assert result[2] > result[1]
         assert result[3] > result[2]
@@ -469,9 +453,7 @@ class TestPowerModel:
         np.testing.assert_allclose(result, [0.0], rtol=1e-10)
 
 
-# =============================================================================
-# Test Linear Model
-# =============================================================================
+# test Linear Model
 
 class TestLinearModel:
     """Tests for the linear (unbounded) variogram model."""
@@ -512,9 +494,7 @@ class TestLinearModel:
         np.testing.assert_allclose(result, np.zeros_like(h_vals), atol=1e-14)
 
 
-# =============================================================================
-# Test Nugget Model
-# =============================================================================
+# test Nugget Model
 
 class TestNuggetModel:
     """Tests for the pure nugget effect model."""
@@ -556,9 +536,7 @@ class TestNuggetModel:
         np.testing.assert_allclose(result, np.zeros_like(h_vals), atol=1e-14)
 
 
-# =============================================================================
-# Test Model Registry
-# =============================================================================
+# test Model Registry
 
 class TestVariogramModelRegistry:
     """Tests for the VariogramModelRegistry class."""
@@ -596,7 +574,7 @@ class TestVariogramModelRegistry:
         assert 'gaussian' in bounded
         assert 'matern' in bounded
         assert 'damped_hole_effect' in bounded
-        # Unbounded models should not be included
+        # unbounded models should not be included
         assert 'power' not in bounded
         assert 'linear' not in bounded
 
@@ -606,7 +584,7 @@ class TestVariogramModelRegistry:
         assert isinstance(unbounded, list)
         assert 'power' in unbounded
         assert 'linear' in unbounded
-        # Bounded models should not be included
+        # bounded models should not be included
         assert 'spherical' not in unbounded
         assert 'exponential' not in unbounded
 
@@ -662,7 +640,7 @@ class TestVariogramModelRegistry:
         """Test no warning for Gaussian with nugget."""
         valid, msg = registry.validate_combination(['gaussian'], include_nugget=True)
         assert valid is True
-        # Should not have warning about Gaussian
+        # should not have warning about Gaussian
         assert "without nugget" not in msg.lower()
 
     def test_registry_bounded_model_has_sill(self, registry):
@@ -678,9 +656,7 @@ class TestVariogramModelRegistry:
             assert spec.has_sill is False
 
 
-# =============================================================================
-# Test VariogramModelSpec
-# =============================================================================
+# test VariogramModelSpec
 
 class TestVariogramModelSpec:
     """Tests for the VariogramModelSpec dataclass."""
@@ -730,15 +706,15 @@ class TestVariogramModelSpec:
     def test_spec_validate_damped_hole_valid(self, registry):
         """Test validation for valid damped hole effect parameters."""
         spec = registry.get_model('damped_hole_effect')
-        # Valid: 2πr/λ = 2π*1/2 ≈ 3.14 > 1
+        # valid: 2πr/λ = 2π*1/2 ≈ 3.14 > 1
         params = [1.0, 1.0, 2.0]  # sill=1, range=1, wavelength=2
-        # Should not raise
+        # should not raise
         spec.validate(params)
 
     def test_spec_validate_damped_hole_invalid(self, registry):
         """Test validation for invalid damped hole effect parameters."""
         spec = registry.get_model('damped_hole_effect')
-        # Invalid: 2πr/λ = 2π*0.1/2 ≈ 0.31 < 1
+        # invalid: 2πr/λ = 2π*0.1/2 ≈ 0.31 < 1
         params = [1.0, 0.1, 2.0]  # sill=1, range=0.1, wavelength=2
         with pytest.raises(ValueError, match="positive definiteness"):
             spec.validate(params)
@@ -765,13 +741,11 @@ class TestVariogramModelSpec:
         spec = registry.get_model('linear')
         assert spec.param_names == ['slope']
 
-        # Note: nugget is a function but not registered as a model in registry
-        # It's used as a separate component for compositing
+        # note: nugget is a function but not registered as a model in registry
+        # it's used as a separate component for compositing
 
 
-# =============================================================================
-# Test Global Registry
-# =============================================================================
+# test Global Registry
 
 class TestGlobalRegistry:
     """Tests for the global MODEL_REGISTRY instance."""
@@ -794,9 +768,7 @@ class TestGlobalRegistry:
         assert isinstance(spec, VariogramModelSpec)
 
 
-# =============================================================================
-# Test Edge Cases and Integration
-# =============================================================================
+# test Edge Cases and Integration
 
 class TestEdgeCases:
     """Tests for edge cases and special scenarios."""
@@ -816,7 +788,7 @@ class TestEdgeCases:
         for name, kwargs in models_and_params:
             spec = MODEL_REGISTRY.get_model(name)
             result = spec.func(0.5, **kwargs)
-            # Result should be a numpy scalar or array
+            # result should be a numpy scalar or array
             assert isinstance(result, (np.ndarray, np.generic))
 
     def test_all_models_handle_empty_array(self):
@@ -862,7 +834,7 @@ class TestEdgeCases:
         small_range = 1e-6
 
         result = spherical(h_vals, sill=1.0, range_=small_range)
-        # With very small range, everything should be at sill except h=0
+        # with very small range, everything should be at sill except h=0
         assert result[0] == 0.0
         assert np.isclose(result[1], 1.0)
         assert np.isclose(result[2], 1.0)
@@ -878,7 +850,7 @@ class TestEdgeCases:
 
     def test_model_combination_bounded_with_nugget_flag(self, registry):
         """Test validation with include_nugget flag."""
-        # When include_nugget=True, Gaussian should not produce warning
+        # when include_nugget=True, Gaussian should not produce warning
         valid, msg = registry.validate_combination(
             ['spherical'],
             include_nugget=True
@@ -890,15 +862,13 @@ class TestEdgeCases:
         h_vals = np.array([0.0, 0.5, 1.0])
         result = nugget(h_vals, c0=1.0)
         assert isinstance(result, np.ndarray)
-        # Nugget should be 0 at h=0 and c0 elsewhere
+        # nugget should be 0 at h=0 and c0 elsewhere
         assert result[0] == 0.0
         assert np.isclose(result[1], 1.0)
         assert np.isclose(result[2], 1.0)
 
 
-# =============================================================================
-# Test Numerical Stability
-# =============================================================================
+# test Numerical Stability
 
 class TestNumericalStability:
     """Tests for numerical stability of models."""
@@ -954,3 +924,4 @@ class TestNumericalStability:
             spec = MODEL_REGISTRY.get_model(name)
             result = spec.func(h_vals, **kwargs)
             assert not np.any(np.isnan(result)), f"{name} returned NaN"
+

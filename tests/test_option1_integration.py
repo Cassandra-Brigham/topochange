@@ -1,8 +1,6 @@
-"""
-Integration tests for complete Option 1 workflow from my_implementation.ipynb
+"""Integration tests for complete Option 1 workflow from my_implementation.ipynb
 Tests the full pipeline: metadata -> transformation -> alignment -> DEM creation
-Uses synthetic LAZ data from conftest fixtures.
-"""
+Uses synthetic LAZ data from conftest fixtures."""
 
 import pytest
 import os
@@ -33,15 +31,15 @@ class TestOption1CompleteWorkflow:
         5. Create DEMs
         6. Verify DEM properties
         """
-        # Step 1: Point clouds already loaded via fixtures
+        # step 1: Point clouds already loaded via fixtures
         pc1 = compare_pc
         pc2 = reference_pc
 
-        # Verify point clouds loaded
+        # verify point clouds loaded
         assert pc1 is not None
         assert pc2 is not None
 
-        # Step 2: Update metadata
+        # step 2: Update metadata
         pc1.add_metadata(
             compound_CRS="EPSG:4979",
             epoch="05/18/2005 - 05/27/2005"
@@ -53,13 +51,13 @@ class TestOption1CompleteWorkflow:
             epoch="05/27/2018 - 07/22/2018"
         )
 
-        # Verify metadata was updated
+        # verify metadata was updated
         assert pc1.current_compound_crs is not None
         assert pc1.epoch is not None
         assert pc2.current_vertical_crs is not None
         assert pc2.epoch is not None
 
-        # Step 3: Create pair and transform (skip epoch for speed)
+        # step 3: Create pair and transform (skip epoch for speed)
         pc_pair = PointCloudPair(pc1, pc2)
 
         try:
@@ -68,10 +66,10 @@ class TestOption1CompleteWorkflow:
                 verbose=False
             )
 
-            # Verify transformation completed
+            # verify transformation completed
             assert transformed is not False
 
-            # Step 4: Align point clouds
+            # step 4: Align point clouds
             align_result = pc_pair.align_point_clouds(
                 method="vgicp",
                 downsample_resolution=1.0,
@@ -79,36 +77,36 @@ class TestOption1CompleteWorkflow:
                 max_points=1_000_000,
             )
 
-            # Verify alignment succeeded
+            # verify alignment succeeded
             assert align_result is not None
             assert align_result.transformation.shape == (4, 4)
             assert align_result.converged is True
 
-            # Step 5: Create DEMs
+            # step 5: Create DEMs
             dem1, dem2 = pc_pair.create_dtm_pair(
                 resolution=1.0,
                 output_dir=output_dir
             )
 
-            # Verify DEMs were created
+            # verify DEMs were created
             assert dem1 is not None
             assert dem2 is not None
             assert os.path.exists(dem1.filename)
             assert os.path.exists(dem2.filename)
 
-            # Step 6: Verify DEM properties
-            # Check units
+            # step 6: Verify DEM properties
+            # check units
             assert hasattr(dem1, 'horizontal_unit')
             assert hasattr(dem1, 'vertical_unit')
 
-            # Set units if needed
+            # set units if needed
             dem1.set_units(vertical_unit="meter")
             dem2.set_units(vertical_unit="meter")
 
             assert dem1.vertical_unit == "meter"
             assert dem2.vertical_unit == "meter"
 
-            # Verify DEMs have valid data
+            # verify DEMs have valid data
             assert hasattr(dem1, 'data')
             assert hasattr(dem2, 'data')
             assert np.any(np.isfinite(dem1.data))
@@ -124,26 +122,26 @@ class TestOption1WorkflowStepByStep:
     @requires_pdal
     def test_step1_load_and_metadata(self, compare_pc, reference_pc):
         """Test Step 1: Load point clouds and update metadata"""
-        # Load compare point cloud
+        # load compare point cloud
         pc1 = compare_pc
 
-        # Update compare metadata
+        # update compare metadata
         pc1.add_metadata(
             compound_CRS="EPSG:4979",
             epoch="05/18/2005 - 05/27/2005"
         )
 
-        # Load reference point cloud
+        # load reference point cloud
         pc2 = reference_pc
 
-        # Update reference metadata
+        # update reference metadata
         pc2.add_metadata(
             vertical_CRS="EPSG:5703",
             geoid_model="geoid12b",
             epoch="05/27/2018 - 07/22/2018"
         )
 
-        # Verify
+        # verify
         assert pc1.current_compound_crs is not None
         assert pc1.epoch is not None
         assert pc2.current_vertical_crs is not None
@@ -159,11 +157,11 @@ class TestOption1WorkflowStepByStep:
         pc2 = reference_pc
         pc2.add_metadata(vertical_CRS="EPSG:5703")
 
-        # Create pair
+        # create pair
         pc_pair = PointCloudPair(pc1, pc2)
         assert pc_pair is not None
 
-        # Transform (skip epoch)
+        # transform (skip epoch)
         try:
             transformed = pc_pair.transform_compare_to_match_reference(
                 skip_epoch=True,
@@ -183,10 +181,10 @@ class TestOption1WorkflowStepByStep:
         pc_pair = PointCloudPair(pc1, pc2)
 
         try:
-            # Transform first
+            # transform first
             pc_pair.transform_compare_to_match_reference(skip_epoch=True, verbose=False)
 
-            # Align
+            # align
             align_result = pc_pair.align_point_clouds(
                 method="vgicp",
                 downsample_resolution=1.0,
@@ -211,7 +209,7 @@ class TestOption1WorkflowStepByStep:
         pc_pair = PointCloudPair(pc1, pc2)
 
         try:
-            # Full workflow up to DEM creation
+            # full workflow up to DEM creation
             pc_pair.transform_compare_to_match_reference(skip_epoch=True, verbose=False)
             pc_pair.align_point_clouds(
                 method="vgicp",
@@ -230,7 +228,7 @@ class TestOption1WorkflowStepByStep:
                 assert os.path.exists(dem1.filename)
                 assert os.path.exists(dem2.filename)
 
-                # Set and verify units
+                # set and verify units
                 dem1.set_units(vertical_unit="meter")
                 dem2.set_units(vertical_unit="meter")
 
@@ -250,10 +248,10 @@ class TestOption1ErrorHandling:
         pc1 = compare_pc
         pc2 = reference_pc
 
-        # Create pair without updating metadata
+        # create pair without updating metadata
         pc_pair = PointCloudPair(pc1, pc2)
 
-        # Should still be able to create pair
+        # should still be able to create pair
         assert pc_pair is not None
 
     @requires_pdal
@@ -261,12 +259,12 @@ class TestOption1ErrorHandling:
         """Test handling of invalid CRS values"""
         pc = compare_pc
 
-        # Try to set invalid CRS - should handle gracefully
+        # try to set invalid CRS - should handle gracefully
         try:
             pc.add_metadata(compound_CRS="INVALID:12345")
-            # If it succeeds or raises specific error, that's okay
+            # if it succeeds or raises specific error, that's okay
         except Exception as e:
-            # Should raise a meaningful error
+            # should raise a meaningful error
             assert len(str(e)) > 0
 
 
@@ -291,7 +289,7 @@ class TestOption1Performance:
             pc_pair = PointCloudPair(pc1, pc2)
             pc_pair.transform_compare_to_match_reference(skip_epoch=True, verbose=False)
 
-            # Alignment with reduced points for speed
+            # alignment with reduced points for speed
             pc_pair.align_point_clouds(
                 method="vgicp",
                 downsample_resolution=2.0,
@@ -306,9 +304,10 @@ class TestOption1Performance:
 
             elapsed_time = time.time() - start_time
 
-            # Workflow should complete in reasonable time (adjust as needed)
-            # This is a generous timeout
+            # workflow should complete in reasonable time (adjust as needed)
+            # this is a generous timeout
             assert elapsed_time < 600, f"Workflow took {elapsed_time:.1f}s, which is too long"
 
         except ImportError as e:
             pytest.skip(f"Required dependencies not available: {e}")
+

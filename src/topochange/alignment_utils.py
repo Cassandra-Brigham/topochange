@@ -1,20 +1,4 @@
-"""
-Shared utilities for point cloud alignment operations.
-
-This module consolidates common functionality from pointcloudpair.py and alignment.py
-to eliminate code duplication and provide a single source of truth for:
-- PDAL pipeline execution
-- Point cloud loading with filtering/downsampling
-- Transformation application to LAS files
-- Alignment quality metrics computation
-- Point cloud preprocessing utilities
-
-References
-----------
-- Besl, P.J. and McKay, N.D. (1992). A Method for Registration of 3-D Shapes.
-  IEEE Transactions on Pattern Analysis and Machine Intelligence.
-- Koide, K. et al. (2021). Voxelized GICP for Fast and Accurate 3D Point Cloud Registration.
-"""
+"""shared utilities for point cloud alignment operations."""
 
 from __future__ import annotations
 
@@ -30,9 +14,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
 # PDAL Pipeline Utilities
-# ============================================================================
 
 def run_pdal_pipeline(
     steps: List[Dict[str, Any]],
@@ -180,12 +162,12 @@ def load_points_from_las(
 
     steps = [{"type": "readers.las", "filename": str(filename)}]
 
-    # Classification filter
+    # classification filter
     if point_filter and point_filter not in ("all", "All", None):
         if point_filter in ("ground", "Ground"):
             steps.append({"type": "filters.range", "limits": "Classification[2:2]"})
         elif isinstance(point_filter, (list, tuple)):
-            # Support multiple classification codes
+            # support multiple classification codes
             ranges = ",".join(f"Classification[{c}:{c}]" for c in point_filter)
             steps.append({"type": "filters.range", "limits": ranges})
         elif isinstance(point_filter, int):
@@ -193,7 +175,7 @@ def load_points_from_las(
         else:
             logger.warning(f"Unknown point_filter value: {point_filter}, using all points")
 
-    # Spatial crop
+    # spatial crop
     if crop_bounds is not None:
         minx, miny, maxx, maxy = crop_bounds
         steps.append({
@@ -201,7 +183,7 @@ def load_points_from_las(
             "bounds": f"([{minx},{maxx}],[{miny},{maxy}])"
         })
 
-    # Voxel downsampling
+    # voxel downsampling
     if voxel_size is not None and voxel_size > 0:
         steps.append({
             "type": "filters.voxeldownsize",
@@ -209,25 +191,25 @@ def load_points_from_las(
             "mode": "center"
         })
 
-    # Point limit (applied last)
+    # point limit (applied last)
     if max_points is not None and max_points > 0:
         steps.append({"type": "filters.head", "count": int(max_points)})
 
-    # Execute pipeline
+    # execute Pipeline
     arr, metadata = run_pdal_pipeline(steps, need_arrays=True, streaming=False)
 
     if arr is None or len(arr) == 0:
         raise RuntimeError(f"No points loaded from {filename}")
 
-    # Extract XYZ
+    # extract XYZ
     xyz = np.column_stack((arr['X'], arr['Y'], arr['Z']))
 
     if return_colors:
-        # Try to extract RGB colors
+        # try to extract RGB colors
         try:
             if 'Red' in arr.dtype.names and 'Green' in arr.dtype.names and 'Blue' in arr.dtype.names:
                 rgb = np.column_stack((arr['Red'], arr['Green'], arr['Blue']))
-                # Normalize to 0-1 if values are 16-bit
+                # normalize to 0-1 if values are 16-bit
                 if rgb.max() > 255:
                     rgb = rgb / 65535.0
                 elif rgb.max() > 1:
@@ -297,28 +279,28 @@ def save_transformed_las(
     source_filename = Path(source_filename)
     output_filename = Path(output_filename)
 
-    # Ensure output directory exists
+    # ensure output directory exists
     output_filename.parent.mkdir(parents=True, exist_ok=True)
 
-    # Build the full transformation matrix
+    # build the full transformation matrix
     if centroid is not None:
-        # Create centering matrices
+        # create centering matrices
         T_center = np.eye(4)
         T_center[:3, 3] = -centroid
 
         T_uncenter = np.eye(4)
         T_uncenter[:3, 3] = centroid
 
-        # Combined transformation: uncenter @ transform @ center
-        # This applies: (1) subtract centroid, (2) apply T, (3) add centroid
+        # combined transformation: uncenter @ transform @ center
+        # this applies: (1) subtract centroid, (2) apply T, (3) add centroid
         full_matrix = T_uncenter @ transformation_matrix @ T_center
     else:
         full_matrix = transformation_matrix
 
-    # Format matrix for PDAL (row-major, space-separated)
+    # format matrix for PDAL (row-major, space-separated)
     matrix_str = " ".join(f"{v:.12g}" for v in full_matrix.flatten())
 
-    # Build pipeline
+    # build Pipeline
     steps = [
         {"type": "readers.las", "filename": str(source_filename)},
         {"type": "filters.transformation", "matrix": matrix_str},
@@ -329,16 +311,12 @@ def save_transformed_las(
         writer["a_srs"] = output_crs
     steps.append(writer)
 
-    # Execute
+    # execute
     run_pdal_pipeline(steps, need_arrays=False, streaming=streaming, chunk_size=chunk_size)
 
     logger.info(f"Saved transformed point cloud to {output_filename}")
     return str(output_filename)
 
-
-# ============================================================================
-# Point Cloud Preprocessing
-# ============================================================================
 
 class PointCloudPreprocessor:
     """
@@ -396,11 +374,11 @@ class PointCloudPreprocessor:
         """
         filename = Path(filename)
 
-        # No filtering needed
+        # no filtering needed
         if classifications in ("all", "All", None):
             return str(filename)
 
-        # Determine filter limits
+        # determine filter limits
         if classifications in ("ground", "Ground"):
             limits = "Classification[2:2]"
         elif isinstance(classifications, int):
@@ -411,7 +389,7 @@ class PointCloudPreprocessor:
         else:
             raise ValueError(f"Invalid classification filter: {classifications}")
 
-        # Determine output path
+        # determine output path
         if output_path is None:
             output_path = str(filename.with_name(filename.stem + "_filtered" + filename.suffix))
 
@@ -420,7 +398,7 @@ class PointCloudPreprocessor:
             logger.info(f"Using existing filtered file: {output_path}")
             return str(output_path)
 
-        # Execute pipeline
+        # execute Pipeline
         steps = [
             {"type": "readers.las", "filename": str(filename)},
             {"type": "filters.range", "limits": limits},
@@ -694,7 +672,7 @@ class PointCloudPreprocessor:
                     maxs = f.header.maxs
                     bounds = (mins[0], mins[1], maxs[0], maxs[1])
         except Exception:
-            # Fallback: use PDAL to get info
+            # fallback: use PDAL to get info
             steps = [{"type": "readers.las", "filename": str(filename)}]
             _, metadata = run_pdal_pipeline(steps, need_arrays=False)
             reader_meta = metadata.get("readers.las", {})
@@ -707,7 +685,7 @@ class PointCloudPreprocessor:
                     reader_meta.get("maxy", 1000),
                 )
 
-        # Calculate area
+        # calculate area
         width = bounds[2] - bounds[0]
         height = bounds[3] - bounds[1]
         area = max(width * height, 1.0)  # Avoid division by zero
@@ -715,13 +693,13 @@ class PointCloudPreprocessor:
         if point_count <= target_points:
             return 0.1  # Minimal downsampling
 
-        # Target density (points per square unit)
+        # target density (points per square unit)
         target_density = target_points / area
 
-        # Voxel size ≈ sqrt(1 / target_density) for 2D distribution
+        # voxel size ≈ sqrt(1 / target_density) for 2D distribution
         voxel_size = np.sqrt(1.0 / target_density)
 
-        # Clamp to reasonable range
+        # clamp to reasonable range
         voxel_size = max(0.1, min(voxel_size, 10.0))
 
         logger.debug(
@@ -864,7 +842,7 @@ class PointCloudPreprocessor:
         if max_points is not None and max_points > 0:
             steps.append({"type": "filters.head", "count": int(max_points)})
 
-        # Writer
+        # writer
         steps.append({"type": "writers.las", "filename": str(output_path)})
 
         run_pdal_pipeline(
@@ -874,10 +852,6 @@ class PointCloudPreprocessor:
         logger.info(f"Preprocessed point cloud saved to {output_path}")
         return str(output_path)
 
-
-# ============================================================================
-# Alignment Quality Metrics
-# ============================================================================
 
 @dataclass
 class AlignmentQualityMetrics:
@@ -984,24 +958,24 @@ def compute_alignment_quality(
     """
     from scipy.spatial import cKDTree
 
-    # Optional sampling for large clouds
+    # optional sampling for large clouds
     if sample_size is not None and len(source_points) > sample_size:
         indices = np.random.choice(len(source_points), sample_size, replace=False)
         source_sample = source_points[indices]
     else:
         source_sample = source_points
 
-    # Build KD-tree on target (this is O(M log M))
+    # build KD-tree on target (this is O(M log M))
     tree = cKDTree(target_points)
 
-    # Query nearest neighbors for all source points (this is O(N log M))
+    # query nearest neighbors for all source points (this is O(N log M))
     distances, _ = tree.query(source_sample, k=1)
 
-    # Compute inlier mask
+    # compute inlier mask
     inlier_mask = distances <= max_distance
     inlier_distances = distances[inlier_mask]
 
-    # Handle edge case of no inliers
+    # handle edge case of no inliers
     if len(inlier_distances) == 0:
         return AlignmentQualityMetrics(
             rmse=np.inf,
@@ -1015,7 +989,7 @@ def compute_alignment_quality(
             max_distance_used=max_distance,
         )
 
-    # Compute metrics
+    # compute metrics
     rmse = np.sqrt(np.mean(inlier_distances ** 2))
     mae = np.mean(inlier_distances)
     median = np.median(inlier_distances)
@@ -1039,9 +1013,7 @@ def compute_alignment_quality(
     )
 
 
-# ============================================================================
-# Dependency Checks
-# ============================================================================
+# dependency Checks
 
 def require_small_gicp():
     """
@@ -1084,9 +1056,7 @@ def has_small_gicp() -> bool:
         return False
 
 
-# ============================================================================
-# Transformation Utilities
-# ============================================================================
+# transformation Utilities
 
 def decompose_transformation(T: np.ndarray) -> Dict[str, Any]:
     """
@@ -1107,28 +1077,28 @@ def decompose_transformation(T: np.ndarray) -> Dict[str, Any]:
         - 'rotation_axis': np.ndarray of shape (3,) (unit axis)
         - 'scale': float (uniform scale factor)
     """
-    # Extract translation
+    # extract translation
     translation = T[:3, 3].copy()
 
-    # Extract rotation matrix
+    # extract rotation matrix
     R = T[:3, :3].copy()
 
-    # Compute scale (assuming uniform scaling)
+    # compute scale (assuming uniform scaling)
     scale = np.cbrt(np.linalg.det(R))
     if scale != 0:
         R = R / scale
 
-    # Compute rotation angle using trace
-    # For a rotation matrix: trace(R) = 1 + 2*cos(theta)
+    # compute rotation angle using trace
+    # for a rotation matrix: trace(R) = 1 + 2*cos(theta)
     trace = np.trace(R)
     cos_angle = (trace - 1) / 2
     cos_angle = np.clip(cos_angle, -1, 1)  # Handle numerical errors
     angle_rad = np.arccos(cos_angle)
     angle_deg = np.degrees(angle_rad)
 
-    # Compute rotation axis (eigenvector with eigenvalue 1)
+    # compute rotation axis (eigenvector with eigenvalue 1)
     if angle_rad < 1e-6:
-        # Near-identity rotation
+        # near-identity rotation
         axis = np.array([0, 0, 1])
     elif abs(angle_rad - np.pi) < 1e-6:
         # 180-degree rotation: find axis from R + I
@@ -1136,7 +1106,7 @@ def decompose_transformation(T: np.ndarray) -> Dict[str, Any]:
         axis = RpI[:, np.argmax(np.sum(RpI ** 2, axis=0))]
         axis = axis / np.linalg.norm(axis)
     else:
-        # General case: axis from skew-symmetric part
+        # general case: axis from skew-symmetric part
         axis = np.array([
             R[2, 1] - R[1, 2],
             R[0, 2] - R[2, 0],
@@ -1186,3 +1156,4 @@ def compose_transformation(
         T[:3, 3] = translation
 
     return T
+

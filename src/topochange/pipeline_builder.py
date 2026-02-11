@@ -1,12 +1,4 @@
-"""Build PROJ pipeline strings for coordinate transformations.
-
-Supports:
-1. Horizontal-only transforms (CRS -> CRS)
-2. Vertical-only transforms (ellipsoidal <-> orthometric, geoid A <-> geoid B)
-3. Dynamic epoch transforms (with velocity/deformation grids)
-
-Only builds PROJ pipeline strings. Execution is handled by PDAL, pyproj, etc.
-"""
+"""PROJ pipeline string construction for coordinate transformations."""
 
 from __future__ import annotations
 
@@ -22,9 +14,7 @@ from pyproj import CRS
 from .geoid_utils import select_geoid_grid
 
 
-# ---------------------------------------------------------------------
-# Basic error + state container
-# ---------------------------------------------------------------------
+# basic error + state container
 
 
 class ProjError(RuntimeError):
@@ -74,7 +64,7 @@ class CRSState:
         # resolve_geoid_alias returns either:
         # - Just a filename (if grid is in PROJ_LIB) - use as-is
         # - A full absolute path (if grid is elsewhere) - use as-is
-        # Do NOT call Path().resolve() as it would resolve filenames to CWD
+        # do NOT call Path().resolve() as it would resolve filenames to CWD
         grid_path_str = grid_path
 
         return CRSState(
@@ -86,9 +76,7 @@ class CRSState:
         )
 
 
-# ---------------------------------------------------------------------
-# Hook for your own geoid alias system
-# ---------------------------------------------------------------------
+# hook for your own geoid alias system
 
 
 def resolve_geoid_alias(alias: str) -> Optional[str]:
@@ -110,24 +98,24 @@ def resolve_geoid_alias(alias: str) -> Optional[str]:
     if not alias_str:
         return None
 
-    # Check if it's already an absolute path that exists and has no spaces
+    # check if it's already an absolute path that exists and has no spaces
     if os.path.isabs(alias_str) and os.path.exists(alias_str):
         if ' ' not in alias_str:
             return alias_str
-        # Has spaces - try to find it in a directory without spaces instead
+        # has spaces - try to find it in a directory without spaces instead
 
-    # Common geoid grid extensions
+    # common geoid grid extensions
     geoid_extensions = ('.tif', '.gtx', '.gtx.gz', '.gvb', '.byn', '.grid')
     alias_low = alias_str.lower()
 
-    # Check if it's a filename (not an alias)
+    # check if it's a filename (not an alias)
     is_filename = any(alias_low.endswith(ext) for ext in geoid_extensions)
 
     if is_filename:
         filename = os.path.basename(alias_str)
         return _find_grid_prefer_no_spaces(filename)
 
-    # It's an alias - use select_geoid_grid
+    # it's an alias - use select_geoid_grid
     try:
         selected, _ = select_geoid_grid(alias_low, verbose=False)
     except (ValueError, IndexError):
@@ -151,15 +139,15 @@ def _find_grid_prefer_no_spaces(filename: str) -> Optional[str]:
     """
     from .geoid_utils import get_all_proj_data_dirs
 
-    # First, check PROJ_LIB specifically - if grid is there, just use filename
+    # first, check PROJ_LIB specifically - if grid is there, just use filename
     proj_lib = os.environ.get('PROJ_LIB') or os.environ.get('PROJ_DATA')
     if proj_lib and os.path.isdir(proj_lib):
         candidate = os.path.join(proj_lib, filename)
         if os.path.exists(candidate):
-            # Grid is in PROJ_LIB - PROJ will find it by filename alone
+            # grid is in PROJ_LIB - PROJ will find it by filename alone
             return filename
 
-    # Search all PROJ directories, preferring those without spaces
+    # search all PROJ directories, preferring those without spaces
     dirs_no_spaces = []
     dirs_with_spaces = []
 
@@ -169,15 +157,15 @@ def _find_grid_prefer_no_spaces(filename: str) -> Optional[str]:
         else:
             dirs_no_spaces.append(proj_dir)
 
-    # Check directories without spaces first
+    # check directories without spaces first
     for proj_dir in dirs_no_spaces:
         candidate = os.path.join(proj_dir, filename)
         if os.path.exists(candidate):
-            # Return just filename if it's findable via PROJ search path
+            # return just filename if it's findable via PROJ search path
             # or full path if we want to be explicit
             return filename  # PROJ should find it
 
-    # Fall back to directories with spaces (will need quoting)
+    # fall back to directories with spaces (will need quoting)
     for proj_dir in dirs_with_spaces:
         candidate = os.path.join(proj_dir, filename)
         if os.path.exists(candidate):
@@ -186,9 +174,7 @@ def _find_grid_prefer_no_spaces(filename: str) -> Optional[str]:
     return None
 
 
-# ---------------------------------------------------------------------
-# Low-level helpers
-# ---------------------------------------------------------------------
+# low-level helpers
 
 
 def _run_projinfo(src_crs: str, dst_crs: str) -> str:
@@ -254,32 +240,32 @@ def _proj_step_from_crs(crs_str: str) -> str:
             message=".*You will likely lose important projection.*",
         )
         proj_str = crs.to_proj4()
-    # Ensure we only keep the step part (starting at +proj=...)
+    # ensure we only keep the step part (starting at +proj=...)
     if "+proj=" not in proj_str:
         raise ProjError(f"CRS {crs_str!r} does not appear to be projected.")
     idx = proj_str.index("+proj=")
     step = proj_str[idx:].strip()
 
-    # Remove deprecated/problematic parameters for PROJ 9+ pipelines
-    # - +type=crs: not needed in pipeline steps
+    # remove deprecated/problematic parameters for PROJ 9+ pipelines
+    # - +type=crs: not needed in Pipeline steps
     # - +no_defs: deprecated and can cause issues
     # - +datum=: should be replaced with +ellps=
     # - +units=m: can cause issues in pipelines when mixed with angular ops
     parts = [p for p in step.split() if not (p.startswith("+type=") or p == "+no_defs" or p.startswith("+units="))]
 
-    # Replace +datum= with +ellps= for PROJ 9+ compatibility
+    # replace +datum= with +ellps= for PROJ 9+ compatibility
     # +datum is deprecated in pipelines and can cause "Unknown projection" errors
     result_parts = []
     for part in parts:
         if part.startswith("+datum="):
-            # Replace with +ellps based on common datums
+            # replace with +ellps based on common datums
             datum = part.split("=")[1]
             if datum in ("NAD83", "NAD27"):
                 result_parts.append("+ellps=GRS80" if datum == "NAD83" else "+ellps=clrk66")
             elif datum == "WGS84":
                 result_parts.append("+ellps=WGS84")
             else:
-                # Keep original if unknown
+                # keep original if unknown
                 result_parts.append(part)
         else:
             result_parts.append(part)
@@ -287,9 +273,7 @@ def _proj_step_from_crs(crs_str: str) -> str:
     return " ".join(result_parts)
 
 
-# ---------------------------------------------------------------------
-# 1) Horizontal-only pipeline
-# ---------------------------------------------------------------------
+# 1) Horizontal-only Pipeline
 
 
 def build_horizontal_pipeline(src: str, dst: str) -> str:
@@ -303,14 +287,12 @@ def build_horizontal_pipeline(src: str, dst: str) -> str:
     if op.startswith("+proj=pipeline"):
         return op
     if op.startswith("+proj=noop"):
-        # explicit trivial pipeline
+        # explicit trivial Pipeline
         return "+proj=pipeline"
     raise ProjError(f"Unexpected projinfo operation: {op}")
 
 
-# ---------------------------------------------------------------------
 # 2) Vertical-only helpers
-# ---------------------------------------------------------------------
 
 
 def _build_vertical_steps(src: CRSState, dst: CRSState) -> str:
@@ -327,17 +309,17 @@ def _build_vertical_steps(src: CRSState, dst: CRSState) -> str:
     sk = (src.vertical_kind or "").lower()
     dk = (dst.vertical_kind or "").lower()
 
-    # No vertical semantics => nothing to do
+    # no vertical semantics => nothing to do
     if not sk and not dk and not src.geoid_grid and not dst.geoid_grid:
         return ""
 
-    # Helper to format grid path (quote if contains spaces)
+    # helper to format grid path (quote if contains spaces)
     def _format_grid_path(grid_path: str) -> str:
         if ' ' in grid_path:
             return f'"{grid_path}"'
         return grid_path
 
-    # Orthometric -> Ellipsoidal (remove geoid)
+    # orthometric -> Ellipsoidal (remove geoid)
     if sk == "orthometric" and dk == "ellipsoidal":
         if not src.geoid_grid:
             raise ProjError(
@@ -346,7 +328,7 @@ def _build_vertical_steps(src: CRSState, dst: CRSState) -> str:
         grid = _format_grid_path(src.geoid_grid)
         return f"+step +proj=vgridshift +grids={grid} +inv"
 
-    # Ellipsoidal -> Orthometric (apply geoid)
+    # ellipsoidal -> Orthometric (apply geoid)
     if sk == "ellipsoidal" and dk == "orthometric":
         if not dst.geoid_grid:
             raise ProjError(
@@ -355,16 +337,16 @@ def _build_vertical_steps(src: CRSState, dst: CRSState) -> str:
         grid = _format_grid_path(dst.geoid_grid)
         return f"+step +proj=vgridshift +grids={grid}"
 
-    # Orthometric A -> Orthometric B
+    # orthometric A -> Orthometric B
     if sk == "orthometric" and dk == "orthometric":
         if not src.geoid_grid and not dst.geoid_grid:
-            # Neither geoid known — nothing we can do; treat as no-op
+            # neither geoid known : nothing we can do; treat as no-op
             return ""
         if src.geoid_grid and dst.geoid_grid:
             if Path(src.geoid_grid).name == Path(dst.geoid_grid).name:
-                # Same model; nothing to do
+                # same model; nothing to do
                 return ""
-            # Remove A, apply B
+            # remove A, apply B
             src_grid = _format_grid_path(src.geoid_grid)
             dst_grid = _format_grid_path(dst.geoid_grid)
             return (
@@ -372,14 +354,14 @@ def _build_vertical_steps(src: CRSState, dst: CRSState) -> str:
                 f"+step +proj=vgridshift +grids={dst_grid}"
             )
         if not src.geoid_grid and dst.geoid_grid:
-            # Source has no geoid; apply target geoid only
+            # source has no geoid; apply target geoid only
             dst_grid = _format_grid_path(dst.geoid_grid)
             return f"+step +proj=vgridshift +grids={dst_grid}"
         # dst.geoid_grid is None, src.geoid_grid is set → remove source geoid only
         src_grid = _format_grid_path(src.geoid_grid)
         return f"+step +proj=vgridshift +grids={src_grid} +inv"
 
-    # Everything else (e.g., one/both vertical_kind missing)
+    # everything else (e.g., one/both vertical_kind missing)
     raise ProjError(
         f"Unsupported vertical-kind combination: src={src.vertical_kind!r}, dst={dst.vertical_kind!r}"
     )
@@ -457,9 +439,7 @@ def build_vertical_pipeline(src: CRSState, dst: CRSState) -> str:
         return build_vertical_pipeline_projected(src, dst)
 
 
-# ---------------------------------------------------------------------
-# 3) Dynamic epoch pipeline (with +proj=deformation)
-# ---------------------------------------------------------------------
+# 3) Dynamic epoch Pipeline (with +proj=deformation)
 
 
 def _ellipsoid_of_crs(crs_str: str) -> str:
@@ -474,8 +454,8 @@ def _ellipsoid_of_crs(crs_str: str) -> str:
     if not ellps:
         raise ProjError(f"Could not determine ellipsoid for CRS {crs_str!r}")
     name = ellps.name
-    # This is heuristic; you may want a custom mapping for your datasets.
-    # For typical NAD83 / WGS84 derived CRS, 'GRS 1980' / 'GRS80' / 'WGS 84' all map
+    # this is heuristic; you may want a custom mapping for your datasets.
+    # for typical NAD83 / WGS84 derived CRS, 'GRS 1980' / 'GRS80' / 'WGS 84' all map
     # to +ellps=GRS80 or +ellps=WGS84 as needed. We'll just pick the identifier.
     # pyproj's CRS.ellipsoid has 'datum_ellipsoid_code' in newer versions, but
     # to keep it simple here we try common codes.
@@ -483,7 +463,7 @@ def _ellipsoid_of_crs(crs_str: str) -> str:
         return "GRS80"
     if "WGS 84" in name or "WGS84" in name:
         return "WGS84"
-    # Fallback: rely on PROJ's auto-inference (occasionally works).
+    # fallback: rely on PROJ's auto-inference (occasionally works).
     return "GRS80"
 
 
@@ -525,17 +505,17 @@ def _build_epoch_steps(
     if src.epoch == dst.epoch:
         return ""
 
-    # CRITICAL: dt must always be the full time difference between source and destination epochs.
-    # The central_epoch parameter is the reference epoch of the velocity model (informational only)
+    # cRITICAL: dt must always be the full time difference between source and destination epochs.
+    # the central_epoch parameter is the reference epoch of the velocity model (informational only)
     # and should NOT affect the dt calculation. The velocity model gives velocities in mm/year,
     # and we multiply by dt to get the total displacement.
-    # See: https://proj.org/en/stable/operations/transformations/deformation.html
+    # see: https://proj.org/en/stable/operations/transformations/deformation.html
     dt = dst.epoch - src.epoch
 
     if ellps is None:
         ellps = _ellipsoid_of_crs(src.crs)
 
-    # Return just the steps (no +proj=pipeline prefix)
+    # return just the steps (no +proj=pipeline prefix)
     steps = (
         f"+step +proj=push +v_3 "
         f"+step +proj=cart +ellps={ellps} "
@@ -599,8 +579,8 @@ def build_dynamic_epoch_pipeline(
     if src.epoch == dst.epoch:
         return "+proj=pipeline"
 
-    # CRITICAL: dt must always be the full time difference between source and destination epochs.
-    # The central_epoch parameter is informational only and should NOT affect the dt calculation.
+    # cRITICAL: dt must always be the full time difference between source and destination epochs.
+    # the central_epoch parameter is informational only and should NOT affect the dt calculation.
     dt = dst.epoch - src.epoch
 
     if ellps is None:
@@ -680,9 +660,7 @@ def build_dynamic_epoch_pipeline_projected(
     return pipeline
 
 
-# ---------------------------------------------------------------------
 # 4) High-level dispatcher (brings it all together)
-# ---------------------------------------------------------------------
 
 
 def _extract_pipeline_steps(pipeline: str) -> str:
@@ -760,9 +738,7 @@ def build_complete_pipeline(
     src = src.with_resolved_geoid()
     dst = dst.with_resolved_geoid()
 
-    # -------------------------------------------------------------------------
-    # Detect what transforms are needed
-    # -------------------------------------------------------------------------
+    # detect what transforms are needed
     needs_epoch = (
         src.epoch is not None
         and dst.epoch is not None
@@ -781,23 +757,19 @@ def build_complete_pipeline(
     crs_changed = src.crs != dst.crs
     src_is_projected = not _is_geographic(src.crs)
 
-    # Validate epoch requirements
+    # validate epoch requirements
     if needs_epoch and deformation_grids is None:
         raise ProjError(
             "Dynamic epoch requested (src.epoch != dst.epoch) "
             "but deformation_grids is not provided."
         )
 
-    # -------------------------------------------------------------------------
-    # Case A: Epoch transform needed (the main fix is here)
-    # -------------------------------------------------------------------------
+    # case A: Epoch transform needed (the main fix is here)
     if needs_epoch:
 
         if src_is_projected:
-            # -----------------------------------------------------------------
-            # PROJECTED SOURCE + EPOCH TRANSFORM
-            # -----------------------------------------------------------------
-            # Strategy:
+            # pROJECTED SOURCE + EPOCH TRANSFORM
+            # strategy:
             # 1. Inverse project to geographic (lat/lon)
             # 2. Epoch/deformation transform (in geographic coords)
             # 3. Vertical transform if needed (in geographic coords)
@@ -805,20 +777,20 @@ def build_complete_pipeline(
 
             proj_step = _proj_step_from_crs(src.crs)
 
-            # Step 1: projected → geographic (inverse projection)
+            # step 1: projected → geographic (inverse projection)
             step1_inv = f"+step +inv {proj_step}"
 
-            # Step 2: epoch transform (just the steps, no pipeline wrapper)
+            # step 2: epoch transform (just the steps, no Pipeline wrapper)
             epoch_steps = _build_epoch_steps(
                 src, dst,
                 deformation_grids=deformation_grids,
                 central_epoch=deformation_central_epoch,
             )
 
-            # Step 3: vertical transform if needed (just the steps)
+            # step 3: vertical transform if needed (just the steps)
             vert_steps = ""
             if has_vertical_semantics:
-                # Create intermediate states after epoch transform
+                # create intermediate states after epoch transform
                 vert_src = CRSState(
                     crs=src.crs,
                     epoch=dst.epoch,  # After epoch transform
@@ -835,10 +807,10 @@ def build_complete_pipeline(
                 )
                 vert_steps = _build_vertical_steps(vert_src, vert_dst)
 
-            # Step 4: forward project to target CRS
+            # step 4: forward project to target CRS
             if crs_changed:
-                # Need horizontal transform to different CRS
-                # Get the geographic CRS underlying the source projection
+                # need horizontal transform to different CRS
+                # get the geographic CRS underlying the source projection
                 src_crs_obj = CRS.from_user_input(src.crs)
                 src_geog = src_crs_obj.geodetic_crs
                 if src_geog is None:
@@ -847,14 +819,14 @@ def build_complete_pipeline(
                     )
                 src_geog_str = src_geog.to_string()
 
-                # Build pipeline from source's geographic CRS to target
+                # build Pipeline from source's geographic CRS to target
                 step4_horiz = build_horizontal_pipeline(src_geog_str, dst.crs)
                 step4_horiz_steps = _extract_pipeline_steps(step4_horiz)
             else:
-                # No CRS change - just project back to source CRS
+                # no CRS change - just project back to source CRS
                 step4_horiz_steps = f"+step {proj_step}"
 
-            # Compose all steps into final pipeline
+            # compose all steps into final Pipeline
             all_steps = [step1_inv, epoch_steps]
             if vert_steps:
                 all_steps.append(vert_steps)
@@ -865,14 +837,12 @@ def build_complete_pipeline(
             return pipeline
 
         else:
-            # -----------------------------------------------------------------
-            # GEOGRAPHIC SOURCE + EPOCH TRANSFORM
-            # -----------------------------------------------------------------
-            # Source is already in lat/lon - can do epoch transform directly.
-            # Handle combinations: epoch-only, epoch+vertical, epoch+horizontal,
+            # gEOGRAPHIC SOURCE + EPOCH TRANSFORM
+            # source is already in lat/lon - can do epoch transform directly.
+            # handle combinations: epoch-only, epoch+vertical, epoch+horizontal,
             # or epoch+vertical+horizontal
 
-            # Simple case: epoch-only (same CRS, no vertical)
+            # simple case: epoch-only (same CRS, no vertical)
             if not has_vertical_semantics and not crs_changed:
                 return build_dynamic_epoch_pipeline(
                     src, dst,
@@ -880,7 +850,7 @@ def build_complete_pipeline(
                     central_epoch=deformation_central_epoch,
                 )
 
-            # Combined case: build individual steps and compose
+            # combined case: build individual steps and compose
             epoch_steps = _build_epoch_steps(
                 src, dst,
                 deformation_grids=deformation_grids,
@@ -914,38 +884,36 @@ def build_complete_pipeline(
             pipeline = "+proj=pipeline " + " ".join(s for s in all_steps if s)
             return pipeline
 
-    # -------------------------------------------------------------------------
-    # Case B: No epoch transform, but has vertical semantics
-    # -------------------------------------------------------------------------
+    # case B: No epoch transform, but has vertical semantics
     if has_vertical_semantics:
-        # Same CRS -> pure vertical
+        # same CRS -> pure vertical
         if not crs_changed:
             return build_vertical_pipeline(src, dst)
 
-        # Vertical + horizontal transform needed
-        # For projected source CRS, we need to be careful about composition:
-        # Cannot simply compose build_vertical_pipeline + build_horizontal_pipeline
+        # vertical + horizontal transform needed
+        # for projected source CRS, we need to be careful about composition:
+        # cannot simply compose build_vertical_pipeline + build_horizontal_pipeline
         # because both would wrap their ops with inverse/forward projection steps.
-        #
-        # Strategy:
+        # 
+        # strategy:
         # 1. If source is projected: unproject → vertical transform → horiz transform
         # 2. If source is geographic: vertical transform → horizontal transform
 
         if src_is_projected:
-            # Get the geographic CRS underlying the source projection
+            # get the geographic CRS underlying the source projection
             src_crs_obj = CRS.from_user_input(src.crs)
             src_geog = src_crs_obj.geodetic_crs
             if src_geog is None:
                 raise ProjError(f"Could not determine geographic CRS for {src.crs}")
             src_geog_str = src_geog.to_string()
 
-            # Get projection step
+            # get projection step
             proj_step = _proj_step_from_crs(src.crs)
 
-            # Step 1: Inverse projection (projected → geographic)
+            # step 1: Inverse projection (projected → geographic)
             step1_inv = f"+step +inv {proj_step}"
 
-            # Step 2: Vertical transform in geographic coordinates
+            # step 2: Vertical transform in geographic coordinates
             vert_src = CRSState(
                 crs=src_geog_str,
                 epoch=src.epoch,
@@ -962,53 +930,53 @@ def build_complete_pipeline(
             )
             vert_steps = _build_vertical_steps(vert_src, vert_dst_temp)
 
-            # Step 3: Horizontal transform from source geographic to target CRS
-            # After vgridshift, we have geographic coordinates (lat/lon in degrees, ellipsoidal or orthometric Z)
-            # We need to transform to the target CRS
+            # step 3: Horizontal transform from source geographic to target CRS
+            # after vgridshift, we have geographic coordinates (lat/lon in degrees, ellipsoidal or orthometric Z)
+            # we need to transform to the target CRS
 
             dst_is_projected = not _is_geographic(dst.crs)
 
             if dst_is_projected:
-                # Target is projected - need to project from geographic
-                # Check if source and target use the same geodetic CRS
+                # target is projected - need to project from geographic
+                # check if source and target use the same geodetic CRS
                 dst_crs_obj = CRS.from_user_input(dst.crs)
                 dst_geog = dst_crs_obj.geodetic_crs
                 if dst_geog is None:
                     raise ProjError(f"Could not determine geographic CRS for target {dst.crs}")
 
-                # Get the projection parameters for target
+                # get the projection parameters for target
                 dst_proj_step = _proj_step_from_crs(dst.crs)
 
-                # If source and target geographic CRS are different, need datum transform
+                # if source and target geographic CRS are different, need datum transform
                 src_geog_epsg = src_geog.to_epsg()
                 dst_geog_epsg = dst_geog.to_epsg()
 
                 if src_geog_epsg != dst_geog_epsg:
-                    # Different datums (e.g., NAD83 vs WGS84)
-                    # After vgridshift, coordinates are in lat/lon degrees
-                    # We can't use projinfo's full pipeline because it adds axisswap+unitconvert
+                    # different datums (e.g., NAD83 vs WGS84)
+                    # after vgridshift, coordinates are in lat/lon degrees
+                    # we can't use projinfo's full Pipeline because it adds axisswap+unitconvert
                     # that cause unit mismatch errors with vgridshift output
-                    #
-                    # For NAD83 <-> WGS84 in North America, the datum shift is sub-meter
+                    # 
+                    # for NAD83 <-> WGS84 in North America, the datum shift is sub-meter
                     # and often ignored in practice. Just apply the forward projection.
-                    # If higher accuracy is needed, the datum transform should be done
+                    # if higher accuracy is needed, the datum transform should be done
                     # separately before or after the vertical transform.
                     horiz_steps = f"+step {dst_proj_step}"
                 else:
-                    # Same datum - just apply forward projection
+                    # same datum - just apply forward projection
                     # vgridshift outputs lat,lon in degrees, which is what projections expect
                     horiz_steps = f"+step {dst_proj_step}"
             else:
-                # Target is geographic
+                # target is geographic
                 if src_geog_str != dst.crs:
-                    # Different geographic CRS - need datum transform
+                    # different geographic CRS - need datum transform
                     horiz_pipeline = build_horizontal_pipeline(src_geog_str, dst.crs)
                     horiz_steps = _extract_pipeline_steps(horiz_pipeline)
                 else:
-                    # Same geographic CRS - no horizontal transform needed
+                    # same geographic CRS - no horizontal transform needed
                     horiz_steps = ""
 
-            # Compose all steps
+            # compose all steps
             all_steps = [step1_inv]
             if vert_steps:
                 all_steps.append(vert_steps)
@@ -1018,8 +986,8 @@ def build_complete_pipeline(
             pipeline = "+proj=pipeline " + " ".join(s for s in all_steps if s)
             return pipeline
         else:
-            # Source is geographic - simpler case
-            # Do vertical transform first (stays in geographic), then horizontal
+            # source is geographic - simpler case
+            # do vertical transform first (stays in geographic), then horizontal
             vert_dst_temp = CRSState(
                 crs=src.crs,
                 epoch=src.epoch,
@@ -1043,9 +1011,7 @@ def build_complete_pipeline(
             pipeline = "+proj=pipeline " + " ".join(all_steps)
             return pipeline
 
-    # -------------------------------------------------------------------------
-    # Case C: Pure horizontal (no epoch, no vertical)
-    # -------------------------------------------------------------------------
+    # case C: Pure horizontal (no epoch, no vertical)
     return build_horizontal_pipeline(src.crs, dst.crs)
 
 

@@ -1,12 +1,4 @@
-# rasterpair.py
-"""
-Compare, transform, and difference two rasters.
-
-Provides tools for:
-- Comparing CRS, epoch, geoid, and grid parameters between rasters
-- Transforming raster1 to match raster2's reference frame
-- Computing elevation differences with metadata tracking
-
+"""compare, transform, and difference two rasters.
 Transformation order:
 1. Dynamic epoch transformation
 2. Horizontal CRS reprojection
@@ -30,7 +22,7 @@ from rasterio.warp import calculate_default_transform, reproject, Resampling
 if TYPE_CHECKING:
     import matplotlib.pyplot as plt
 
-# Handle both package and standalone imports
+# handle both package and standalone imports
 try:
     from .raster import Raster
     from .crs_utils import _ensure_crs_obj, parse_crs_components
@@ -54,11 +46,7 @@ except ImportError:
     METER = None
 
 
-
-
-# =============================================================================
-# Utility Functions
-# =============================================================================
+# utility Functions
 
 def _get_epsg_or_wkt(crs_input: Any) -> Tuple[Optional[int], Optional[str]]:
     """
@@ -106,11 +94,11 @@ def _crs_equivalent(crs1: Any, crs2: Any, tolerance: float = 1e-6) -> bool:
         obj1 = _ensure_crs_obj(crs1)
         obj2 = _ensure_crs_obj(crs2)
 
-        # Extract horizontal component from compound CRS if needed
-        # This allows comparing a projected CRS to a compound CRS's horizontal part
+        # extract horizontal component from compound CRS if needed
+        # this allows comparing a projected CRS to a compound CRS's horizontal part
         def get_horizontal(crs_obj):
             if crs_obj.is_compound:
-                # Get the horizontal (projected or geographic) sub-CRS
+                # get the horizontal (projected or geographic) sub-CRS
                 for sub_crs in crs_obj.sub_crs_list:
                     if sub_crs.is_projected or sub_crs.is_geographic:
                         return sub_crs
@@ -119,13 +107,13 @@ def _crs_equivalent(crs1: Any, crs2: Any, tolerance: float = 1e-6) -> bool:
         horiz1 = get_horizontal(obj1)
         horiz2 = get_horizontal(obj2)
 
-        # Try EPSG comparison first (fastest)
+        # try EPSG comparison first (fastest)
         epsg1 = horiz1.to_epsg()
         epsg2 = horiz2.to_epsg()
         if epsg1 is not None and epsg2 is not None:
             return epsg1 == epsg2
 
-        # Fall back to equals method
+        # fall back to equals method
         return horiz1.equals(horiz2)
     except Exception:
         return str(crs1) == str(crs2)
@@ -142,14 +130,14 @@ def _geoid_equivalent(geoid1: Optional[str], geoid2: Optional[str]) -> bool:
     if geoid1 is None or geoid2 is None:
         return False
     
-    # Normalize: lowercase, strip whitespace, remove common prefixes
+    # normalize: lowercase, strip whitespace, remove common prefixes
     def normalize(g):
         g = g.lower().strip()
-        # Remove common prefixes
+        # remove common prefixes
         for prefix in ['us_noaa_', 'noaa_', 'ngs_', 'egm', 'geoid']:
             if g.startswith(prefix):
                 g = g[len(prefix):]
-        # Remove file extensions
+        # remove file extensions
         for ext in ['.tif', '.tiff', '.gtx', '.bin']:
             if g.endswith(ext):
                 g = g[:-len(ext)]
@@ -175,15 +163,15 @@ def _units_equivalent(unit1: Any, unit2: Any) -> Tuple[bool, Optional[float]]:
         - conversion_factor: Factor to multiply unit1 values by to get unit2 values,
           or None if units match or cannot be determined
     """
-    # Handle None cases
+    # handle None cases
     if unit1 is None and unit2 is None:
         return True, None
     if unit1 is None or unit2 is None:
         return False, None
     
-    # Get UnitInfo objects if available
+    # get UnitInfo objects if available
     if _UNIT_UTILS_AVAILABLE:
-        # Convert strings to UnitInfo if needed
+        # convert strings to UnitInfo if needed
         if isinstance(unit1, str):
             unit1_info = lookup_unit(unit1)
         elif hasattr(unit1, 'name'):  # UnitInfo-like object
@@ -198,36 +186,36 @@ def _units_equivalent(unit1: Any, unit2: Any) -> Tuple[bool, Optional[float]]:
         else:
             unit2_info = None
         
-        # Compare using UnitInfo
+        # compare using UnitInfo
         if unit1_info is not None and unit2_info is not None:
-            # Handle unknown units properly
+            # handle unknown units properly
             unit1_unknown = unit1_info.name == "unknown"
             unit2_unknown = unit2_info.name == "unknown"
             
             if unit1_unknown and unit2_unknown:
-                # Both unknown - can't determine, assume match
+                # both unknown - can't determine, assume match
                 return True, None
             elif unit1_unknown or unit2_unknown:
-                # One is unknown, other is known - DON'T assume match
-                # This flags a potential mismatch that needs user attention
+                # one is unknown, other is known - DON'T assume match
+                # this flags a potential mismatch that needs user attention
                 return False, None
             
-            # Check if names match
+            # check if names match
             if unit1_info.name == unit2_info.name:
                 return True, None
             
-            # Different units - get conversion factor
+            # different units - get conversion factor
             try:
                 factor = get_conversion_factor(unit1_info, unit2_info)
                 return False, factor
             except Exception:
                 return False, None
     
-    # Fallback to string comparison
+    # fallback to string comparison
     str1 = str(unit1).lower().strip() if unit1 else "meter"
     str2 = str(unit2).lower().strip() if unit2 else "meter"
     
-    # Normalize common variations
+    # normalize common variations
     def normalize_unit_str(s):
         s = s.lower().replace(' ', '_').replace('-', '_')
         aliases = {
@@ -244,8 +232,8 @@ def _units_equivalent(unit1: Any, unit2: Any) -> Tuple[bool, Optional[float]]:
     if norm1 == norm2:
         return True, None
     
-    # Known conversion factors (unit1 * factor = unit2 in meters, then divide)
-    # This is a simplified fallback
+    # known conversion factors (unit1 * factor = unit2 in meters, then divide)
+    # this is a simplified fallback
     to_meters = {
         'meter': 1.0,
         'foot': 0.3048,
@@ -288,14 +276,14 @@ def _get_extent_polygon(raster: Raster, valid_data_only: bool = True, simplify_t
         raise ImportError("shapely is required for extent polygon operations")
     
     if not valid_data_only:
-        # Simple bounding box
+        # simple bounding box
         bounds = raster.bounds
         if bounds is None:
             with rasterio.open(raster.filename) as src:
                 bounds = src.bounds
         return box(bounds.left, bounds.bottom, bounds.right, bounds.top)
     
-    # Get valid data mask and vectorize it
+    # get valid data mask and vectorize it
     try:
         from rasterio.features import shapes as rio_shapes
     except ImportError:
@@ -306,25 +294,25 @@ def _get_extent_polygon(raster: Raster, valid_data_only: bool = True, simplify_t
         nodata = src.nodata
         transform = src.transform
         
-        # Create valid data mask (1 = valid, 0 = invalid)
+        # create valid data mask (1 = valid, 0 = invalid)
         valid_mask = np.ones(data.shape, dtype=np.uint8)
         
-        # Mask nodata values
+        # mask nodata values
         if nodata is not None:
             if np.isnan(nodata):
                 valid_mask[np.isnan(data)] = 0
             else:
                 valid_mask[data == nodata] = 0
         
-        # Also mask NaN and Inf values
+        # also mask NaN and Inf values
         valid_mask[np.isnan(data)] = 0
         valid_mask[np.isinf(data)] = 0
         
-        # Check if there's any valid data
+        # check if there's any valid data
         if not np.any(valid_mask):
             return None
         
-        # Vectorize the valid mask
+        # vectorize the valid mask
         # shapes() yields (geometry_dict, value) pairs
         polygons = []
         for geom_dict, value in rio_shapes(valid_mask, mask=(valid_mask == 1), transform=transform):
@@ -334,10 +322,10 @@ def _get_extent_polygon(raster: Raster, valid_data_only: bool = True, simplify_t
         if not polygons:
             return None
         
-        # Union all polygons (handles overlaps and creates proper MultiPolygon if needed)
+        # union all polygons (handles overlaps and creates proper MultiPolygon if needed)
         result = unary_union(polygons)
         
-        # Simplify if requested (useful for large rasters)
+        # simplify if requested (useful for large rasters)
         if simplify_tolerance is not None and simplify_tolerance > 0:
             result = result.simplify(simplify_tolerance, preserve_topology=True)
         
@@ -436,33 +424,29 @@ def _create_valid_data_mask(data: np.ndarray, nodata: Any) -> np.ndarray:
     np.ndarray
         Boolean mask (True = valid, False = invalid)
     """
-    # Start with all valid
+    # start with all valid
     valid = np.ones(data.shape, dtype=bool)
 
-    # Mask explicit nodata value
+    # mask explicit nodata value
     if nodata is not None:
         if isinstance(nodata, float) and np.isnan(nodata):
             # nodata is NaN - will be handled below
             pass
         else:
-            # Use tolerance-based comparison for numeric nodata values
-            # This handles float32/float64 precision issues during reprojection
-            # Common nodata values like -9999.0 may become -9999.00001 after transforms
+            # use tolerance-based comparison for numeric nodata values
+            # this handles float32/float64 precision issues during reprojection
+            # common nodata values like -9999.0 may become -9999.00001 after transforms
             if np.issubdtype(data.dtype, np.floating):
                 valid &= ~np.isclose(data, nodata, rtol=1e-5, atol=1e-8)
             else:
                 valid &= (data != nodata)
 
-    # Always mask NaN and Inf
+    # always mask NaN and Inf
     valid &= ~np.isnan(data)
     valid &= ~np.isinf(data)
 
     return valid
 
-
-# =============================================================================
-# RasterPair Class
-# =============================================================================
 
 @dataclass
 class RasterPair:
@@ -492,7 +476,7 @@ class RasterPair:
     raster1: Raster
     raster2: Raster
 
-    # Internal state
+    # internal state
     _transformation_history: List[Dict[str, Any]] = field(default_factory=list)
     _raster1_transformed: Optional[Raster] = field(default=None, repr=False)
     
@@ -501,9 +485,6 @@ class RasterPair:
         self._transformation_history = []
         self._raster1_transformed = None
 
-    # =========================================================================
-    # CRS/Epoch/Geoid Comparison Methods
-    # =========================================================================
     
     def check_horizontal_crs_match(self) -> Dict[str, Any]:
         """
@@ -568,10 +549,9 @@ class RasterPair:
         ortho1 = getattr(self.raster1, 'is_orthometric', None)
         ortho2 = getattr(self.raster2, 'is_orthometric', None)
         
-        # CRS match check
         crs_match = _crs_equivalent(vcrs1, vcrs2)
         
-        # Type match check (orthometric vs ellipsoidal)
+        # type match check (orthometric vs ellipsoidal)
         type_match = ortho1 == ortho2 if (ortho1 is not None and ortho2 is not None) else None
         
         overall_match = crs_match and (type_match is None or type_match)
@@ -743,7 +723,7 @@ class RasterPair:
                 'details': str
             }
         """
-        # Try to get UnitInfo objects first (from updated raster.py)
+        # try to get UnitInfo objects first (from updated raster.py)
         unit_info1 = getattr(self.raster1, 'vertical_unit', None)
         if unit_info1 is None:
             unit_info1 = getattr(self.raster1, 'current_vertical_unit', None)
@@ -752,7 +732,7 @@ class RasterPair:
         if unit_info2 is None:
             unit_info2 = getattr(self.raster2, 'current_vertical_unit', None)
 
-        # Get string representation for fallback
+        # get string representation for fallback
         if hasattr(unit_info1, 'name'):
             units1 = unit_info1.name
         else:
@@ -767,7 +747,7 @@ class RasterPair:
                       getattr(self.raster2, 'vertical_units', None) or
                       'meter')  # Default to meters if unknown
 
-        # Use the helper function for comparison
+        # use the helper function for comparison
         if unit_info1 is not None and unit_info2 is not None:
             match, conversion_factor = _units_equivalent(unit_info1, unit_info2)
             display1 = getattr(unit_info1, 'display_name', str(unit_info1))
@@ -777,7 +757,7 @@ class RasterPair:
             display1 = units1
             display2 = units2
         
-        # Build conversion info string
+        # build conversion info string
         conversion_needed = None
         if not match:
             if conversion_factor is not None:
@@ -785,11 +765,11 @@ class RasterPair:
             else:
                 conversion_needed = f"{display1} → {display2}"
         
-        # Build details string
+        # build details string
         if match:
             details = f"Vertical units match: {display1}"
         else:
-            # Check if one is unknown
+            # check if one is unknown
             unit1_unknown = (unit_info1 is not None and hasattr(unit_info1, 'name') and unit_info1.name == "unknown") or display1 == "unknown"
             unit2_unknown = (unit_info2 is not None and hasattr(unit_info2, 'name') and unit_info2.name == "unknown") or display2 == "unknown"
             
@@ -857,7 +837,7 @@ class RasterPair:
         g1 = get_grid_info(self.raster1)
         g2 = get_grid_info(self.raster2)
         
-        # Check resolution match (within 1e-6)
+        # check resolution match (within 1e-6)
         res_tol = 1e-6
         res_match = (
             g1['res_x'] is not None and g2['res_x'] is not None and
@@ -865,10 +845,10 @@ class RasterPair:
             abs(g1['res_y'] - g2['res_y']) < res_tol
         )
         
-        # Check dimensions match
+        # check dimensions match
         dim_match = (g1['width'] == g2['width'] and g1['height'] == g2['height'])
         
-        # Check transform match (pixel-perfect alignment)
+        # check transform match (pixel-perfect alignment)
         transform_match = (g1['transform'] == g2['transform'])
         
         overall_match = res_match and dim_match and transform_match
@@ -948,9 +928,7 @@ class RasterPair:
             'vertical_units': units,
         }
 
-    # =========================================================================
-    # Extent and Overlap Methods
-    # =========================================================================
+    # extent and Overlap Methods
     
     def get_extent_polygons(
         self, 
@@ -1107,7 +1085,7 @@ class RasterPair:
         except ImportError:
             raise ImportError("geopandas is required for saving polygons")
         
-        # Get polygons
+        # get polygons
         poly1 = _get_extent_polygon(self.raster1, valid_data_only=valid_data_only,
                                     simplify_tolerance=simplify_tolerance)
         poly2 = _get_extent_polygon(self.raster2, valid_data_only=valid_data_only,
@@ -1119,7 +1097,7 @@ class RasterPair:
             if overlap.is_empty:
                 overlap = None
         
-        # Get CRS from raster2 (the reference)
+        # get CRS from raster2 (the reference)
         crs = None
         try:
             with rasterio.open(self.raster2.filename) as src:
@@ -1127,7 +1105,7 @@ class RasterPair:
         except Exception:
             pass
         
-        # Build GeoDataFrame
+        # build GeoDataFrame
         records = []
         
         if overlap is not None:
@@ -1159,7 +1137,7 @@ class RasterPair:
         
         gdf = gpd.GeoDataFrame(records, crs=crs)
         
-        # Determine driver from extension
+        # determine driver from extension
         ext = Path(output_path).suffix.lower()
         if ext in ('.geojson', '.json'):
             gdf.to_file(output_path, driver='GeoJSON')
@@ -1168,7 +1146,7 @@ class RasterPair:
         elif ext == '.gpkg':
             gdf.to_file(output_path, driver='GPKG')
         else:
-            # Default to GeoJSON
+            # default to GeoJSON
             gdf.to_file(output_path, driver='GeoJSON')
         
         return output_path
@@ -1211,9 +1189,7 @@ class RasterPair:
         else:
             return valid1 & valid2
 
-    # =========================================================================
-    # Transformation Methods
-    # =========================================================================
+    # transformation Methods
     
     def transform_raster1_to_match_raster2(
         self,
@@ -1236,8 +1212,6 @@ class RasterPair:
         3. Vertical datum transformation (if vertical kind or geoid differs)
         3b. Vertical unit conversion (if units differ, e.g., feet to meters)
         4. Grid alignment (resample to match exact pixel grid)
-        
-        Think of this like converting coordinates through a series of 
         reference frame changes - similar to how GPS coordinates flow through
         the transformation pipeline from receiver to final map projection.
         
@@ -1269,7 +1243,7 @@ class RasterPair:
         """
         import sys
         
-        # Get comparison results to determine what transformations are needed
+        # get comparison results to determine what transformations are needed
         comparison = self.check_all_match()
         
         if verbose:
@@ -1277,11 +1251,11 @@ class RasterPair:
             print(f"{'Step':<30} {'Status':<30}", file=sys.stderr)
             print("-" * 60, file=sys.stderr)
         
-        # Start with raster1
+        # start with raster1
         current = self.raster1
         self._transformation_history = []
         
-        # Get target parameters from raster2
+        # get target parameters from raster2
         target_epoch = getattr(self.raster2, 'epoch', None)
         target_horiz_crs = (
             getattr(self.raster2, 'current_horizontal_crs', None) or
@@ -1293,7 +1267,7 @@ class RasterPair:
             getattr(self.raster2, 'original_geoid_model', None)
         )
         
-        # Determine source/target vertical kinds
+        # determine source/target vertical kinds
         source_is_ortho = getattr(self.raster1, 'is_orthometric', None)
         target_is_ortho = getattr(self.raster2, 'is_orthometric', None)
         
@@ -1312,7 +1286,7 @@ class RasterPair:
                 _w.warn(
                     "Epoch mismatch detected but target raster has no epoch set "
                     f"(source epoch={getattr(current, 'epoch', None)}). "
-                    "Skipping dynamic epoch transform — results may contain "
+                    "Skipping dynamic epoch transform : results may contain "
                     "systematic spatial offsets.",
                     stacklevel=2,
                 )
@@ -1336,7 +1310,7 @@ class RasterPair:
                 }
                 self._transformation_history.append(step_info)
                 
-                # Record pipeline-level history entry
+                # record pipeline-level history entry
                 if record_history and getattr(current, 'crs_history', None) is not None:
                     try:
                         current.crs_history.record_transformation_entry(
@@ -1379,7 +1353,7 @@ class RasterPair:
                 }
                 self._transformation_history.append(step_info)
 
-                # Record pipeline-level history entry
+                # record pipeline-level history entry
                 if record_history and getattr(current, 'crs_history', None) is not None:
                     try:
                         current.crs_history.record_transformation_entry(
@@ -1420,7 +1394,7 @@ class RasterPair:
                 }
                 self._transformation_history.append(step_info)
 
-                # Record pipeline-level history entry
+                # record pipeline-level history entry
                 if record_history and getattr(current, 'crs_history', None) is not None:
                     try:
                         current.crs_history.record_transformation_entry(
@@ -1439,7 +1413,7 @@ class RasterPair:
         # 3b. Vertical unit conversion
         needs_unit_conversion = 'vertical_units' in comparison['transformations_needed']
         if not skip_units and needs_unit_conversion:
-            # Get target units - handle UnitInfo objects
+            # get target units - handle UnitInfo objects
             target_unit_obj = getattr(self.raster2, 'vertical_unit', None)
             if hasattr(target_unit_obj, 'name'):
                 target_units = target_unit_obj.name
@@ -1450,7 +1424,7 @@ class RasterPair:
                     'meter'
                 )
 
-            # Get source units - handle UnitInfo objects
+            # get source units - handle UnitInfo objects
             source_unit_obj = getattr(current, 'vertical_unit', None)
             if hasattr(source_unit_obj, 'name'):
                 source_units = source_unit_obj.name
@@ -1500,7 +1474,7 @@ class RasterPair:
             }
             self._transformation_history.append(step_info)
 
-            # Record pipeline-level history entry
+            # record pipeline-level history entry
             if record_history and getattr(current, 'crs_history', None) is not None:
                 try:
                     current.crs_history.record_transformation_entry(
@@ -1513,7 +1487,7 @@ class RasterPair:
                 except Exception:
                     pass
 
-        # Cache the result
+        # cache the result
         self._raster1_transformed = current
 
         if verbose:
@@ -1521,9 +1495,7 @@ class RasterPair:
 
         return current
 
-    # =========================================================================
-    # Differencing Methods
-    # =========================================================================
+    # differencing Methods
     
     def compute_difference(
         self,
@@ -1592,11 +1564,11 @@ class RasterPair:
         if verbose:
             print(f"\n--- Computing Difference (raster2 - raster1) ---", file=sys.stderr)
         
-        # Transform raster1 to match raster2
-        # Always do horizontal CRS and grid alignment for spatial comparability
-        # Only do vertical datum transformation if transform_first=True
+        # transform raster1 to match raster2
+        # always do horizontal CRS and grid alignment for spatial comparability
+        # only do vertical datum transformation if transform_first=True
         if transform_first:
-            # Full transformation including vertical datum
+            # full transformation including vertical datum
             raster1_aligned = self.transform_raster1_to_match_raster2(
                 skip_epoch=skip_epoch,
                 interpolation_method=interpolation_method,
@@ -1604,7 +1576,7 @@ class RasterPair:
                 verbose=verbose,
             )
         else:
-            # Horizontal CRS + grid alignment only, preserve vertical datum
+            # horizontal CRS + grid alignment only, preserve vertical datum
             raster1_aligned = self.transform_raster1_to_match_raster2(
                 skip_epoch=True,
                 skip_vertical=True,
@@ -1614,7 +1586,7 @@ class RasterPair:
                 verbose=verbose,
             )
         
-        # Read both rasters
+        # read both rasters
         with rasterio.open(raster1_aligned.filename) as src1:
             data1 = src1.read(1).astype(np.float64)
             nodata1 = src1.nodata
@@ -1630,11 +1602,11 @@ class RasterPair:
             height2 = src2.height
             width2 = src2.width
         
-        # Create robust valid data masks using the utility function
+        # create robust valid data masks using the utility function
         valid1 = _create_valid_data_mask(data1, nodata1)
         valid2 = _create_valid_data_mask(data2, nodata2)
         
-        # Combined valid mask (must be valid in BOTH rasters)
+        # combined valid mask (must be valid in BOTH rasters)
         valid_both = valid1 & valid2
         
         if verbose:
@@ -1648,12 +1620,12 @@ class RasterPair:
             print(f"{'Raster2':<12} {n_valid2:>12,} / {total:<6,} {100*n_valid2/total:>6.1f}%", file=sys.stderr)
             print(f"{'Overlap':<12} {n_valid_both:>12,} / {total:<6,} {100*n_valid_both/total:>6.1f}%", file=sys.stderr)
         
-        # Compute difference: raster2 - raster1
-        # Initialize with NaN, then fill valid pixels
+        # compute difference: raster2 - raster1
+        # initialize with NaN, then fill valid pixels
         diff = np.full_like(data1, np.nan, dtype=np.float64)
         diff[valid_both] = data2[valid_both] - data1[valid_both]
         
-        # Compute statistics on valid pixels only
+        # compute statistics on valid pixels only
         valid_diff = diff[~np.isnan(diff)]
         if len(valid_diff) > 0:
             stats = {
@@ -1668,14 +1640,14 @@ class RasterPair:
                 'mae': float(np.mean(np.abs(valid_diff))),
             }
             
-            # Compute histogram
+            # compute histogram
             hist, bin_edges = np.histogram(valid_diff, bins=50)
             histogram = {
                 'hist': hist.tolist(),
                 'bin_edges': bin_edges.tolist(),
             }
             
-            # Compute percentiles for robust statistics
+            # compute percentiles for robust statistics
             percentiles = np.percentile(valid_diff, [2.5, 16, 50, 84, 97.5])
             stats['percentiles'] = {
                 'p2.5': float(percentiles[0]),
@@ -1685,12 +1657,12 @@ class RasterPair:
                 'p97.5': float(percentiles[4]),
             }
 
-            # Compute NMAD (Normalized Median Absolute Deviation) - robust measure
+            # compute NMAD (Normalized Median Absolute Deviation) - robust measure
             nmad = 1.4826 * np.median(np.abs(valid_diff - stats['median']))
             stats['nmad'] = float(nmad)
 
-            # Sanity check for potential nodata leakage
-            # Extreme values often indicate nodata values weren't properly masked
+            # sanity check for potential nodata leakage
+            # extreme values often indicate nodata values weren't properly masked
             extreme_threshold = 100.0  # meters - adjust based on expected topographic change
             if np.abs(stats['max']) > extreme_threshold or np.abs(stats['min']) > extreme_threshold:
                 warnings.warn(
@@ -1722,12 +1694,12 @@ class RasterPair:
             else:
                 print("No valid pixels for statistics.", file=sys.stderr)
         
-        # Generate output path
+        # generate output path
         if output_path is None:
             base = Path(self.raster2.filename).stem
             output_path = str(Path(self.raster2.filename).parent / f"{base}_diff.tif")
         
-        # Write difference raster
+        # write difference Raster
         diff_profile = profile2.copy()
         diff_profile.update({
             'dtype': 'float32',
@@ -1737,11 +1709,11 @@ class RasterPair:
         })
         
         if os.path.exists(output_path) and not overwrite:
-            # Caching: load existing difference raster and compute stats from it
+            # caching: load existing difference Raster and compute stats from it
             print(f"\nLoading existing difference raster: {os.path.basename(output_path)}", file=sys.stderr)
             diff_raster = Raster.from_file(output_path, rtype='dod', metadata={})
 
-            # Read the data and compute stats
+            # read the data and compute stats
             with rasterio.open(output_path) as src:
                 diff_data = src.read(1)
                 valid_mask = ~np.isnan(diff_data) & (diff_data != src.nodata if src.nodata is not None else True)
@@ -1759,7 +1731,7 @@ class RasterPair:
                     'rmse': float(np.sqrt(np.mean(valid_diff**2))) if len(valid_diff) > 0 else np.nan,
                 }
 
-                # Compute histogram
+                # compute histogram
                 if len(valid_diff) > 0:
                     hist_counts, hist_edges = np.histogram(valid_diff, bins=100)
                     histogram = {'counts': hist_counts.tolist(), 'edges': hist_edges.tolist()}
@@ -1778,7 +1750,7 @@ class RasterPair:
                 print(f"{'NMAD':<12} {stats['nmad']:>14.4f}", file=sys.stderr)
                 print(f"{'RMSE':<12} {stats['rmse']:>14.4f}", file=sys.stderr)
 
-            # Build metadata summary
+            # build metadata summary
             metadata = {
                 'raster1_source': self.raster1.filename,
                 'raster2_source': self.raster2.filename,
@@ -1802,7 +1774,7 @@ class RasterPair:
         with rasterio.open(output_path, 'w', **diff_profile) as dst:
             dst.write(diff.astype(np.float32), 1)
             
-            # Add metadata tags
+            # add metadata tags
             dst.update_tags(
                 DIFFERENCE_TYPE='raster2_minus_raster1',
                 RASTER1_SOURCE=self.raster1.filename,
@@ -1814,23 +1786,23 @@ class RasterPair:
         if verbose:
             print(f"\nOutput: {output_path}", file=sys.stderr)
         
-        # Load as Raster object
+        # load as Raster object
         diff_raster = Raster.from_file(output_path, rtype='dod', metadata={})
         
-        # Copy CRS info from raster2 (the reference)
+        # copy CRS info from raster2 (the reference)
         diff_raster.current_compound_crs = getattr(self.raster2, 'current_compound_crs', None)
         diff_raster.current_horizontal_crs = getattr(self.raster2, 'current_horizontal_crs', None)
         diff_raster.current_vertical_crs = getattr(self.raster2, 'current_vertical_crs', None)
         diff_raster.current_geoid_model = getattr(self.raster2, 'current_geoid_model', None)
 
-        # Store both epochs for the difference raster (DoD spans two time periods)
+        # store both epochs for the difference Raster (DoD spans two time periods)
         # epoch_start = older/compare epoch (raster1), epoch_end = newer/reference epoch (raster2)
         diff_raster.epoch_start = getattr(raster1_aligned, 'epoch', None) or getattr(self.raster1, 'epoch', None)
         diff_raster.epoch_end = getattr(self.raster2, 'epoch', None)
-        # Keep single epoch attribute for backward compatibility (use reference epoch)
+        # keep single epoch attribute for backward compatibility (use reference epoch)
         diff_raster.epoch = diff_raster.epoch_end
 
-        # Copy unit metadata from raster2 (the reference)
+        # copy unit metadata from raster2 (the reference)
         diff_raster.current_vertical_unit = getattr(self.raster2, 'current_vertical_unit', None)
         diff_raster.original_vertical_unit = getattr(self.raster2, 'original_vertical_unit', None)
         diff_raster.current_vertical_units = getattr(self.raster2, 'current_vertical_units', None)
@@ -1840,33 +1812,33 @@ class RasterPair:
         diff_raster.current_horizontal_units = getattr(self.raster2, 'current_horizontal_units', None)
         diff_raster.original_horizontal_units = getattr(self.raster2, 'original_horizontal_units', None)
         
-        # Create comprehensive CRS history for the difference raster
-        # This tracks dual-parent lineage (derived from BOTH raster1 and raster2)
+        # create comprehensive CRS history for the difference Raster
+        # this tracks dual-parent lineage (derived from BOTH raster1 and raster2)
         try:
             diff_raster.crs_history = CRSHistory(diff_raster)
             
-            # Set dual-parent lineage
+            # set dual-parent lineage
             diff_raster.crs_history.derived_from = self.raster2.filename  # Primary reference
             
-            # Record the differencing operation with full provenance
+            # record the differencing operation with full provenance
             diff_raster.crs_history.record_raster_creation_entry(
                 creation_parameters={
                     'source': 'RasterPair.compute_difference',
                     'operation': 'elevation_differencing',
                     'formula': 'raster2 - raster1',
-                    # Parent raster info
+                    # parent Raster info
                     'raster1_file': self.raster1.filename,
                     'raster2_file': self.raster2.filename,
                     'raster1_epoch': getattr(self.raster1, 'epoch', None),
                     'raster2_epoch': getattr(self.raster2, 'epoch', None),
                     'raster1_geoid': getattr(self.raster1, 'current_geoid_model', None) or getattr(self.raster1, 'original_geoid_model', None),
                     'raster2_geoid': getattr(self.raster2, 'current_geoid_model', None) or getattr(self.raster2, 'original_geoid_model', None),
-                    # Processing info
+                    # processing info
                     'transformation_applied': transform_first,
                     'transformation_steps': self._transformation_history,
                     'interpolation_method': interpolation_method,
                     'clip_to_overlap': clip_to_overlap,
-                    # Statistics
+                    # statistics
                     'stats': stats,
                 },
                 description=f"Difference raster (raster2 - raster1). "
@@ -1874,15 +1846,15 @@ class RasterPair:
                 interpolation_method=interpolation_method if transform_first else None,
             )
             
-            # Copy interpolation history from transformed raster1 if available
+            # copy interpolation history from transformed raster1 if available
             if transform_first and self._raster1_transformed is not None:
                 transformed_history = getattr(self._raster1_transformed, 'crs_history', None)
                 if transformed_history is not None:
-                    # Copy the interpolation entries from the transformation pipeline
+                    # copy the interpolation entries from the transformation Pipeline
                     for interp_entry in transformed_history.interpolation_history:
                         diff_raster.crs_history.interpolation_history.append(interp_entry)
             
-            # Record each transformation step that was applied to raster1
+            # record each transformation step that was applied to raster1
             for step in self._transformation_history:
                 step_type = step.get('step', 'unknown')
                 diff_raster.crs_history.record_transformation_entry(
@@ -1902,7 +1874,7 @@ class RasterPair:
             if verbose:
                 print(f"[WARNING] Could not create CRSHistory for difference raster: {e}.", file=sys.stderr)
         
-        # Build metadata summary
+        # build metadata summary
         metadata = {
             'raster1_source': self.raster1.filename,
             'raster2_source': self.raster2.filename,
@@ -1922,9 +1894,7 @@ class RasterPair:
             'metadata': metadata,
         }
 
-    # =========================================================================
-    # Provenance and History Methods
-    # =========================================================================
+    # provenance and History Methods
     
     def get_transformation_history(self) -> List[Dict[str, Any]]:
         """
@@ -1969,7 +1939,7 @@ class RasterPair:
                 'shape': (getattr(r, 'height', None), getattr(r, 'width', None)),
             }
             
-            # Get EPSG codes
+            # get EPSG codes
             horiz_crs = (getattr(r, 'current_horizontal_crs', None) or 
                         getattr(r, 'original_horizontal_crs', None))
             if horiz_crs:
@@ -1986,7 +1956,7 @@ class RasterPair:
                 except Exception:
                     pass
             
-            # Get bounds
+            # get bounds
             bounds = getattr(r, 'bounds', None)
             if bounds:
                 info['bounds'] = {
@@ -1996,11 +1966,11 @@ class RasterPair:
                     'top': bounds.top,
                 }
             
-            # Include CRSHistory if requested
+            # include CRSHistory if requested
             if include_crs_history and getattr(r, 'crs_history', None) is not None:
                 try:
                     info['crs_history'] = r.crs_history.to_dict()
-                    # Also include interpolation summary
+                    # also include interpolation summary
                     info['interpolation_summary'] = r.crs_history.get_interpolation_summary()
                 except Exception:
                     info['crs_history'] = None
@@ -2015,13 +1985,13 @@ class RasterPair:
             'transformation_history': self._transformation_history,
         }
         
-        # Include transformed raster1 if available
+        # include transformed raster1 if available
         if self._raster1_transformed is not None:
             provenance['raster1_transformed'] = get_raster_info(
                 self._raster1_transformed, 'raster1_transformed'
             )
             
-            # Add interpolation chain summary
+            # add interpolation chain summary
             if getattr(self._raster1_transformed, 'crs_history', None) is not None:
                 try:
                     provenance['interpolation_chain'] = self._raster1_transformed.crs_history.get_interpolation_chain()
@@ -2058,13 +2028,13 @@ class RasterPair:
         
         provenance = self.get_full_provenance(include_crs_history=include_crs_history)
         
-        # Add export metadata
+        # add export metadata
         provenance['_export_info'] = {
             'exported_at': datetime.now().isoformat(),
             'format': format,
         }
         
-        # Make JSON-serializable (handle non-serializable types)
+        # make JSON-serializable (handle non-serializable types)
         def make_serializable(obj):
             if isinstance(obj, dict):
                 return {k: make_serializable(v) for k, v in obj.items()}
@@ -2087,7 +2057,7 @@ class RasterPair:
                 with open(output_path, 'w') as f:
                     yaml.dump(provenance, f, default_flow_style=False, sort_keys=False)
             except ImportError:
-                # Fall back to JSON if yaml not available
+                # fall back to JSON if YAML not available
                 with open(output_path, 'w') as f:
                     json.dump(provenance, f, indent=2, default=str)
         else:
@@ -2104,7 +2074,7 @@ class RasterPair:
         
         print("\n--- RasterPair Summary ---")
 
-        # Build raster info table
+        # build Raster info table
         r1_epoch = getattr(self.raster1, 'epoch', 'N/A')
         r1_geoid = getattr(self.raster1, 'current_geoid_model', None) or getattr(self.raster1, 'original_geoid_model', 'N/A')
         r1_units = getattr(self.raster1, 'current_vertical_units', None) or getattr(self.raster1, 'vertical_units', 'unknown')
@@ -2119,7 +2089,7 @@ class RasterPair:
         print(f"{'Geoid':<18} {str(r1_geoid)[:18]:<20} {str(r2_geoid)[:18]:<20}")
         print(f"{'Vertical Units':<18} {str(r1_units)[:18]:<20} {str(r2_units)[:18]:<20}")
 
-        # Comparison table
+        # comparison table
         def match_str(val):
             return "Yes" if val else "No"
 
@@ -2142,7 +2112,7 @@ class RasterPair:
             for i, step in enumerate(self._transformation_history, 1):
                 print(f"  {i}. {step.get('step', 'unknown')}")
 
-        # Show interpolation history if available
+        # show interpolation history if available
         if self._raster1_transformed is not None:
             crs_hist = getattr(self._raster1_transformed, 'crs_history', None)
             if crs_hist is not None:
@@ -2157,9 +2127,7 @@ class RasterPair:
 
         print("")
 
-    # =========================================================================
-    # Legacy Methods (for backward compatibility)
-    # =========================================================================
+    # legacy Methods (for backward compatibility)
     
     def compare_raster_metadata(self) -> Dict[str, Any]:
         """
@@ -2272,7 +2240,7 @@ class RasterPair:
         
         self._transformation_history = []
         
-        # Get target parameters from reference (raster2)
+        # get target parameters from reference (raster2)
         target_epoch = getattr(self.raster2, 'epoch', None)
         target_crs = (
             getattr(self.raster2, 'crs', None) or
@@ -2283,7 +2251,7 @@ class RasterPair:
             getattr(self.raster2, 'geoid_model', None)
         )
         
-        # Determine vertical kinds
+        # determine vertical kinds
         source_is_ortho = getattr(self.raster1, 'is_orthometric', None)
         target_is_ortho = getattr(self.raster2, 'is_orthometric', None)
         
@@ -2302,7 +2270,7 @@ class RasterPair:
             getattr(self.raster1, 'geoid_model', None)
         )
         
-        # Determine what's actually needed
+        # determine what's actually needed
         needs_epoch = (
             not skip_epoch and 
             'epoch' in comparison['transformations_needed'] and
@@ -2327,20 +2295,20 @@ class RasterPair:
             if needs_horizontal:
                 print(f"  Horizontal CRS reprojection needed", file=sys.stderr)
 
-        # SINGLE warp_raster call with ALL parameters
+        # sINGLE warp_raster call with ALL parameters
         if needs_epoch or needs_vertical or needs_horizontal:
             
             current = self.raster1.warp_raster(
-                # Horizontal parameters
+                # horizontal parameters
                 target_crs=target_crs if needs_horizontal else None,
-                # Epoch parameters
+                # epoch parameters
                 dynamic_target_epoch=target_epoch if needs_epoch else None,
-                # Vertical parameters
+                # vertical parameters
                 source_vertical_kind=source_vertical_kind if needs_vertical else None,
                 target_vertical_kind=target_vertical_kind if needs_vertical else None,
                 source_geoid_model=source_geoid if needs_vertical else None,
                 target_geoid_model=target_geoid if needs_vertical else None,
-                # Align to reference grid
+                # align to reference grid
                 align_to=self.raster2,
                 overwrite=overwrite,
             )
@@ -2360,7 +2328,7 @@ class RasterPair:
             if verbose:
                 print(f"  Combined transformation [done]", file=sys.stderr)
         else:
-            # May still need grid alignment
+            # may still need grid alignment
             if 'grid' in comparison['transformations_needed']:
                 if verbose:
                     print(f"Aligning to reference grid...", file=sys.stderr)
@@ -2373,14 +2341,14 @@ class RasterPair:
                 if verbose:
                     print(f"No transformations needed.", file=sys.stderr)
         
-        # Update metadata to match reference
+        # update metadata to match reference
         current.add_metadata(
             compound_CRS=target_crs,
             geoid_model=target_geoid,
             epoch=target_epoch,
         )
         
-        # Cache result
+        # cache result
         self._raster1_transformed = current
         
         if verbose:
@@ -2409,7 +2377,6 @@ class RasterPair:
             'transformations_needed': [],
         }
         
-        # CRS comparison
         r1_crs = getattr(self.raster1, 'crs', None)
         r2_crs = getattr(self.raster2, 'crs', None)
         result['horizontal_crs']['r1'] = str(r1_crs)[:50] if r1_crs else None
@@ -2418,7 +2385,7 @@ class RasterPair:
         if not result['horizontal_crs']['match']:
             result['transformations_needed'].append('horizontal_crs')
         
-        # Vertical CRS / kind
+        # vertical CRS / kind
         r1_ortho = getattr(self.raster1, 'is_orthometric', None)
         r2_ortho = getattr(self.raster2, 'is_orthometric', None)
         r1_vert = "orthometric" if r1_ortho else "ellipsoidal" if r1_ortho is False else None
@@ -2427,18 +2394,18 @@ class RasterPair:
         result['vertical_crs']['r2'] = r2_vert
         result['vertical_crs']['match'] = r1_vert == r2_vert
         
-        # Geoid model
+        # geoid model
         r1_geoid = getattr(self.raster1, 'current_geoid_model', None) or getattr(self.raster1, 'geoid_model', None)
         r2_geoid = getattr(self.raster2, 'current_geoid_model', None) or getattr(self.raster2, 'geoid_model', None)
         result['geoid']['r1'] = r1_geoid
         result['geoid']['r2'] = r2_geoid
         result['geoid']['match'] = _geoid_equivalent(r1_geoid, r2_geoid)
         
-        # Check if vertical datum transformation needed
+        # check if vertical datum transformation needed
         if not result['vertical_crs']['match'] or not result['geoid']['match']:
             result['transformations_needed'].append('vertical_datum')
         
-        # Epoch
+        # epoch
         r1_epoch = getattr(self.raster1, 'epoch', None)
         r2_epoch = getattr(self.raster2, 'epoch', None)
         result['epoch']['r1'] = r1_epoch
@@ -2450,7 +2417,7 @@ class RasterPair:
         if not result['epoch']['match'] and r1_epoch is not None and r2_epoch is not None:
             result['transformations_needed'].append('epoch')
         
-        # Vertical units
+        # vertical units
         r1_vunit = getattr(self.raster1, 'vertical_unit', None)
         r2_vunit = getattr(self.raster2, 'vertical_unit', None)
         r1_vunit_name = r1_vunit.name if hasattr(r1_vunit, 'name') else str(r1_vunit) if r1_vunit else "unknown"
@@ -2462,7 +2429,7 @@ class RasterPair:
         if not units_match:
             result['transformations_needed'].append('vertical_units')
 
-        # Grid alignment
+        # grid alignment
         try:
             with rasterio.open(self.raster1.filename) as src1, rasterio.open(self.raster2.filename) as src2:
                 grid_match = (
@@ -2496,7 +2463,7 @@ class RasterPair:
         print(f"\n{'Parameter':<20} {'Match':<8} {'R1':<20} {'R2':<20}")
         print("-" * 70)
 
-        # Horizontal CRS
+        # horizontal CRS
         try:
             r1_crs = getattr(self.raster1, 'crs', None)
             r2_crs = getattr(self.raster2, 'crs', None)
@@ -2509,27 +2476,27 @@ class RasterPair:
             r2_str = "Unknown"
         print(f"{'Horizontal CRS':<20} {match_sym(comparison['horizontal_crs']['match']):<8} {r1_str:<20} {r2_str:<20}")
 
-        # Vertical CRS
+        # vertical CRS
         r1_vert = comparison['vertical_crs']['r1'] or "Unknown"
         r2_vert = comparison['vertical_crs']['r2'] or "Unknown"
         print(f"{'Vertical CRS':<20} {match_sym(comparison['vertical_crs']['match']):<8} {r1_vert:<20} {r2_vert:<20}")
 
-        # Geoid
+        # geoid
         r1_geoid = comparison['geoid']['r1'] or "None"
         r2_geoid = comparison['geoid']['r2'] or "None"
         r1_geoid = r1_geoid[:18] + ".." if len(r1_geoid) > 20 else r1_geoid
         r2_geoid = r2_geoid[:18] + ".." if len(r2_geoid) > 20 else r2_geoid
         print(f"{'Geoid Model':<20} {match_sym(comparison['geoid']['match']):<8} {r1_geoid:<20} {r2_geoid:<20}")
 
-        # Epoch
+        # epoch
         r1_epoch = f"{comparison['epoch']['r1']:.4f}" if comparison['epoch']['r1'] else "None"
         r2_epoch = f"{comparison['epoch']['r2']:.4f}" if comparison['epoch']['r2'] else "None"
         print(f"{'Epoch':<20} {match_sym(comparison['epoch']['match']):<8} {r1_epoch:<20} {r2_epoch:<20}")
 
-        # Units
+        # units
         print(f"{'Vertical Units':<20} {match_sym(comparison['vertical_units']['match']):<8} {comparison['vertical_units']['r1']:<20} {comparison['vertical_units']['r2']:<20}")
 
-        # Grid
+        # grid
         r1_grid = comparison['grid']['r1'] or "Unknown"
         r2_grid = comparison['grid']['r2'] or "Unknown"
         r1_grid = r1_grid[:18] + ".." if len(str(r1_grid)) > 20 else str(r1_grid)
@@ -2828,9 +2795,7 @@ class RasterPair:
         else:
             raise ValueError(f"Invalid target: {target}")
 
-    # =========================================================================
-    # Visualization Methods
-    # =========================================================================
+    # visualization Methods
     
     def generate_derivative(
         self,
@@ -2870,15 +2835,15 @@ class RasterPair:
         derivative_type = derivative_type.lower()
 
         if derivative_type == "dem":
-            # Return original DEMs
+            # return original DEMs
             return self.raster1, self.raster2
 
-        # Verify input files exist and are accessible
+        # verify input files exist and are accessible
         for i, raster in enumerate([self.raster1, self.raster2], 1):
             if not os.path.exists(raster.filename):
                 raise FileNotFoundError(f"Raster {i} file not found: {raster.filename}")
 
-        # Generate derivatives with proper error handling
+        # generate derivatives with proper error handling
         if derivative_type == "hillshade":
             deriv1 = self.raster1.hillshade(azimuth=azimuth, altitude=altitude)
             deriv2 = self.raster2.hillshade(azimuth=azimuth, altitude=altitude)
@@ -2963,7 +2928,7 @@ class RasterPair:
         """
         import matplotlib.pyplot as plt
 
-        # Auto-select colormap based on derivative type
+        # auto-select colormap based on derivative type
         if cmap is None:
             cmap_map = {
                 'dem': 'terrain',
@@ -2974,7 +2939,7 @@ class RasterPair:
             }
             cmap = cmap_map.get(derivative.lower(), 'viridis')
 
-        # Generate derivatives if needed
+        # generate derivatives if needed
         derivative_lower = derivative.lower()
         if derivative_lower == "dem":
             plot_raster1 = self.raster1
@@ -2992,7 +2957,7 @@ class RasterPair:
         else:
             ax1, ax2 = axes
 
-        # Read and plot rasters with proper nodata masking
+        # read and plot rasters with proper nodata masking
         with rasterio.open(plot_raster1.filename) as src:
             data1 = src.read(1)
             extent1 = [src.bounds.left, src.bounds.right, src.bounds.bottom, src.bounds.top]
@@ -3003,7 +2968,7 @@ class RasterPair:
             extent2 = [src.bounds.left, src.bounds.right, src.bounds.bottom, src.bounds.top]
             nodata2 = src.nodata
 
-        # Mask nodata values explicitly
+        # mask nodata values explicitly
         data1 = np.ma.masked_invalid(data1)
         if nodata1 is not None:
             data1 = np.ma.masked_where(data1 == nodata1, data1)
@@ -3071,7 +3036,7 @@ class RasterPair:
         result = target_pair.compute_difference(verbose=False)
         diff_raster = result['difference_raster']
 
-        # Load as xarray DataArray
+        # load as xarray DataArray
         diff_da = rio.open_rasterio(diff_raster.filename, masked=True)
         return diff_da
 
@@ -3134,14 +3099,14 @@ class RasterPair:
         """
         import matplotlib.pyplot as plt
 
-        # Default to using self if neither pair nor diff_path provided
+        # default to using self if neither pair nor diff_path provided
         if pair is None and diff_path is None:
             pair = self
 
         if (pair is None) == (diff_path is None):
             raise ValueError("Provide exactly one of 'pair' or 'diff_path'")
 
-        # Obtain diff DataArray and drop singleton band dimension
+        # obtain diff DataArray and drop singleton band dimension
         if pair is not None:
             diff_da = self.difference_da(pair)
             diff_da = diff_da.squeeze(dim=[d for d in diff_da.dims if diff_da[d].size == 1], drop=True)
@@ -3149,19 +3114,19 @@ class RasterPair:
         else:
             from .raster import Raster
             diff_r = Raster(diff_path)
-            # raster data has shape (bands, y, x) or (y, x)
+            # Raster data has shape (bands, y, x) or (y, x)
             diff_da = diff_r.data.squeeze()
             base = diff_r
 
-        # Convert to numpy and ensure 2D
+        # convert to numpy and ensure 2D
         diff_arr = np.squeeze(diff_da.values)
         extent = self._extent(base)
 
-        # Determine colour limits
+        # determine colour limits
         if center_zero and vmin is None and vmax is None:
             vmin, vmax = self._sym_range(diff_arr)
 
-        # Prepare overlay alignment & masking
+        # prepare overlay alignment & masking
         if overlay is not None:
             ov = overlay
             if ov.shape[1:] != base.shape[1:] or ov.crs != base.crs:

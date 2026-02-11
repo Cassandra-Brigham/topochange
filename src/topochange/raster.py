@@ -1,8 +1,7 @@
 """Raster loading, metadata extraction, and transformation.
 
 Provides the Raster class for loading GeoTIFF files, extracting CRS and
-metadata, and performing coordinate transformations and reprojections.
-"""
+metadata, and performing coordinate transformations and reprojections."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -38,7 +37,7 @@ from .unit_utils import (
     parse_unit_string,
     format_value_with_unit,
     describe_unit,
-    # Backward-compatible functions
+    # backward-compatible functions
     horizontal_unit_scale,
     vertical_unit_scale,
 )
@@ -71,7 +70,7 @@ def parse_time_info(tags: Dict[str, Any]) -> Dict[str, Any]:
     if not tags:
         return time_info
 
-    # Normalize keys to lowercase for case-insensitive matching
+    # normalize keys to lowercase for case-insensitive matching
     tags_lower = {k.lower(): v for k, v in tags.items()}
 
     # 1. Check for explicit epoch value (already in decimal years)
@@ -96,7 +95,7 @@ def parse_time_info(tags: Dict[str, Any]) -> Dict[str, Any]:
             datetime_str = str(tags_lower[key]).strip()
             time_info["datetime_str"] = datetime_str
 
-            # Try GeoTIFF format first
+            # try GeoTIFF format first
             try:
                 dt = datetime.strptime(datetime_str, "%Y:%m:%d %H:%M:%S")
                 if "epoch" not in time_info:
@@ -106,7 +105,7 @@ def parse_time_info(tags: Dict[str, Any]) -> Dict[str, Any]:
                     time_info["epoch_source"] = f"parsed_{key}"
                 break
             except ValueError:
-                # Try ISO format
+                # try ISO format
                 try:
                     dt = datetime.fromisoformat(datetime_str.replace("Z", "+00:00"))
                     if dt.tzinfo is not None:
@@ -154,7 +153,7 @@ def parse_time_info(tags: Dict[str, Any]) -> Dict[str, Any]:
             time_info["time_str"] = time_str
             break
 
-    # If we have a date string, try to parse it
+    # if we have a date string, try to parse it
     if date_str and "epoch" not in time_info:
         try:
             epoch_val = _parse_epoch_string_to_decimal(date_str)
@@ -175,7 +174,7 @@ def parse_time_info(tags: Dict[str, Any]) -> Dict[str, Any]:
     if "day" in tags_lower:
         time_info["day"] = tags_lower["day"]
 
-    # Try to construct epoch from year/month/day if we have them
+    # try to construct epoch from year/month/day if we have them
     if "epoch" not in time_info and "year" in time_info:
         try:
             year = int(time_info["year"])
@@ -271,7 +270,7 @@ class Raster:
         """Initialize dynamic attributes that aren't dataclass fields."""
         if not hasattr(self, "crs"):
             self.crs = None
-        # Use private attributes for CRS components, managed by properties
+        # use private attributes for CRS components, managed by properties
         if not hasattr(self, "_original_compound_crs"):
             self._original_compound_crs = None
         if not hasattr(self, "_original_horizontal_crs"):
@@ -311,7 +310,7 @@ class Raster:
         if not hasattr(self, 'is_orthometric'):
             self.is_orthometric = None 
         
-        # Unit info objects - enhanced
+        # unit info objects - enhanced
         if not hasattr(self, "original_horizontal_unit"):
             self.original_horizontal_unit: UnitInfo = UNKNOWN_UNIT
         if not hasattr(self, "original_vertical_unit"):
@@ -321,7 +320,7 @@ class Raster:
         if not hasattr(self, "current_vertical_unit"):
             self.current_vertical_unit: UnitInfo = UNKNOWN_UNIT
         
-        # Backward compatible string properties
+        # backward compatible string properties
         if not hasattr(self, "original_vertical_units"):
             self.original_vertical_units = None
         if not hasattr(self, "original_horizontal_units"):
@@ -331,9 +330,7 @@ class Raster:
         if not hasattr(self, "current_horizontal_units"):
             self.current_horizontal_units = None
     
-    # =========================================================================
     # CRS Component Properties - Auto-sync compound/horizontal/vertical
-    # =========================================================================
     
     @property
     def original_compound_crs(self) -> Optional[str]:
@@ -351,12 +348,12 @@ class Raster:
         self._original_compound_crs = value
         
         if value is not None:
-            # Parse and extract components
+            # parse and extract components
             from .crs_utils import parse_crs_components
             _, horiz_wkt, vert_wkt = parse_crs_components(value)
             self._original_horizontal_crs = horiz_wkt
             self._original_vertical_crs = vert_wkt
-        # If value is None, we don't clear horizontal/vertical automatically
+        # if value is None, we don't clear horizontal/vertical automatically
         # since they might have been set independently
     
     @property
@@ -406,13 +403,13 @@ class Raster:
                 )
                 self._original_compound_crs = compound_obj.to_wkt()
             except Exception:
-                # If compound creation fails, leave compound as-is
+                # if compound creation fails, leave compound as-is
                 pass
         elif self._original_horizontal_crs and not self._original_vertical_crs:
-            # Only horizontal - compound should be None
+            # only horizontal - compound should be None
             self._original_compound_crs = None
         elif self._original_vertical_crs and not self._original_horizontal_crs:
-            # Only vertical - compound should be None
+            # only vertical - compound should be None
             self._original_compound_crs = None
     
     @property
@@ -427,19 +424,19 @@ class Raster:
 
         When you set a compound CRS, the horizontal and vertical components
         are automatically extracted from it. If the new CRS is 2D (no vertical
-        component), the existing vertical CRS is preserved — a horizontal-only
+        component), the existing vertical CRS is preserved : a horizontal-only
         update should never destroy pre-existing vertical metadata.
         """
         self._current_compound_crs = value
 
         if value is not None:
-            # Parse and extract components
+            # parse and extract components
             from .crs_utils import parse_crs_components
             _, horiz_wkt, vert_wkt = parse_crs_components(value)
             if horiz_wkt is not None:
                 self._current_horizontal_crs = horiz_wkt
-            # Only overwrite vertical if the new CRS actually carries one.
-            # A 2D CRS (vert_wkt=None) must NOT erase existing vertical metadata.
+            # only overwrite vertical if the new CRS actually carries one.
+            # a 2D CRS (vert_wkt=None) must NOT erase existing vertical metadata.
             if vert_wkt is not None:
                 self._current_vertical_crs = vert_wkt
     
@@ -496,13 +493,13 @@ class Raster:
                 )
                 self._current_compound_crs = compound_obj.to_wkt()
             except Exception:
-                # If compound creation fails, leave compound as-is
+                # if compound creation fails, leave compound as-is
                 pass
         elif self._current_horizontal_crs and not self._current_vertical_crs:
-            # Only horizontal – store it as the compound so current_full_crs works
+            # only horizontal – store it as the compound so current_full_crs works
             self._current_compound_crs = self._current_horizontal_crs
         elif self._current_vertical_crs and not self._current_horizontal_crs:
-            # Only vertical – store it as the compound so current_full_crs works
+            # only vertical – store it as the compound so current_full_crs works
             self._current_compound_crs = self._current_vertical_crs
     
     @property
@@ -535,9 +532,7 @@ class Raster:
             return self.current_vertical_crs
         return None
 
-    # =========================================================================
-    # Unit convenience properties
-    # =========================================================================
+    # unit convenience properties
     
     @property
     def horizontal_unit(self) -> UnitInfo:
@@ -606,9 +601,7 @@ class Raster:
                 pass
         return None
 
-    # =========================================================================
-    # Unit conversion methods
-    # =========================================================================
+    # unit conversion methods
     
     def convert_values_to_meters(self, values) -> Any:
         """
@@ -709,7 +702,7 @@ class Raster:
             return res  # Assume meters if unknown
         
         if self.current_horizontal_unit.category != "linear":
-            # Geographic CRS (degrees) - can't directly convert
+            # geographic CRS (degrees) - can't directly convert
             return None
         
         return res * self.current_horizontal_unit.to_base_factor
@@ -813,65 +806,65 @@ class Raster:
         import rasterio
         from pathlib import Path
 
-        # Get target unit info
+        # get target unit info
         target_unit = lookup_unit(target_units)
         if target_unit is None:
             raise ValueError(f"Unknown target unit: {target_units}")
         
-        # Check if source unit is known
+        # check if source unit is known
         if self.current_vertical_unit.name == "unknown":
             raise ValueError(
                 "Cannot convert units: current vertical unit is unknown. "
                 "Use set_units() to specify the current unit first."
             )
         
-        # Get conversion factor
+        # get conversion factor
         source_unit = self.current_vertical_unit
         if source_unit.name == target_unit.name:
-            # Units are the same, just return a copy
+            # units are the same, just return a copy
             import warnings
             warnings.warn(f"Source and target units are both {source_unit.name}, no conversion needed")
             return self
         
         factor = get_conversion_factor(source_unit, target_unit)
         
-        # Generate output path if not specified
+        # generate output path if not specified
         if output_path is None:
             stem = Path(self.filename).stem
             suffix = Path(self.filename).suffix
             parent = Path(self.filename).parent
             output_path = str(parent / f"{stem}_units_{target_unit.name}{suffix}")
         
-        # Check if output exists
+        # check if output exists
         if os.path.exists(output_path) and not overwrite:
             raise FileExistsError(f"Output file exists and overwrite=False: {output_path}")
         
-        # Read source data, apply conversion, write to new file
+        # read source data, apply conversion, write to new file
         with rasterio.open(self.filename) as src:
             data = src.read(1).astype('float32')
             profile = src.profile.copy()
             nodata = src.nodata
             
-            # Create mask for valid data
+            # create mask for valid data
             valid_mask = ~np.isnan(data) & ~np.isinf(data)
             if nodata is not None:
                 valid_mask &= (data != nodata)
             
-            # Apply conversion factor to valid pixels only
+            # apply conversion factor to valid pixels only
             converted = data.copy()
             converted[valid_mask] = data[valid_mask] * factor
             
-            # Update profile
+            # update profile
             profile.update(dtype='float32', BIGTIFF='YES')
 
-            # Write converted raster
+            # write converted Raster
             with rasterio.open(output_path, 'w', **profile) as dst:
                 dst.write(converted, 1)
         
-        # Load the new raster
+        # load the new Raster
         result = Raster.from_file(output_path, rtype=self.rtype, metadata=self.metadata)
         
-        # Copy metadata from source
+        # copy metadata from source
         result.epoch = self.epoch
         result.is_orthometric = self.is_orthometric
         result.original_horizontal_crs = self.original_horizontal_crs
@@ -884,19 +877,19 @@ class Raster:
         result.current_geoid_model = self.current_geoid_model
         result.crs_history = self.crs_history
         
-        # Keep original unit info for reference
+        # keep original unit info for reference
         result.original_horizontal_unit = self.original_horizontal_unit
         result.original_vertical_unit = self.original_vertical_unit
         result.original_horizontal_units = self.original_horizontal_units
         result.original_vertical_units = self.original_vertical_units
         
-        # Update current unit to the target
+        # update current unit to the target
         result.current_horizontal_unit = self.current_horizontal_unit
         result.current_vertical_unit = target_unit
         result.current_horizontal_units = self.current_horizontal_units
         result.current_vertical_units = target_unit.display_name
         
-        # Record in CRS history if available
+        # record in CRS history if available
         if result.crs_history is not None:
             try:
                 result.crs_history.record_transformation_entry(
@@ -917,13 +910,11 @@ class Raster:
     
     def print_unit_info(self) -> None:
         """Print detailed information about the raster's units."""
-        print("==================")
-        print("==== Unit Info ====")
-        print("==================")
-        print(f"\nOriginal Horizontal: {describe_unit(self.original_horizontal_unit)}")
-        print(f"Original Vertical:   {describe_unit(self.original_vertical_unit)}")
-        print(f"\nCurrent Horizontal:  {describe_unit(self.current_horizontal_unit)}")
-        print(f"Current Vertical:    {describe_unit(self.current_vertical_unit)}")
+        print("unit info:")
+        print(f"  original horizontal: {describe_unit(self.original_horizontal_unit)}")
+        print(f"  original vertical:   {describe_unit(self.original_vertical_unit)}")
+        print(f"  current horizontal:  {describe_unit(self.current_horizontal_unit)}")
+        print(f"  current vertical:    {describe_unit(self.current_vertical_unit)}")
         
         h_metric, v_metric = self.are_units_metric()
         print(f"\nHorizontal is metric: {h_metric}")
@@ -963,23 +954,21 @@ class Raster:
             except Exception:
                 raster_tags = {}
 
-        # Create instance
+        # create instance
         obj = cls(filename=filename)
 
-        # =====================================================================
-        # Parse CRS into compound/horizontal/vertical components
-        # =====================================================================
+        # parse CRS into compound/horizontal/vertical components
         from .crs_utils import parse_crs_components, extract_epoch_from_wkt
 
         compound_wkt, horizontal_wkt, vertical_wkt = parse_crs_components(crs)
         
-        # Store the rasterio CRS object and parsed WKT strings
+        # store the rasterio CRS object and parsed WKT strings
         obj.crs = crs
         obj.original_compound_crs = compound_wkt
         obj.original_horizontal_crs = horizontal_wkt
         obj.original_vertical_crs = vertical_wkt
 
-        # Try to extract epoch from CRS WKT (COORDINATEMETADATA wrapper)
+        # try to extract epoch from CRS WKT (COORDINATEMETADATA wrapper)
         crs_epoch = None
         if crs:
             try:
@@ -990,7 +979,7 @@ class Raster:
             if crs_epoch is None and compound_wkt:
                 crs_epoch = extract_epoch_from_wkt(compound_wkt)
 
-        # Get PROJ string representation
+        # get PROJ string representation
         if crs:
             try:
                 from pyproj import CRS as _CRS
@@ -1007,14 +996,13 @@ class Raster:
         else:
             obj.original_proj_string = None
 
-        # Set current to match original
+        # set current to match original
         obj.current_compound_crs = obj.original_compound_crs
         obj.current_horizontal_crs = obj.original_horizontal_crs
         obj.current_vertical_crs = obj.original_vertical_crs
         obj.current_proj_string = obj.original_proj_string
-        # =====================================================================
         
-        # Determine if heights are orthometric or ellipsoidal
+        # determine if heights are orthometric or ellipsoidal
         if obj.original_vertical_crs is not None:
             from .crs_utils import is_orthometric
             try:
@@ -1029,21 +1017,19 @@ class Raster:
         obj.width = width
         obj.height = height
         
-        # =====================================================================
-        # Store unit information - enhanced with UnitInfo objects
-        # =====================================================================
+        # store unit information - enhanced with UnitInfo objects
         obj.original_horizontal_unit = horiz_unit
         obj.original_vertical_unit = vert_unit
         obj.current_horizontal_unit = horiz_unit
         obj.current_vertical_unit = vert_unit
         
-        # Backward compatible string properties
+        # backward compatible string properties
         obj.original_horizontal_units = horiz_unit.display_name
         obj.original_vertical_units = vert_unit.display_name
         obj.current_horizontal_units = horiz_unit.display_name
         obj.current_vertical_units = vert_unit.display_name
 
-        # Merge tags + user metadata for geoid/time parsing
+        # merge tags + user metadata for geoid/time parsing
         meta: Dict[str, Any] = dict(raster_tags)
         if metadata:
             meta.update(metadata)
@@ -1052,7 +1038,7 @@ class Raster:
         obj.original_geoid_model = geoid_info.get("geoid_model")
         obj.current_geoid_model = obj.original_geoid_model
 
-        # Parse time information from raster tags only (tags are more standardized)
+        # parse time information from Raster tags only (tags are more standardized)
         time_info = parse_time_info(raster_tags)
         if time_info:
             obj.time_info = time_info
@@ -1060,13 +1046,13 @@ class Raster:
                 obj.epoch = time_info["epoch"]
 
         # CRS COORDINATEMETADATA epoch overrides TIFFTAG_DATETIME-derived epochs.
-        # TIFFTAG_DATETIME is the *file creation time*, not the survey epoch.
+        # tIFFTAG_DATETIME is the *file creation time*, not the survey epoch.
         if crs_epoch is not None:
             current_source = None
             if hasattr(obj, 'time_info') and obj.time_info:
                 current_source = obj.time_info.get('epoch_source')
 
-            # Override if: no epoch yet, or current epoch came from file datetime
+            # override if: no epoch yet, or current epoch came from file datetime
             if (not hasattr(obj, 'epoch') or obj.epoch is None
                     or current_source in (
                         None,
@@ -1083,13 +1069,13 @@ class Raster:
                 obj.time_info['epoch'] = crs_epoch
                 obj.time_info['epoch_source'] = 'crs_coordinatemetadata'
 
-        # Store additional metadata
+        # store additional metadata
         obj.metadata = meta
         if rtype is not None:
             obj.metadata["raster_type"] = rtype
         obj.rtype = rtype
 
-        # Epoch in metadata overrides parsed values
+        # epoch in metadata overrides parsed values
         if metadata and "epoch" in metadata:
             try:
                 obj.epoch = float(metadata["epoch"])
@@ -1100,7 +1086,7 @@ class Raster:
                 if not hasattr(obj, "epoch"):
                     obj.epoch = None
 
-        # Initialize CRS history
+        # initialize CRS history
         try:
             if getattr(obj, "crs_history", None) is None:
                 obj.crs_history = CRSHistory(obj)
@@ -1174,9 +1160,7 @@ class Raster:
         from .geoid_utils import select_geoid_grid
         from .time_utils import _datetime_to_decimal_year
 
-        # -------------------------------
-        # Helper: safely coerce to CRS
-        # -------------------------------
+        # helper: safely coerce to CRS
         def _crs_or_none(value: Any) -> Optional[_CRS]:
             if value is None:
                 return None
@@ -1185,9 +1169,7 @@ class Raster:
             except Exception:
                 return None
 
-        # -------------------------------
         # 1. Start from existing state
-        # -------------------------------
         existing_horiz = _crs_or_none(
             getattr(self, "current_horizontal_crs", None)
             or getattr(self, "original_horizontal_crs", None)
@@ -1208,14 +1190,12 @@ class Raster:
         crs_changed = False
         geoid_changed = False
         epoch_changed = False
-        # -------------------------------
         # 2. Interpret compound_CRS, if any
-        # -------------------------------
         if compound_CRS is not None:
             comp = _ensure_crs_obj(compound_CRS)
 
             if comp.is_compound:
-                # Try to split into horizontal + vertical
+                # try to split into horizontal + vertical
                 sub = getattr(comp, "sub_crs_list", None) or []
                 horiz_candidate = sub[0] if len(sub) >= 1 else None
                 vert_candidate = sub[1] if len(sub) >= 2 else None
@@ -1233,24 +1213,22 @@ class Raster:
                 # and derive a synthetic 1D vertical CRS for the vertical_crs attribute
                 new_comp = comp
                 new_vert = extract_ellipsoidal_height_as_vertical_crs(comp)
-                # Horizontal stays as-is (user may have set it separately)
+                # horizontal stays as-is (user may have set it separately)
                 crs_changed = True
 
             else:
-                # Non-compound: decide whether horizontal or vertical
+                # non-compound: decide whether horizontal or vertical
                 if getattr(comp, "is_vertical", False):
                     new_vert = comp
                 else:
-                    # Geographic or projected -> horizontal
+                    # geographic or projected -> horizontal
                     new_horiz = comp
-                # Compound will be rebuilt later from horiz/vert
+                # compound will be rebuilt later from horiz/vert
                 new_comp = None
                 crs_changed = True
 
 
-        # -------------------------------
         # 3. Explicit horizontal / vertical overrides
-        # -------------------------------
         if horizontal_CRS is not None:
             new_horiz = _ensure_crs_obj(horizontal_CRS)
             new_comp = None
@@ -1259,9 +1237,9 @@ class Raster:
         if vertical_CRS is not None:
             vert_candidate = _ensure_crs_obj(vertical_CRS)
             
-            # Check if user passed a 3D geographic CRS (e.g., EPSG:4979) as vertical
+            # check if user passed a 3D geographic CRS (e.g., EPSG:4979) as vertical
             if is_3d_geographic_crs(vert_candidate):
-                # Use the 3D CRS as the full CRS, derive synthetic 1D vertical
+                # use the 3D CRS as the full CRS, derive synthetic 1D vertical
                 new_comp = vert_candidate
                 new_vert = extract_ellipsoidal_height_as_vertical_crs(vert_candidate)
             else:
@@ -1269,26 +1247,24 @@ class Raster:
                 new_comp = None
             crs_changed = True
 
-        # -------------------------------
         # 4. Rebuild compound if needed
-        # -------------------------------
         if new_comp is None:
             if new_horiz is not None and new_vert is not None:
-                # Check if new_vert is actually a 3D geographic CRS
+                # check if new_vert is actually a 3D geographic CRS
                 # (shouldn't happen after section 3, but defensive check)
                 if is_3d_geographic_crs(new_vert):
-                    # Use the 3D CRS directly as the full CRS
+                    # use the 3D CRS directly as the full CRS
                     new_comp = new_vert
                     new_vert = extract_ellipsoidal_height_as_vertical_crs(new_vert)
                 else:
-                    # Normal case: build true compound from 2D + 1D
+                    # normal case: build True compound from 2D + 1D
                     comp_name = f"{new_horiz.name} + {new_vert.name}"
                     new_comp = CompoundCRS(name=comp_name, components=[new_horiz, new_vert])
             elif new_horiz is not None:
-                # Horizontal only
+                # horizontal only
                 new_comp = new_horiz
             elif new_vert is not None:
-                # Vertical only - check if it's actually a 3D CRS
+                # vertical only - check if it's actually a 3D CRS
                 if is_3d_geographic_crs(new_vert):
                     new_comp = new_vert
                     new_vert = extract_ellipsoidal_height_as_vertical_crs(new_vert)
@@ -1297,47 +1273,43 @@ class Raster:
             else:
                 new_comp = existing_comp  # nothing better to do
 
-        # -------------------------------
         # 5. Write back CRS using auto-sync properties
-        # -------------------------------
         if crs_changed and new_comp is not None:
-            # Use auto-sync properties for consistency
+            # use auto-sync properties for consistency
             self.current_compound_crs = new_comp.to_wkt()
             
         if crs_changed and new_horiz is not None:
             self.current_horizontal_crs = new_horiz.to_wkt()
-            # Update horizontal unit from new CRS
+            # update horizontal unit from new CRS
             self.current_horizontal_unit = get_horizontal_unit(new_horiz)
             self.current_horizontal_units = self.current_horizontal_unit.display_name
             
         if crs_changed and new_vert is not None:
             self.current_vertical_crs = new_vert.to_wkt()
-            # Update vertical unit from new CRS, but preserve if already explicitly set
+            # update vertical unit from new CRS, but preserve if already explicitly set
             new_vert_unit = get_vertical_unit(new_vert)
-            # Only update if new CRS has known units, OR if current unit is unknown
-            # This preserves explicitly-set units when transforming to CRS without unit info
+            # only update if new CRS has known units, OR if current unit is unknown
+            # this preserves explicitly-set units when transforming to CRS without unit info
             if new_vert_unit.name != "unknown" or self.current_vertical_unit.name == "unknown":
                 self.current_vertical_unit = new_vert_unit
                 self.current_vertical_units = self.current_vertical_unit.display_name
 
-        # Update legacy crs attribute for backward compatibility
+        # update legacy CRS attribute for backward compatibility
         if crs_changed and new_comp is not None:
             self.crs = new_comp
 
-        # Orthometric flag can update when vertical changes
+        # orthometric flag can update when vertical changes
         if crs_changed and new_vert is not None:
             self.is_orthometric = is_orthometric(new_vert.to_wkt())
 
-        # -------------------------------
         # 6. Geoid model
-        # -------------------------------
         if geoid_model is not None:
             gm_str = str(geoid_model)
 
-            # Case A: looks like a file path or filename (e.g., "us_noaa_geoid03_conus.tif")
-            #         -> just store the basename, do NOT call select_geoid_grid again.
-            # Case B: looks like an alias (e.g., "GEOID03", "GEOID18")
-            #         -> resolve to a grid path via select_geoid_grid.
+            # case A: looks like a file path or filename (e.g., "us_noaa_geoid03_conus.tif")
+            # -> just store the basename, do NOT call select_geoid_grid again.
+            # case B: looks like an alias (e.g., "GEOID03", "GEOID18")
+            # -> resolve to a grid path via select_geoid_grid.
             if gm_str.lower().endswith(".tif") or "/" in gm_str or "\\" in gm_str:
                 self.current_geoid_model = Path(gm_str).name
             else:
@@ -1346,9 +1318,7 @@ class Raster:
 
             geoid_changed = True
 
-        # -------------------------------
         # 7. Epoch handling
-        # -------------------------------
         if epoch is not None:
 
             def _epoch_to_decimal_year(value: Any) -> float:
@@ -1362,7 +1332,7 @@ class Raster:
                 if isinstance(value, str):
                     parsed = _parse_epoch_string_to_decimal(value)
                     if isinstance(parsed, tuple):
-                        # If string itself is a range, we take the mid-point.
+                        # if string itself is a range, we take the mid-point.
                         return 0.5 * (parsed[0] + parsed[1])
                     return float(parsed)
                 raise TypeError(
@@ -1370,7 +1340,7 @@ class Raster:
                     "a string (date or 'start - end'), or a 2-element range of those."
                 )
 
-            # String range: "start - end"
+            # string range: "start - end"
             if isinstance(epoch, str):
                 parsed = _parse_epoch_string_to_decimal(epoch)
                 if isinstance(parsed, tuple):
@@ -1383,7 +1353,7 @@ class Raster:
                     self.epoch = epoch_dec
                     self.epoch_start = epoch_dec
                     self.epoch_end = epoch_dec
-            # Tuple/list range: (start, end)
+            # tuple/list range: (start, end)
             elif isinstance(epoch, (list, tuple)) and len(epoch) == 2:
                 start_dec = _epoch_to_decimal_year(epoch[0])
                 end_dec = _epoch_to_decimal_year(epoch[1])
@@ -1391,7 +1361,7 @@ class Raster:
                 self.epoch_end = max(start_dec, end_dec)
                 self.epoch = 0.5 * (self.epoch_start + self.epoch_end)
             else:
-                # Single value (numeric, date, datetime, etc.)
+                # single value (numeric, date, datetime, etc.)
                 epoch_dec = _epoch_to_decimal_year(epoch)
                 self.epoch = epoch_dec
                 self.epoch_start = epoch_dec
@@ -1399,21 +1369,19 @@ class Raster:
 
             epoch_changed = True
 
-            # Keep time_info in sync with the new epoch value
+            # keep time_info in sync with the new epoch value
             if not hasattr(self, 'time_info') or not self.time_info:
                 self.time_info = {}
             self.time_info['epoch'] = self.epoch
             self.time_info['epoch_source'] = 'add_metadata'
 
-        # -------------------------------
         # 8. Record a single CRSHistory entry summarizing all changes
-        # -------------------------------
         try:
             from .crs_history import CRSHistory as _CRSHistory  # type: ignore
         except Exception:
             _CRSHistory = None  # type: ignore
 
-        # Initialize history if missing and possible
+        # initialize history if missing and possible
         if getattr(self, "crs_history", None) is None and _CRSHistory is not None:
             try:
                 self.crs_history = _CRSHistory(self)
@@ -1421,7 +1389,7 @@ class Raster:
                 self.crs_history = None
 
         if getattr(self, "crs_history", None) is not None:
-            # Only pass updated pieces; CRSHistory keeps its own current state.
+            # only pass updated pieces; CRSHistory keeps its own current state.
             try:
                 self.crs_history.add_manual_change_entry(
                     new_compound_crs_proj=new_comp if crs_changed else None,
@@ -1465,9 +1433,7 @@ class Raster:
             ax.set_title(title)
         return ax
 
-    # =========================================================================
-    # Derived raster products
-    # =========================================================================
+    # derived Raster products
 
     def _process_dem(
         self,
@@ -1502,10 +1468,10 @@ class Raster:
 
         import os
 
-        # Build output path in same directory as input
+        # build output path in same directory as input
         output_path = os.path.join(os.path.dirname(self.filename), output_filename)
 
-        # Open source to check nodata value
+        # open source to check nodata value
         src_ds = gdal.Open(str(dem_path), gdal.GA_ReadOnly)
         if src_ds is None:
             raise ValueError(f"Could not open DEM file: {dem_path}")
@@ -1514,16 +1480,16 @@ class Raster:
         src_nodata = src_band.GetNoDataValue()
         src_ds = None  # Close dataset
 
-        # Prepare processing options with proper nodata handling
-        # Use -9999 as default nodata if source doesn't have one
+        # prepare processing options with proper nodata handling
+        # use -9999 as default nodata if source doesn't have one
         output_nodata = src_nodata if src_nodata is not None else -9999.0
 
-        # Build options: merge user options with essential settings
+        # build options: merge user options with essential settings
         if options is not None:
-            # Try to extract keyword arguments from existing options
+            # try to extract keyword arguments from existing options
             try:
                 import inspect
-                # Get the options as keyword arguments if possible
+                # get the options as keyword arguments if possible
                 opts_dict = {}
                 for key in dir(options):
                     if not key.startswith('_'):
@@ -1531,23 +1497,23 @@ class Raster:
                         if val is not None and not callable(val):
                             opts_dict[key] = val
 
-                # Add our required options
+                # add our required options
                 opts_dict['computeEdges'] = True
                 opts_dict['format'] = 'GTiff'
 
-                # Create new options with merged settings
+                # create new options with merged settings
                 options = gdal.DEMProcessingOptions(**opts_dict)
             except (TypeError, AttributeError, ImportError):
-                # If merging fails, create fresh options with just computeEdges
+                # if merging fails, create fresh options with just computeEdges
                 options = gdal.DEMProcessingOptions(computeEdges=True, format='GTiff')
         else:
-            # Create default options
+            # create default options
             options = gdal.DEMProcessingOptions(computeEdges=True, format='GTiff')
 
-        # Run GDAL DEM processing
+        # run GDAL DEM processing
         result_ds = gdal.DEMProcessing(output_path, str(dem_path), processing_mode, options=options)
 
-        # Explicitly set nodata value on output band
+        # explicitly set nodata value on output band
         if result_ds is not None:
             result_band = result_ds.GetRasterBand(1)
             result_band.SetNoDataValue(output_nodata)
@@ -1556,7 +1522,7 @@ class Raster:
 
         result_ds = None  # Close dataset
 
-        # Load as new Raster
+        # load as new Raster
         result = Raster.from_file(
             output_path,
             rtype=f"{processing_mode}",
@@ -1675,7 +1641,7 @@ class Raster:
         if output_path is None:
             output_path = f"{Path(self.filename).stem}_aspect.tif"
 
-        # Try to use zeroForFlat option (GDAL >= 3.4)
+        # try to use zeroForFlat option (GDAL >= 3.4)
         try:
             opts = gdal.DEMProcessingOptions(zeroForFlat=True, computeEdges=True)
         except TypeError:
@@ -1788,7 +1754,7 @@ class Raster:
         from rasterio.warp import calculate_default_transform, reproject, Resampling
         from rasterio.transform import xy as transform_xy
         
-        # Determine what transformations are needed
+        # determine what transformations are needed
         needs_epoch = dynamic_target_epoch is not None
         needs_vertical = (
             source_vertical_kind is not None or 
@@ -1799,11 +1765,11 @@ class Raster:
         needs_horizontal = target_crs is not None
         needs_align = align_to is not None
         
-        # If nothing to do, return self
+        # if nothing to do, return self
         if not any([needs_epoch, needs_vertical, needs_horizontal, needs_align]):
             return self
         
-        # Get source CRS and epoch
+        # get source CRS and epoch
         src_crs = _ensure_crs_obj(self.crs) if self.crs else None
         if src_crs is None and (needs_horizontal or needs_epoch):
             raise ValueError("Raster CRS is required for horizontal/epoch transformation")
@@ -1814,7 +1780,7 @@ class Raster:
         
         dst_epoch = float(dynamic_target_epoch) if dynamic_target_epoch else src_epoch
         
-        # Determine target CRS
+        # determine target CRS
         if target_crs is not None:
             dst_crs = _ensure_crs_obj(target_crs)
         elif align_to is not None and align_to.crs is not None:
@@ -1822,7 +1788,7 @@ class Raster:
         else:
             dst_crs = src_crs
         
-        # Determine vertical parameters
+        # determine vertical parameters
         src_vert_kind = source_vertical_kind
         if src_vert_kind is None:
             is_ortho = getattr(self, 'is_orthometric', None)
@@ -1835,7 +1801,7 @@ class Raster:
         src_geoid = source_geoid_model or getattr(self, 'current_geoid_model', None) or getattr(self, 'geoid_model', None)
         dst_geoid = target_geoid_model or src_geoid
         
-        # Build output path
+        # build output path
         if output_path is None:
             base, ext = os.path.splitext(self.filename)
             parts = []
@@ -1851,12 +1817,12 @@ class Raster:
             output_path = f"{base}_{tag}{ext}"
         
         if os.path.exists(output_path) and not overwrite:
-            # Return existing raster instead of raising error (caching behavior)
+            # return existing Raster instead of raising error (caching behavior)
             import sys
             print(f"Loading existing warped raster: {os.path.basename(output_path)}", file=sys.stderr)
             return Raster.from_file(output_path)
         
-        # Select resampling method
+        # select resampling method
         resampling_map = {
             'nearest': Resampling.nearest,
             'bilinear': Resampling.bilinear,
@@ -1875,21 +1841,21 @@ class Raster:
             src_height = src.height
             src_nodata = src_profile.get('nodata', src.nodata)
             
-            # Mask nodata
+            # mask nodata
             if src_nodata is not None:
                 nodata_mask = (src_data == src_nodata) | np.isnan(src_data)
                 src_data[nodata_mask] = np.nan
         
-        # Determine output grid
+        # determine output grid
         if align_to is not None:
-            # Match the target raster's grid exactly
+            # match the target raster's grid exactly
             with rasterio.open(align_to.filename) as ref:
                 dst_transform = ref.transform
                 dst_width = ref.width
                 dst_height = ref.height
                 dst_crs = _ensure_crs_obj(ref.crs) if ref.crs else dst_crs
         elif needs_horizontal or needs_epoch:
-            # Calculate appropriate output grid
+            # calculate appropriate output grid
             if resolution is not None:
                 dst_transform, dst_width, dst_height = calculate_default_transform(
                     src_crs, dst_crs, src_width, src_height, *src_bounds,
@@ -1900,7 +1866,7 @@ class Raster:
                     src_crs, dst_crs, src_width, src_height, *src_bounds,
                 )
         else:
-            # Keep same grid
+            # keep same grid
             dst_transform = src_transform
             dst_width = src_width
             dst_height = src_height
@@ -1908,17 +1874,17 @@ class Raster:
         dst_width = int(dst_width)
         dst_height = int(dst_height)
         
-        # Perform coordinate transformation (horizontal + epoch)
+        # perform coordinate transformation (horizontal + epoch)
         if needs_epoch or (needs_horizontal and not src_crs.equals(dst_crs)):
-            # Create output coordinate arrays
+            # create output coordinate arrays
             rows_dst, cols_dst = np.indices((dst_height, dst_width))
             xs_dst, ys_dst = transform_xy(dst_transform, rows_dst, cols_dst, offset='center')
             xs_dst = np.array(xs_dst, dtype='float64')
             ys_dst = np.array(ys_dst, dtype='float64')
             
-            # Transform destination coords back to source coords
+            # transform destination coords back to source coords
             if needs_epoch:
-                # Use dynamic transform with epoch
+                # use dynamic transform with epoch
                 z0 = np.zeros_like(xs_dst, dtype='float64')
                 x_src_flat, y_src_flat, _ = apply_dynamic_transform(
                     x=xs_dst.ravel(),
@@ -1932,16 +1898,16 @@ class Raster:
                 x_src = x_src_flat.reshape(xs_dst.shape)
                 y_src = y_src_flat.reshape(ys_dst.shape)
             else:
-                # Simple CRS transform (no epoch)
+                # simple CRS transform (no epoch)
                 from pyproj import Transformer
                 transformer = Transformer.from_crs(dst_crs, src_crs, always_xy=True)
                 x_src, y_src = transformer.transform(xs_dst, ys_dst)
             
-            # Convert to pixel coordinates in source
+            # convert to pixel coordinates in source
             inv_src_transform = ~src_transform
             cols_src, rows_src = inv_src_transform * (x_src, y_src)
             
-            # Interpolate
+            # interpolate
             dst_data = np.full((dst_height, dst_width), np.nan, dtype='float64')
             
             if interpolation_method.lower() == 'nearest':
@@ -1953,7 +1919,7 @@ class Raster:
                 )
                 dst_data[valid] = src_data[rows_nn[valid], cols_nn[valid]]
             else:
-                # Bilinear interpolation
+                # bilinear interpolation
                 rows0 = np.floor(rows_src).astype(int)
                 cols0 = np.floor(cols_src).astype(int)
                 rows1 = rows0 + 1
@@ -1965,7 +1931,7 @@ class Raster:
                 )
 
                 if np.any(valid):
-                    # Flatten everything for easier indexing
+                    # flatten everything for easier indexing
                     valid_flat = valid.ravel()
                     rows0_flat = rows0.ravel()
                     cols0_flat = cols0.ravel()
@@ -1974,7 +1940,7 @@ class Raster:
                     rows_src_flat = rows_src.ravel()
                     cols_src_flat = cols_src.ravel()
 
-                    # Get the valid pixel indices for interpolation
+                    # get the valid pixel indices for interpolation
                     r0 = rows0_flat[valid_flat]
                     c0 = cols0_flat[valid_flat]
                     r1 = rows1_flat[valid_flat]
@@ -1982,74 +1948,74 @@ class Raster:
                     dr = rows_src_flat[valid_flat] - r0
                     dc = cols_src_flat[valid_flat] - c0
 
-                    # Get corner values
+                    # get corner values
                     v00 = src_data[r0, c0]
                     v10 = src_data[r1, c0]
                     v01 = src_data[r0, c1]
                     v11 = src_data[r1, c1]
 
-                    # Bilinear weights
+                    # bilinear weights
                     w00 = (1 - dr) * (1 - dc)
                     w10 = dr * (1 - dc)
                     w01 = (1 - dr) * dc
                     w11 = dr * dc
 
-                    # NaN-aware bilinear interpolation
-                    # Create validity masks for each corner
+                    # naN-aware bilinear interpolation
+                    # create validity masks for each corner
                     valid00 = ~np.isnan(v00)
                     valid10 = ~np.isnan(v10)
                     valid01 = ~np.isnan(v01)
                     valid11 = ~np.isnan(v11)
 
-                    # Zero out weights for invalid corners
+                    # zero out weights for invalid corners
                     w00_adj = np.where(valid00, w00, 0.0)
                     w10_adj = np.where(valid10, w10, 0.0)
                     w01_adj = np.where(valid01, w01, 0.0)
                     w11_adj = np.where(valid11, w11, 0.0)
 
-                    # Sum of valid weights
+                    # sum of valid weights
                     weight_sum = w00_adj + w10_adj + w01_adj + w11_adj
 
-                    # Replace NaN values with 0 for computation
+                    # replace NaN values with 0 for computation
                     v00_safe = np.where(valid00, v00, 0.0)
                     v10_safe = np.where(valid10, v10, 0.0)
                     v01_safe = np.where(valid01, v01, 0.0)
                     v11_safe = np.where(valid11, v11, 0.0)
 
-                    # Compute weighted sum
+                    # compute weighted sum
                     weighted_sum = v00_safe * w00_adj + v10_safe * w10_adj + v01_safe * w01_adj + v11_safe * w11_adj
 
-                    # Normalize by weight sum (avoid division by zero)
-                    # If no valid corners, result is NaN
+                    # normalize by weight sum (avoid division by zero)
+                    # if no valid corners, result is NaN
                     interp = np.where(weight_sum > 0, weighted_sum / weight_sum, np.nan)
 
-                    # Assign to output (using flat indexing)
+                    # assign to output (using flat indexing)
                     dst_data_flat = dst_data.ravel()
                     dst_data_flat[valid_flat] = interp
                     dst_data = dst_data_flat.reshape(dst_height, dst_width)
         else:
-            # No coordinate transform needed, just copy or use rasterio reproject
+            # no coordinate transform needed, just copy or use rasterio reproject
             if needs_align and align_to is not None:
-                # Check if grids are already identical
+                # check if grids are already identical
                 transform_match = src_transform == dst_transform
                 width_match = src_width == dst_width
                 height_match = src_height == dst_height
 
-                # Compare CRS more robustly
+                # compare CRS more robustly
                 try:
                     crs_match = src_crs.equals(dst_crs)
                 except:
                     crs_match = (src_crs == dst_crs)
 
-                # If transform and dimensions match, grids are functionally identical
+                # if transform and dimensions match, grids are functionally identical
                 # even if CRS metadata differs (e.g., WKT variations of same EPSG code)
                 grids_functionally_identical = transform_match and width_match and height_match
 
                 if grids_functionally_identical:
-                    # Grids are already aligned - just copy the data
+                    # grids are already aligned - just copy the data
                     dst_data = src_data.copy()
                 else:
-                    # Need to resample to different grid
+                    # need to resample to different grid
                     dst_data = np.full((dst_height, dst_width), np.nan, dtype='float64')
                     reproject(
                         source=src_data,
@@ -2065,15 +2031,15 @@ class Raster:
             else:
                 dst_data = src_data.copy()
 
-        # Apply vertical datum transformation to Z values
+        # apply vertical datum transformation to Z values
         _applied_geoid = None  # track which geoid was applied for metadata
         _geoid_direction = None
         if needs_vertical and src_vert_kind and dst_vert_kind and src_vert_kind != dst_vert_kind:
-            # Get geoid grid
+            # get geoid grid
             from .geoid_utils import select_geoid_grid
 
             if src_vert_kind == "ellipsoidal" and dst_vert_kind == "orthometric":
-                # Need to subtract geoid height: h_ortho = h_ellip - N
+                # need to subtract geoid height: h_ortho = h_ellip - N
                 geoid_name = dst_geoid or src_geoid
                 if geoid_name:
                     dst_data = self._apply_geoid_to_raster(
@@ -2083,7 +2049,7 @@ class Raster:
                     _applied_geoid = geoid_name
                     _geoid_direction = "subtract"
             elif src_vert_kind == "orthometric" and dst_vert_kind == "ellipsoidal":
-                # Need to add geoid height: h_ellip = h_ortho + N
+                # need to add geoid height: h_ellip = h_ortho + N
                 geoid_name = src_geoid or dst_geoid
                 if geoid_name:
                     dst_data = self._apply_geoid_to_raster(
@@ -2093,8 +2059,8 @@ class Raster:
                     _applied_geoid = geoid_name
                     _geoid_direction = "add"
         elif needs_vertical and src_geoid and dst_geoid and src_geoid != dst_geoid:
-            # Geoid-to-geoid transform (both orthometric but different geoids)
-            # Verify both are actually orthometric before proceeding
+            # geoid-to-geoid transform (both orthometric but different geoids)
+            # verify both are actually orthometric before proceeding
             src_is_ortho = getattr(self, 'is_orthometric', None)
             if src_is_ortho is False:
                 import warnings as _w
@@ -2113,22 +2079,22 @@ class Raster:
             _applied_geoid = dst_geoid
             _geoid_direction = f"geoid_to_geoid: +{src_geoid} -{dst_geoid}"
         
-        # Handle nodata - always use a canonical nodata value
-        # Use source nodata if available, otherwise default to NaN for float data
+        # handle nodata - always use a canonical nodata value
+        # use source nodata if available, otherwise default to NaN for float data
         nan_mask = np.isnan(dst_data)
         if src_nodata is not None and not np.isnan(src_nodata):
-            # Use the source's numeric nodata value
+            # use the source's numeric nodata value
             if np.any(nan_mask):
                 dst_data[nan_mask] = src_nodata
             out_nodata = src_nodata
         else:
-            # Use NaN as canonical nodata for float data
+            # use NaN as canonical nodata for float data
             out_nodata = np.nan
 
-        # Write output
+        # write output
         dst_data_float32 = dst_data.astype('float32')
 
-        # Prepare output CRS
+        # prepare output CRS
         if hasattr(dst_crs, 'to_wkt'):
             output_crs_wkt = dst_crs.to_wkt()
         else:
@@ -2148,14 +2114,14 @@ class Raster:
         with rasterio.open(output_path, 'w', **dst_profile) as dst:
             dst.write(dst_data_float32, 1)
 
-        # Load output raster and update metadata
+        # load output Raster and update metadata
         out_raster = Raster.from_file(
             output_path,
             rtype=getattr(self, 'rtype', None),
             metadata={},
         )
 
-        # Use the actually-applied geoid for metadata (may differ from dst_geoid
+        # use the actually-applied geoid for metadata (may differ from dst_geoid
         # when e.g. only source geoid was available for an ellip→ortho transform)
         effective_geoid = _applied_geoid if _applied_geoid else dst_geoid
         out_raster.add_metadata(
@@ -2164,11 +2130,11 @@ class Raster:
             epoch=dst_epoch,
         )
 
-        # Update vertical kind tracking
+        # update vertical kind tracking
         if dst_vert_kind:
             out_raster.is_orthometric = (dst_vert_kind.lower() == "orthometric")
 
-        # Preserve vertical CRS from source when only horizontal transform occurred
+        # preserve vertical CRS from source when only horizontal transform occurred
         if not needs_vertical:
             for attr in ('current_vertical_crs', 'original_vertical_crs',
                          'is_orthometric', 'current_geoid_model', 'original_geoid_model'):
@@ -2176,21 +2142,21 @@ class Raster:
                 if src_val is not None:
                     setattr(out_raster, attr, src_val)
 
-        # Preserve vertical unit from source raster (AFTER add_metadata to avoid being overwritten)
+        # preserve vertical unit from source Raster (AFTER add_metadata to avoid being overwritten)
         if hasattr(self, 'current_vertical_unit') and self.current_vertical_unit.name != "unknown":
             out_raster.current_vertical_unit = self.current_vertical_unit
             out_raster.current_vertical_units = self.current_vertical_units
             out_raster.original_vertical_unit = self.original_vertical_unit
             out_raster.original_vertical_units = self.original_vertical_units
 
-        # Record geoid direction in metadata for provenance
+        # record geoid direction in metadata for provenance
         if _geoid_direction is not None:
             if not hasattr(out_raster, '_geoid_transform_info'):
                 out_raster._geoid_transform_info = {}
             out_raster._geoid_transform_info['direction'] = _geoid_direction
             out_raster._geoid_transform_info['geoid_model'] = _applied_geoid
 
-        # Record in CRS history
+        # record in CRS history
         if getattr(self, 'crs_history', None) is not None:
             try:
                 transform_desc = []
@@ -2252,7 +2218,7 @@ class Raster:
         from pyproj import Transformer
         from pyproj import CRS as _CRS
 
-        # Resolve geoid grid
+        # resolve geoid grid
         from .geoid_utils import select_geoid_grid
         try:
             geoid_grid, _ = select_geoid_grid(geoid_name, verbose=False)
@@ -2261,16 +2227,16 @@ class Raster:
         
         height, width = data.shape
         
-        # Get coordinates of all pixels
+        # get coordinates of all pixels
         rows, cols = np.indices((height, width))
         xs, ys = transform_xy(transform, rows, cols, offset='center')
         xs = np.array(xs, dtype='float64')
         ys = np.array(ys, dtype='float64')
         
-        # Transform to geographic if needed (geoid grids expect lat/lon)
+        # transform to geographic if needed (geoid grids expect lat/lon)
         crs_obj = _ensure_crs_obj(crs)
         if not crs_obj.is_geographic:
-            # Get geographic CRS
+            # get geographic CRS
             if crs_obj.geodetic_crs:
                 geog_crs = crs_obj.geodetic_crs
             else:
@@ -2281,31 +2247,31 @@ class Raster:
         else:
             lons, lats = xs, ys
         
-        # Sample geoid at these locations
+        # sample geoid at these locations
         try:
-            # Use PROJ to get geoid heights
+            # use PROJ to get geoid heights
             from pyproj import Transformer
             
-            # Create a transformer that applies the geoid
-            # We transform from geographic 3D with h=0 to get geoid undulation
+            # create a Transformer that applies the geoid
+            # we transform from geographic 3D with h=0 to get geoid undulation
             geog_3d = _CRS.from_epsg(4979)  # WGS84 3D
             
-            # Build a pipeline to get geoid heights
-            # The vgridshift gives us the geoid undulation
+            # build a Pipeline to get geoid heights
+            # the vgridshift gives us the geoid undulation
             import subprocess
             
-            # Simpler approach: use PROJ cs2cs or a vertical shift grid directly
-            # For now, use a simplified approximation or external library
+            # simpler approach: use PROJ cs2cs or a vertical shift grid directly
+            # for now, use a simplified approximation or external library
             
-            # Try using pyproj's transformation with vertical CRS
-            # This is a placeholder - actual implementation depends on available tools
+            # try using pyproj's transformation with vertical CRS
+            # this is a placeholder - actual implementation depends on available tools
             
-            # Fallback: try to load geoid grid directly with rasterio
+            # fallback: try to load geoid grid directly with rasterio
             try:
                 import rasterio
                 from scipy.interpolate import RegularGridInterpolator
                 
-                # Try common paths for PROJ data
+                # try common paths for PROJ data
                 import os
                 proj_data = os.environ.get('PROJ_DATA', '/usr/share/proj')
                 geoid_path = None
@@ -2317,7 +2283,7 @@ class Raster:
                         break
                 
                 if geoid_path is None:
-                    # Try as absolute path
+                    # try as absolute path
                     if os.path.exists(geoid_grid):
                         geoid_path = geoid_grid
                 
@@ -2334,12 +2300,12 @@ class Raster:
                     geoid_transform = geoid_src.transform
                     geoid_bounds = geoid_src.bounds
 
-                    # Create interpolator
+                    # create interpolator
                     geoid_height, geoid_width = geoid_data.shape
                     geoid_xs = np.linspace(geoid_bounds.left, geoid_bounds.right, geoid_width)
                     geoid_ys = np.linspace(geoid_bounds.top, geoid_bounds.bottom, geoid_height)
 
-                    # Convert longitudes to 0-360 if geoid grid uses that convention
+                    # convert longitudes to 0-360 if geoid grid uses that convention
                     lons_adjusted = lons.copy()
                     if geoid_bounds.left > 180:  # Geoid uses 0-360 convention
                         lons_adjusted = np.where(lons_adjusted < 0, lons_adjusted + 360, lons_adjusted)
@@ -2352,11 +2318,11 @@ class Raster:
                         fill_value=0.0,
                     )
 
-                    # Sample geoid heights
+                    # sample geoid heights
                     points = np.column_stack([lats.ravel(), lons_adjusted.ravel()])
                     N = interp(points).reshape(height, width)
 
-                    # Apply correction
+                    # apply correction
                     result = data.copy()
                     if direction == "add":
                         result = result + N
@@ -2810,14 +2776,14 @@ class Raster:
             epoch=dst_epoch,
         )
 
-        # Record provenance: epoch came from a dynamic transformation
+        # record provenance: epoch came from a dynamic transformation
         if not hasattr(out_raster, 'time_info') or not out_raster.time_info:
             out_raster.time_info = {}
         out_raster.time_info['epoch'] = dst_epoch
         out_raster.time_info['epoch_source'] = 'dynamic_epoch_transform'
         out_raster.time_info['source_epoch'] = src_epoch
 
-        # Preserve vertical metadata from source (horizontal-only CRS shouldn't wipe it)
+        # preserve vertical metadata from source (horizontal-only CRS shouldn't wipe it)
         for attr in ('is_orthometric', 'current_vertical_crs', 'original_vertical_crs',
                      'current_vertical_unit', 'current_vertical_units',
                      'original_vertical_unit', 'original_vertical_units'):

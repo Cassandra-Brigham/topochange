@@ -1,8 +1,6 @@
 """Composite variogram model builder.
 
-This module provides tools for building and evaluating composite (nested)
-variogram models from individual components.
-"""
+variogram models from individual components."""
 
 from __future__ import annotations
 
@@ -49,7 +47,7 @@ class CompositeVariogramModel:
     include_nugget: bool = True
     registry: VariogramModelRegistry = field(default_factory=lambda: MODEL_REGISTRY, repr=False)
     
-    # Set after initialization
+    # set after initialization
     _components: List[VariogramModelSpec] = field(default_factory=list, repr=False)
     _params: Optional[np.ndarray] = field(default=None, repr=False)
     _param_names: List[str] = field(default_factory=list, repr=False)
@@ -57,7 +55,7 @@ class CompositeVariogramModel:
     
     def __post_init__(self):
         """Initialize components and parameter structure."""
-        # Validate combination
+        # validate combination
         valid, msg = self.registry.validate_combination(
             self.component_names, self.include_nugget
         )
@@ -65,12 +63,12 @@ class CompositeVariogramModel:
             raise ValueError(msg)
         self._validation_message = msg
         
-        # Get component specs
+        # get component specs
         self._components = [
             self.registry.get_model(name) for name in self.component_names
         ]
         
-        # Build parameter name list and slices
+        # build parameter name list and slices
         self._param_names = []
         self._param_slices = {}
         idx = 0
@@ -138,7 +136,7 @@ class CompositeVariogramModel:
         if len(params) != self.n_params:
             raise ValueError(f"Expected {self.n_params} parameters, got {len(params)}")
 
-        # Validate parameters for each component before accepting
+        # validate parameters for each component before accepting
         idx = 0
         for i, spec in enumerate(self._components):
             n_params = len(spec.param_names)
@@ -154,7 +152,7 @@ class CompositeVariogramModel:
             raise ValueError("Parameters not set. Call set_params() first.")
         
         name = self.component_names[component_idx]
-        # Handle duplicate names
+        # handle duplicate names
         count = self.component_names[:component_idx + 1].count(name)
         key = f"{name}_{component_idx}" if self.component_names.count(name) > 1 else name
         
@@ -187,12 +185,12 @@ class CompositeVariogramModel:
         h = np.asarray(h, dtype=float)
         gamma = np.zeros_like(h)
         
-        # Add each component
+        # add each component
         for i, spec in enumerate(self._components):
             comp_params = self.get_component_params(i)
             gamma += spec.func(h, *comp_params)
         
-        # Add nugget
+        # add nugget
         if self.include_nugget:
             gamma += nugget_func(h, self.get_nugget())
         
@@ -221,14 +219,14 @@ class CompositeVariogramModel:
         for i, spec in enumerate(self._components):
             base_guess = spec.default_guess(lags, variogram)
             
-            # Adjust sill to share variance among components
+            # adjust sill to share variance among components
             if spec.has_sill and n_bounded > 0:
                 base_guess[0] = max_gamma * 0.8 / max(n_bounded, 1)
             
-            # Spread ranges for multi-component bounded models
+            # spread ranges for multi-component bounded models
             if spec.is_bounded and 'range' in spec.param_names:
                 range_idx = spec.param_names.index('range')
-                # Distribute ranges: 1/4, 1/2, 3/4 of max lag
+                # distribute ranges: 1/4, 1/2, 3/4 of max lag
                 range_factor = (i + 1) / (len(self._components) + 1)
                 base_guess[range_idx] = max_lag * range_factor
             
@@ -311,7 +309,7 @@ class CompositeVariogramModel:
         
         result = {'nugget': self.get_nugget()}
         
-        # Determine reference lag for unbounded
+        # determine reference lag for unbounded
         if reference_lag is None:
             reference_lag = 1000  # Default
             for i, spec in enumerate(self._components):
@@ -334,7 +332,7 @@ class CompositeVariogramModel:
                 result[key] = variance
                 stationary_total += variance
             elif not spec.is_bounded:
-                # Compute variance at reference lag
+                # compute variance at reference lag
                 h_ref = np.array([reference_lag])
                 variance_at_ref = spec.func(h_ref, *self.get_component_params(i))[0]
                 result[key] = variance_at_ref
@@ -342,7 +340,7 @@ class CompositeVariogramModel:
         
         result['total_stationary'] = stationary_total
         
-        # Total at reference lag
+        # total at reference lag
         h_ref = np.array([reference_lag])
         result['total_at_reference'] = float(self(h_ref)[0])
         

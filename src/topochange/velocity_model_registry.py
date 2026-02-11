@@ -1,14 +1,4 @@
-# velocity_model_registry.py
-"""
-Enhanced velocity/deformation model registry and selection system.
-
-Provides:
-  1. Loading models from YAML registry
-  2. Spatial and temporal filtering
-  3. Auto-download capability with timeout and progress
-  4. User custom model support
-  5. Integration with PROJ pipelines
-"""
+"""velocity/deformation model registry and selection."""
 
 from __future__ import annotations
 
@@ -33,9 +23,7 @@ except ImportError:
 from pyproj import datadir
 
 
-# ============================================================================
-# Download utilities with timeout and progress
-# ============================================================================
+# download utilities with timeout and progress
 
 DEFAULT_DOWNLOAD_TIMEOUT = 300  # 5 minutes
 DEFAULT_CHUNK_SIZE = 8192
@@ -68,11 +56,11 @@ def _download_with_progress(
         TimeoutError: If download takes too long
     """
     try:
-        # Try using requests if available (better timeout handling)
+        # try using requests if available (better timeout handling)
         import requests
         return _download_with_requests(url, output_path, timeout, chunk_size, verbose, progress_callback)
     except ImportError:
-        # Fall back to urllib
+        # fall back to urllib
         return _download_with_urllib(url, output_path, timeout, chunk_size, verbose, progress_callback)
 
 
@@ -96,7 +84,7 @@ def _download_with_requests(
         total_size = int(response.headers.get('content-length', 0))
         downloaded = 0
 
-        # Ensure parent directory exists
+        # ensure parent directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(output_path, 'wb') as f:
@@ -150,7 +138,7 @@ def _download_with_urllib(
     try:
         socket.setdefaulttimeout(timeout)
 
-        # Ensure parent directory exists
+        # ensure parent directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         with urllib.request.urlopen(url, timeout=min(30, timeout)) as response:
@@ -190,10 +178,6 @@ def _download_with_urllib(
     finally:
         socket.setdefaulttimeout(old_timeout)
 
-
-# ============================================================================
-# Core data structures
-# ============================================================================
 
 @dataclass
 class VelocityModelInfo:
@@ -266,9 +250,7 @@ class VelocityModelInfo:
         )
 
 
-# ============================================================================
-# Registry loading
-# ============================================================================
+# registry loading
 
 def load_registry(
     registry_path: Optional[Path] = None,
@@ -286,10 +268,10 @@ def load_registry(
     """
     models = []
     
-    # Load from YAML if available
+    # load from YAML if available
     if registry_path or include_defaults:
         if registry_path is None:
-            # Look for default registry in common locations
+            # look for default registry in common locations
             search_paths = [
                 Path(__file__).parent / "data" / "velocity_models_registry.yaml",
                 Path(__file__).parent / "velocity_models_registry.yaml",  # Fallback
@@ -316,7 +298,7 @@ def load_registry(
                         except Exception as e:
                             warnings.warn(f"Failed to load model '{model_name}': {e}")
     
-    # Add built-in defaults if no registry loaded or requested
+    # add built-in defaults if no registry loaded or requested
     if include_defaults and not models:
         models.extend(_get_builtin_models())
     
@@ -386,9 +368,7 @@ def _get_builtin_models() -> List[VelocityModelInfo]:
     ]
 
 
-# ============================================================================
-# File resolution and download
-# ============================================================================
+# file resolution and download
 
 def _proj_data_dirs() -> List[Path]:
     """Find PROJ resource directories."""
@@ -436,16 +416,16 @@ def find_model_file(
             print(f"No files specified for model '{model.name}'")
         return None
     
-    # Search PROJ data directories
+    # search PROJ data directories
     proj_dirs = _proj_data_dirs()
     
     for file_pattern in model.files:
-        # Check if it's a glob pattern or exact filename
+        # check if it's a glob pattern or exact filename
         is_pattern = any(c in file_pattern for c in ['*', '?', '[', ']'])
         
         for base_dir in proj_dirs:
             if is_pattern:
-                # Use glob to find matching files
+                # use glob to find matching files
                 matches = list(base_dir.glob(file_pattern))
                 if matches:
                     filepath = str(matches[0])
@@ -455,7 +435,7 @@ def find_model_file(
                     model.filepath = filepath
                     return filepath
             else:
-                # Exact filename
+                # exact filename
                 candidate = base_dir / file_pattern
                 if candidate.exists():
                     filepath = str(candidate)
@@ -465,7 +445,7 @@ def find_model_file(
                     model.filepath = filepath
                     return filepath
     
-    # Not found locally - try to download if allowed
+    # not found locally - try to download if allowed
     if auto_download and model.download:
         if verbose:
             print(f"Model '{model.name}' not found locally, attempting download...")
@@ -503,7 +483,7 @@ def download_model(
             print(f"No download method specified for '{model.name}'")
         return None
     
-    # Get target directory (prefer user data dir)
+    # get target directory (prefer user data dir)
     target_dir = None
     try:
         ud = datadir.get_user_data_dir()
@@ -514,7 +494,7 @@ def download_model(
         pass
     
     if not target_dir:
-        # Fallback to first writable PROJ dir
+        # fallback to first writable PROJ dir
         for pd in _proj_data_dirs():
             if os.access(pd, os.W_OK):
                 target_dir = pd
@@ -525,7 +505,7 @@ def download_model(
             print("No writable PROJ data directory found")
         return None
     
-    # Get timeout from download config or use default
+    # get timeout from download config or use default
     timeout = model.download.get("timeout", DEFAULT_DOWNLOAD_TIMEOUT)
 
     if method == "cdn_direct":
@@ -535,7 +515,7 @@ def download_model(
                 print(f"No URLs specified for '{model.name}'")
             return None
 
-        # Try each URL
+        # try each URL
         for url in urls:
             try:
                 filename = url.split("/")[-1]
@@ -568,7 +548,7 @@ def download_model(
         return None
     
     elif method == "http_scrape":
-        # Scrape webpage for matching files
+        # scrape webpage for matching files
         base_url = model.download.get("base_url")
         pattern = model.download.get("pattern")
 
@@ -584,7 +564,7 @@ def download_model(
             with urllib.request.urlopen(base_url, timeout=30) as resp:
                 html = resp.read().decode("utf-8", errors="replace")
 
-            # Find all matching hrefs
+            # find all matching hrefs
             pat_re = re.compile(pattern)
             hrefs = re.findall(r'href=["\']([^"\']+)["\']', html)
             matches = [h for h in hrefs if pat_re.search(h)]
@@ -594,7 +574,7 @@ def download_model(
                     print(f"No matching files found at {base_url}", file=sys.stderr)
                 return None
 
-            # Download first match
+            # download first match
             file_url = matches[0]
             if not file_url.startswith("http"):
                 file_url = base_url.rstrip("/") + "/" + file_url.lstrip("/")
@@ -608,14 +588,14 @@ def download_model(
 
             _download_with_progress(file_url, output_path, timeout=timeout, verbose=verbose)
 
-            # Check if it needs extraction
+            # check if it needs extraction
             if model.download.get("extract") and filename.endswith(".zip"):
                 if verbose:
                     print(f"Extracting {output_path}...", file=sys.stderr)
                 with zipfile.ZipFile(output_path, 'r') as zf:
                     zf.extractall(target_dir)
 
-                # Find the main file after extraction
+                # find the main file after extraction
                 if model.files:
                     for file_pattern in model.files:
                         extracted = list(target_dir.glob(file_pattern))
@@ -641,7 +621,7 @@ def download_model(
             return None
     
     elif method == "http_direct":
-        # Direct HTTP download (similar to cdn_direct but may need conversion)
+        # direct HTTP download (similar to cdn_direct but may need conversion)
         urls = model.download.get("urls", [])
         fallback_urls = model.download.get("fallback", [])
         all_urls = urls + fallback_urls
@@ -651,7 +631,7 @@ def download_model(
                 print(f"No URLs specified for '{model.name}'", file=sys.stderr)
             return None
 
-        # Use specified raw filename or extract from URL
+        # use specified raw filename or extract from URL
         raw_filename = model.download.get("raw_filename")
 
         for url in all_urls:
@@ -718,10 +698,10 @@ def _convert_model_if_needed(
     Returns:
         Path to PROJ-compatible file (may be converted or original)
     """
-    # Check if model needs conversion
+    # check if model needs conversion
     needs_conversion = model.download.get("requires_conversion", False)
     
-    # Also check by format
+    # also check by format
     if not needs_conversion and model.format:
         non_proj_formats = [
             "NetCDF", "netcdf", "OpenSHA", "ASCII", "csv", "KMZ"
@@ -729,10 +709,10 @@ def _convert_model_if_needed(
         needs_conversion = any(fmt in model.format for fmt in non_proj_formats)
     
     if not needs_conversion:
-        # Already PROJ-compatible
+        # already PROJ-compatible
         return downloaded_path
     
-    # Try to import converter
+    # try to import converter
     try:
         from .velocity_model_converters import convert_model
     except ImportError:
@@ -742,25 +722,25 @@ def _convert_model_if_needed(
                   f"Install required packages: rasterio, xarray, scipy")
         return downloaded_path
     
-    # Generate output path for converted file
+    # generate output path for converted file
     downloaded = Path(downloaded_path)
     converted_path = downloaded.parent / f"{model.name}_velocity.tif"
     
-    # Check if already converted
+    # check if already converted
     if converted_path.exists():
         if verbose:
             print(f"Using existing converted file: {converted_path}")
         model.filepath = str(converted_path)
         return str(converted_path)
     
-    # Perform conversion
+    # perform conversion
     if verbose:
         print(f"Converting {model.name} to PROJ-compatible GeoTIFF...")
         print(f"  Source: {downloaded_path}")
         print(f"  Output: {converted_path}")
     
     try:
-        # Get conversion options from model metadata
+        # get conversion options from model metadata
         conv_opts = model.download.get("conversion_options", {})
         
         result = convert_model(
@@ -773,7 +753,7 @@ def _convert_model_if_needed(
         model.filepath = str(result)
         
         if verbose:
-            print(f"✓ Conversion successful: {result}")
+            print(f"Conversion successful: {result}")
         
         return str(result)
         
@@ -800,19 +780,17 @@ def download_and_convert_model(
     Returns:
         Path to PROJ-ready file, or None if failed
     """
-    # Download first
+    # download first
     downloaded = download_model(model, verbose=verbose, auto_convert=False)
     
     if not downloaded:
         return None
     
-    # Convert if needed
+    # convert if needed
     return _convert_model_if_needed(model, downloaded, verbose=verbose)
 
 
-# ============================================================================
-# Spatial and temporal filtering
-# ============================================================================
+# spatial and temporal filtering
 
 def _bbox_intersects(
     a: Tuple[float, float, float, float],
@@ -875,11 +853,11 @@ def filter_models(
     """
     filtered = models
     
-    # Spatial filter
+    # spatial filter
     if bbox is not None:
         filtered = [m for m in filtered if _bbox_intersects(bbox, m.bbox)]
     
-    # Temporal filter
+    # temporal filter
     if epoch_range is not None:
         t0, t1 = min(epoch_range), max(epoch_range)
         tol = 1e-6
@@ -888,20 +866,18 @@ def filter_models(
             if not (m.epoch_min - tol > t0 or m.epoch_max + tol < t1)
         ]
     
-    # Kind filter
+    # kind filter
     if kind is not None:
         filtered = [m for m in filtered if m.kind == kind]
     
-    # Local availability filter
+    # local availability filter
     if require_local:
         filtered = [m for m in filtered if find_model_file(m, auto_download=False)]
     
     return filtered
 
 
-# ============================================================================
-# Model selection logic
-# ============================================================================
+# model selection logic
 
 def select_velocity_model(
     bbox_4326: Tuple[float, float, float, float],
@@ -940,14 +916,14 @@ def select_velocity_model(
       5. Preferred kind
       6. Central epoch closest to transformation midpoint
     """
-    # Load models if not provided
+    # load models if not provided
     if models is None:
         models = load_registry(registry_path=registry_path)
     
     if not models:
         raise ValueError("No velocity models available")
     
-    # Filter by spatial and temporal coverage
+    # filter by spatial and temporal coverage
     t0, t1 = min(src_epoch, dst_epoch), max(src_epoch, dst_epoch)
     candidates = filter_models(
         models,
@@ -962,8 +938,8 @@ def select_velocity_model(
             f"Available models: {[m.name for m in models]}"
         )
 
-    # Cache file existence checks to avoid redundant filesystem operations
-    # This is called multiple times during sorting and later for display
+    # cache file existence checks to avoid redundant filesystem operations
+    # this is called multiple times during sorting and later for display
     file_exists_cache: Dict[str, bool] = {}
 
     def _check_file_exists_cached(m: VelocityModelInfo) -> bool:
@@ -972,7 +948,7 @@ def select_velocity_model(
             file_exists_cache[m.name] = find_model_file(m, auto_download=False) is not None
         return file_exists_cache[m.name]
 
-    # Manual choice override
+    # manual choice override
     if choice is not None:
         if not (0 <= choice < len(candidates)):
             raise IndexError(
@@ -981,7 +957,7 @@ def select_velocity_model(
         selected = candidates[choice]
         reason = "user override"
     else:
-        # Auto-selection scoring
+        # auto-selection scoring
         mid_epoch = 0.5 * (t0 + t1)
 
         def score_model(m: VelocityModelInfo) -> Tuple:
@@ -991,7 +967,7 @@ def select_velocity_model(
             file_rank = 0 if has_files else 1
 
             # 2. Prefer models that fully contain the AOI (not just intersect)
-            # Use containment score: 0 = fully contains, 1 = partial overlap
+            # use containment score: 0 = fully contains, 1 = partial overlap
             containment = 0 if _bbox_contains(m.bbox, bbox_4326) else 1
 
             # 3. Prefer smaller bbox (more specific)
@@ -1004,7 +980,7 @@ def select_velocity_model(
             if m.central_epoch is not None:
                 epoch_dev = abs(m.central_epoch - mid_epoch)
             else:
-                # No central epoch - use midpoint of valid range
+                # no central epoch - use midpoint of valid range
                 model_mid = 0.5 * (m.epoch_min + m.epoch_max)
                 epoch_dev = abs(model_mid - mid_epoch)
 
@@ -1013,7 +989,7 @@ def select_velocity_model(
         sorted_candidates = sorted(candidates, key=score_model)
         selected = sorted_candidates[0]
 
-        # Warn if selected model doesn't fully contain the AOI
+        # warn if selected model doesn't fully contain the AOI
         if not _bbox_contains(selected.bbox, bbox_4326):
             warnings.warn(
                 f"Selected model '{selected.name}' only partially covers the AOI. "
@@ -1023,7 +999,7 @@ def select_velocity_model(
 
         reason = "auto-selected best match"
     
-    # Ensure file is available
+    # ensure file is available
     if auto_download:
         filepath = find_model_file(selected, auto_download=True, verbose=verbose)
         selected.filepath = filepath  # FIX: Store the resolved filepath on the model object
@@ -1033,11 +1009,11 @@ def select_velocity_model(
                 f"download failed. Pipeline may fail."
             )
     else:
-        # Even if auto_download is False, try to find existing file
+        # even if auto_download is False, try to find existing file
         filepath = find_model_file(selected, auto_download=False, verbose=False)
         selected.filepath = filepath  # FIX: Store the resolved filepath
     
-    # Print selection report
+    # print selection report
     if verbose:
         print(f"\nVelocity models for bbox={bbox_4326}, epochs [{t0:.1f}, {t1:.1f}]:", file=sys.stderr)
         print(f"  Total available: {len(models)}", file=sys.stderr)
@@ -1045,9 +1021,9 @@ def select_velocity_model(
 
         for i, m in enumerate(candidates):
             is_selected = (m is selected)
-            # Use cached check to avoid redundant filesystem operations
+            # use cached check to avoid redundant filesystem operations
             local_str = "local" if _check_file_exists_cached(m) else "remote"
-            contains_aoi = "✓ contains AOI" if _bbox_contains(m.bbox, bbox_4326) else "⚠ partial coverage"
+            contains_aoi = "contains AOI" if _bbox_contains(m.bbox, bbox_4326) else "WARNING: partial coverage"
             mark = f"  <== {reason}" if is_selected else ""
 
             print(f"  [{i}] {m.name}", file=sys.stderr)
@@ -1065,9 +1041,7 @@ def select_velocity_model(
     return selected, candidates
 
 
-# ============================================================================
-# Custom user model support
-# ============================================================================
+# custom user model support
 
 def create_custom_model(
     name: str,
@@ -1122,9 +1096,7 @@ def create_custom_model(
     return model
 
 
-# ============================================================================
-# Pre-download utilities
-# ============================================================================
+# pre-download utilities
 
 def ensure_velocity_model_available(
     bbox_4326: Tuple[float, float, float, float],
@@ -1173,7 +1145,7 @@ def ensure_velocity_model_available(
         print(f"  AOI bbox: {bbox_4326}", file=sys.stderr)
         print(f"  Epoch range: {src_epoch} -> {dst_epoch}", file=sys.stderr)
 
-    # First check if model is already available locally
+    # first check if model is already available locally
     try:
         model, candidates = select_velocity_model(
             bbox_4326=bbox_4326,
@@ -1185,14 +1157,14 @@ def ensure_velocity_model_available(
 
         if model.filepath and Path(model.filepath).exists():
             if verbose:
-                print(f"\n✓ Model already available locally: {model.filepath}", file=sys.stderr)
+                print(f"\nModel already available locally: {model.filepath}", file=sys.stderr)
             return model
 
     except ValueError:
-        # No local model found, will need to download
+        # no local model found, will need to download
         pass
 
-    # Need to download
+    # need to download
     if verbose:
         print(f"\nModel not available locally, downloading...", file=sys.stderr)
 
@@ -1211,7 +1183,7 @@ def ensure_velocity_model_available(
         )
 
     if verbose:
-        print(f"\n✓ Model ready: {model.filepath}", file=sys.stderr)
+        print(f"\nModel ready: {model.filepath}", file=sys.stderr)
 
     return model
 
@@ -1241,9 +1213,7 @@ def list_available_models(
     )
 
 
-# ============================================================================
-# Convenience exports
-# ============================================================================
+# convenience exports
 
 __all__ = [
     "VelocityModelInfo",

@@ -1,5 +1,4 @@
-"""
-Comprehensive test suite for CompositeVariogramModel class.
+"""Comprehensive test suite for CompositeVariogramModel class.
 
 Tests the composite variogram model builder including:
 - Single and multi-component model construction
@@ -8,8 +7,7 @@ Tests the composite variogram model builder including:
 - Sill and stationarity calculations
 - Variance decomposition
 - Covariance functions
-- Default parameter guesses and bounds
-"""
+- Default parameter guesses and bounds"""
 
 import pytest
 import numpy as np
@@ -77,7 +75,7 @@ class TestCompositeVariogramConstruction:
             include_nugget=True
         )
 
-        # Duplicate names should be disambiguated with indices
+        # duplicate names should be disambiguated with indices
         assert model.param_names == [
             'spherical_0_sill', 'spherical_0_range',
             'spherical_1_sill', 'spherical_1_range',
@@ -292,7 +290,7 @@ class TestEvaluation:
         h_scalar = 50.0
         gamma = model(h_scalar)
 
-        # Should return array
+        # should return array
         assert isinstance(gamma, np.ndarray)
         expected = spherical(np.array([50.0]), 0.5, 100.0)
         assert_array_almost_equal(gamma, expected)
@@ -368,7 +366,7 @@ class TestStationarity:
 
     def test_unbounded_components_list(self):
         """Test unbounded_components property."""
-        # Can't combine two unbounded models, so test with one bounded + one unbounded
+        # can't combine two unbounded models, so test with one bounded + one unbounded
         model_power = CompositeVariogramModel(['spherical', 'power'], include_nugget=False)
         assert model_power.unbounded_components == ['power']
         assert model_power.bounded_components == ['spherical']
@@ -519,7 +517,7 @@ class TestVarianceDecomposition:
 
         decomp = model.decompose_variance()
 
-        # Should have keys with indices to disambiguate
+        # should have keys with indices to disambiguate
         assert 'spherical_0' in decomp
         assert 'spherical_1' in decomp
 
@@ -536,7 +534,7 @@ class TestCovarianceFunction:
         cov_func = model.get_covariance_function()
         assert cov_func is not None
 
-        # C(h) = sill - γ(h)
+        # c(h) = sill - γ(h)
         h = np.array([0.0, 50.0, 100.0, 200.0])
         cov = cov_func(h)
         expected_sill = sill + nugget
@@ -558,11 +556,11 @@ class TestCovarianceFunction:
         cov_func = model.get_covariance_function()
         total_sill = model.get_total_sill()
 
-        # At h=0, variogram is 0 (with nugget), so C(0) = sill
+        # at h=0, variogram is 0 (with nugget), so C(0) = sill
         c_at_zero = cov_func(np.array([0.0]))[0]
         expected = total_sill
 
-        # Note: Due to nugget at h>0, C(0) = total_sill
+        # note: Due to nugget at h>0, C(0) = total_sill
         assert_allclose(c_at_zero, expected)
 
     def test_covariance_at_large_lag(self):
@@ -574,7 +572,7 @@ class TestCovarianceFunction:
 
         cov_func = model.get_covariance_function()
 
-        # At large h > range, γ = sill, so C(h) = sill - sill = 0
+        # at large h > range, γ = sill, so C(h) = sill - sill = 0
         c_large = cov_func(np.array([1000.0]))[0]
         assert_allclose(c_large, 0.0, atol=1e-10)
 
@@ -590,8 +588,8 @@ class TestCovarianceFunction:
         """Test that get_covariance_function before set_params raises error."""
         model = CompositeVariogramModel(['spherical'], include_nugget=True)
 
-        # Note: This will raise when trying to compute sill before params set
-        # The error will come from get_total_sill called inside
+        # note: This will raise when trying to compute sill before params set
+        # the error will come from get_total_sill called inside
         with pytest.raises(ValueError, match="Parameters not set"):
             model.get_covariance_function()
 
@@ -637,7 +635,7 @@ class TestDefaultGuessAndBounds:
         guess = model.default_guess(lags, variogram)
 
         assert len(guess) == 5  # sill1, range1, sill2, range2, nugget
-        # Ranges should be spread differently for multi-component
+        # ranges should be spread differently for multi-component
         assert guess[1] < guess[3]  # range1 < range2
 
     def test_bounds_spherical(self):
@@ -772,7 +770,7 @@ class TestPropertyAccess:
         names1 = model.param_names
         names2 = model.param_names
 
-        # Should be equal but different objects
+        # should be equal but different objects
         assert names1 == names2
         assert names1 is not names2  # Different object instances
 
@@ -782,30 +780,30 @@ class TestIntegrationScenarios:
 
     def test_spherical_exponential_nugget_workflow(self):
         """Test complete workflow with spherical + exponential + nugget model."""
-        # Create model
+        # create model
         model = CompositeVariogramModel(
             ['spherical', 'exponential'],
             include_nugget=True
         )
 
-        # Generate synthetic data
+        # generate synthetic data
         h = np.array([0.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0])
         true_params = [0.4, 80.0, 0.35, 250.0, 0.05]
         model.set_params(true_params)
 
-        # Evaluate model
+        # evaluate model
         gamma = model(h)
 
-        # Verify properties
+        # verify properties
         assert model.is_stationary
         assert_allclose(model.get_total_sill(), 0.8, atol=1e-6)
         assert_allclose(model.get_nugget(), 0.05)
 
-        # Check variance decomposition
+        # check variance decomposition
         decomp = model.decompose_variance()
         assert_allclose(decomp['total_stationary'], 0.8, atol=1e-6)
 
-        # Check covariance function
+        # check covariance function
         cov_func = model.get_covariance_function()
         assert cov_func is not None
         c_at_zero = cov_func(np.array([0.0]))[0]
@@ -815,19 +813,19 @@ class TestIntegrationScenarios:
         """Test workflow with Matérn model and nugget."""
         model = CompositeVariogramModel(['matern'], include_nugget=True)
 
-        # Set realistic parameters
+        # set realistic parameters
         sill, range_, nu, nugget = 0.6, 150.0, 1.5, 0.1
         model.set_params([sill, range_, nu, nugget])
 
-        # Evaluate
+        # evaluate
         h = np.array([0.0, 30.0, 100.0, 300.0])
         gamma = model(h)
 
-        # Verify
+        # verify
         assert_allclose(gamma[0], nugget_func(h[0], nugget))  # At h=0, only nugget
         assert gamma[1] < gamma[-1]  # Should increase with distance
 
-        # Component evaluation
+        # component evaluation
         gamma_matern = model.evaluate_component(0, h)
         expected_matern = matern(h, sill, range_, nu)
         assert_array_almost_equal(gamma_matern, expected_matern)
@@ -839,18 +837,18 @@ class TestIntegrationScenarios:
             include_nugget=True
         )
 
-        # Set parameters
+        # set parameters
         sill, range_ = 0.3, 100.0
         scale, exponent = 0.05, 1.5
         nugget = 0.05
         model.set_params([sill, range_, scale, exponent, nugget])
 
-        # Verify non-stationarity
+        # verify non-stationarity
         assert not model.is_stationary
         assert model.get_total_sill() is None
         assert_allclose(model.get_stationary_sill(), 0.35)  # sill + nugget
 
-        # Decomposition
+        # decomposition
         decomp = model.decompose_variance()
         assert 'power_is_nonstationary' in decomp
         assert_allclose(decomp['total_stationary'], 0.35)
@@ -862,11 +860,11 @@ class TestIntegrationScenarios:
             include_nugget=False
         )
 
-        # Valid parameters: 2πr/λ > 1
+        # valid parameters: 2πr/λ > 1
         valid_params = [0.5, 100.0, 500.0]  # 2π*100/500 ≈ 1.26 > 1
         model.set_params(valid_params)  # Should not raise
 
-        # Invalid parameters: 2πr/λ < 1
+        # invalid parameters: 2πr/λ < 1
         invalid_params = [0.5, 10.0, 100.0]  # 2π*10/100 ≈ 0.63 < 1
         with pytest.raises(ValueError, match="positive definiteness"):
             model.set_params(invalid_params)
@@ -894,7 +892,7 @@ class TestEdgeCases:
         h = np.array([0.0, 100.0, 1000.0])
         gamma = model(h)
 
-        # Values should be small relative to lag
+        # values should be small relative to lag
         assert gamma[0] < gamma[1] < gamma[2]
 
     def test_zero_nugget(self):
@@ -942,7 +940,7 @@ class TestEdgeCases:
         h = np.array([0.0, 100.0, 300.0])
         gamma = model(h)
 
-        # Verify composition
+        # verify composition
         comp0 = model.evaluate_component(0, h)
         comp1 = model.evaluate_component(1, h)
         comp2 = model.evaluate_component(2, h)
@@ -978,10 +976,10 @@ class TestNumericalStability:
 
         h_values = [0.0, 25.0, 50.0, 100.0, 200.0]
 
-        # Vectorized
+        # vectorized
         gamma_vec = model(np.array(h_values))
 
-        # Scalar
+        # scalar
         gamma_scalar = np.array([model(np.array([h]))[0] for h in h_values])
 
         assert_array_almost_equal(gamma_vec, gamma_scalar)
@@ -994,7 +992,7 @@ class TestNumericalStability:
         h = np.array([0.0, 1e3, 1e4, 1e5])
         gamma = model(h)
 
-        # For exponential, should approach sill
+        # for exponential, should approach sill
         assert_allclose(gamma[-1], 0.5, rtol=1e-4)
 
     def test_very_small_lag_distances(self):
@@ -1005,5 +1003,6 @@ class TestNumericalStability:
         h = np.array([0.0, 1e-6, 1e-3, 1.0])
         gamma = model(h)
 
-        # Should be monotonically increasing for spherical
+        # should be monotonically increasing for spherical
         assert np.all(np.diff(gamma) >= -1e-10)  # Allow for numerical errors
+

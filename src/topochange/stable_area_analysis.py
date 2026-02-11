@@ -1,12 +1,4 @@
-"""Define and analyze stable/unstable areas for topographic differencing.
-
-Provides:
-- Interactive mapping widgets for drawing polygons on difference rasters
-- Rasterizing polygons against raster masks
-- Computing descriptive statistics within regions
-
-Designed for use in Jupyter notebook environments.
-"""
+"""interactive stable/unstable area definition and analysis."""
 from __future__ import annotations
 
 import sys
@@ -87,29 +79,29 @@ class TopoMapInteractor:
         """
         from .raster import Raster
         
-        # Load rasters
+        # load rasters
         self.topo_diff = Raster.from_file(str(topo_diff_path))
         self.hillshade = Raster.from_file(str(hillshade_path))
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Storage for geometries and names
+        # storage for geometries and names
         self.stable_geoms: List[Polygon] = []
         self.unstable_geoms: List[Polygon] = []
         self.stable_names: List[str] = []
         self.unstable_names: List[str] = []
         self.current_category: Optional[str] = None
 
-        # Auto-derive settings
+        # auto-derive settings
         self.auto_stable_from_unstable = auto_stable_from_unstable
         self.derive_min_area = derive_min_area
         self.simplify_tolerance = simplify_tolerance
 
-        # Track whether user has manually defined stable areas
+        # track whether user has manually defined stable areas
         # (if True, don't auto-derive stable from unstable)
         self._user_drew_stable = False
 
-        # Compute lat/lon bounds
+        # compute lat/lon bounds
         with rasterio.open(self.topo_diff.filename) as ds:
             bounds = ds.bounds
             crs = ds.crs
@@ -118,14 +110,14 @@ class TopoMapInteractor:
         east, north = transformer.transform(bounds.right, bounds.top)
         self.latlon_bounds = ((south, west), (north, east))
 
-        # Overlay style
+        # overlay style
         self.overlay_cmap = overlay_cmap
         self.overlay_dpi = overlay_dpi
         self.overlay_vmin = overlay_vmin
         self.overlay_vmax = overlay_vmax
         self.overlay_format = overlay_format
 
-        # Initial overlay image (cache-busted filename)
+        # initial overlay image (cache-busted filename)
         self._overlay_image = self._new_overlay_image_path(format=overlay_format)
         self._generate_overlay_image(
             self._overlay_image,
@@ -137,12 +129,12 @@ class TopoMapInteractor:
         )
         self._overlay_data_url = self._image_to_data_url(self._overlay_image)
 
-        # Initialize map
+        # initialize map
         center = ((north + south) / 2, (west + east) / 2)
         self.map = Map(center=center, zoom=zoom, layout=Layout(height=map_size[0], width=map_size[1]))
 
-        # Add image overlay - try both data URL and file path
-        # Some environments prefer file:// URLs
+        # add image overlay - try both data URL and file path
+        # some environments prefer file:// URLs
         print(f"Map bounds (lat/lon): {self.latlon_bounds}", file=sys.stderr)
         print(f"Map center: {center}", file=sys.stderr)
         print(f"Using overlay: {self._overlay_image}", file=sys.stderr)
@@ -150,12 +142,12 @@ class TopoMapInteractor:
         self.overlay_layer = ImageOverlay(url=self._overlay_data_url, bounds=self.latlon_bounds, opacity=1.0)
         self.map.add_layer(self.overlay_layer)
 
-        # Legend
+        # legend
         if HAS_LEGEND:
             legend_dict = {'Stable Area': 'green', 'Feature of Interest': 'red'}
             self.map.add_control(LegendControl(legend_dict, title='Legend'))
 
-        # GeoJSON layers
+        # geoJSON layers
         self.geojson_stable = GeoJSON(
             data={"type": "FeatureCollection", "features": []},
             style={"color": "green", "fillColor": "green", "fillOpacity": 0.3}
@@ -167,13 +159,13 @@ class TopoMapInteractor:
         self.map.add_layer(self.geojson_stable)
         self.map.add_layer(self.geojson_unstable)
 
-        # Draw control
+        # draw control
         self.draw_control = DrawControl(polygon={"shapeOptions": {"weight": 2, "fillOpacity": 0.3}})
         for attr in ('circle', 'circlemarker', 'polyline', 'rectangle'):
             setattr(self.draw_control, attr, {})
         self.draw_control.on_draw(self._handle_draw)
 
-        # Buttons
+        # buttons
         self.btn_stable = Button(description='Stable', layout={'width': '80px'})
         self.btn_unstable = Button(description='Unstable', layout={'width': '80px'})
         self.btn_stable.style.button_color = 'lightgreen'
@@ -183,12 +175,12 @@ class TopoMapInteractor:
         btn_box = HBox([Label(' Draw mode:'), self.btn_stable, self.btn_unstable])
         self.map.add_control(WidgetControl(widget=btn_box, position='topright'))
 
-        # Preload polygon files (if provided)
+        # preload Polygon files (if provided)
         if stable_path is not None:
             self.load_stable_polygons(stable_path, name_field=stable_name_field, assume_crs=assume_input_crs)
         if unstable_path is not None:
             self.load_unstable_polygons(unstable_path, name_field=unstable_name_field, assume_crs=assume_input_crs)
-            # Only auto-derive stable if user hasn't provided stable areas
+            # only auto-derive stable if user hasn't provided stable areas
             if self.auto_stable_from_unstable and not self._user_drew_stable:
                 self.derive_stable_from_unstable(replace=True)
 
@@ -203,7 +195,7 @@ class TopoMapInteractor:
         path = Path(path)
         ext = path.suffix.lower()
 
-        # Determine MIME type
+        # determine MIME type
         if ext in ['.jpg', '.jpeg']:
             mime_type = 'image/jpeg'
         elif ext == '.png':
@@ -232,7 +224,7 @@ class TopoMapInteractor:
         import matplotlib.pyplot as plt
         from matplotlib.colors import Normalize
 
-        # Read raster data
+        # read Raster data
         with rasterio.open(self.topo_diff.filename) as src:
             data = src.read(1).astype(float)
             nodata = src.nodata
@@ -240,19 +232,19 @@ class TopoMapInteractor:
 
         print(f"Overlay: shape={data.shape}, nodata={nodata}", file=sys.stderr)
 
-        # Mask nodata and invalid values
+        # mask nodata and invalid values
         if nodata is not None:
             data = np.where(data == nodata, np.nan, data)
         data = np.where(~np.isfinite(data), np.nan, data)
 
-        # Check if we have any valid data
+        # check if we have any valid data
         valid_count = np.sum(~np.isnan(data))
         print(f"Valid pixels: {valid_count:,} / {data.size:,} ({100*valid_count/data.size:.1f}%)", file=sys.stderr)
 
         if np.all(np.isnan(data)):
             print("[WARNING] All data values are NaN/nodata. Overlay will be invisible.", file=sys.stderr)
 
-        # Determine color limits from valid data only
+        # determine color limits from valid data only
         valid_data = data[~np.isnan(data)]
         if len(valid_data) > 0:
             if vmin is None and vmax is None:
@@ -275,8 +267,8 @@ class TopoMapInteractor:
             vmin_val, vmax_val = -1.0, 1.0  # Fallback if no valid data
             print(f"No valid data. Using fallback color range [{vmin_val}, {vmax_val}].", file=sys.stderr)
 
-        # For JPEG, we need a background color (no transparency)
-        # For PNG, we can use transparency
+        # for JPEG, we need a background color (no transparency)
+        # for PNG, we can use transparency
         if format.lower() in ['jpg', 'jpeg']:
             use_transparent = False
             facecolor = 'white'
@@ -284,7 +276,7 @@ class TopoMapInteractor:
             use_transparent = True
             facecolor = 'none'
 
-        # Create figure - simpler approach with direct pixel mapping
+        # create figure - simpler approach with direct pixel mapping
         fig_width_inch = width / dpi
         fig_height_inch = height / dpi
 
@@ -292,7 +284,7 @@ class TopoMapInteractor:
         ax.set_position([0, 0, 1, 1])  # Fill entire figure
         ax.set_axis_off()
 
-        # Plot with colormap
+        # plot with colormap
         cm = plt.get_cmap(cmap)
         if use_transparent:
             cm.set_bad(alpha=0)  # Transparent for NaN (PNG only)
@@ -302,7 +294,7 @@ class TopoMapInteractor:
         im = ax.imshow(data, cmap=cm, vmin=vmin_val, vmax=vmax_val,
                        interpolation='nearest', aspect='auto', origin='upper')
 
-        # Save image
+        # save image
         save_kwargs = {
             'format': 'jpeg' if format.lower() in ['jpg', 'jpeg'] else 'png',
             'bbox_inches': 'tight',
@@ -314,8 +306,8 @@ class TopoMapInteractor:
         if use_transparent:
             save_kwargs['transparent'] = True
 
-        # Note: quality parameter is handled differently for JPEG in matplotlib
-        # It's passed via pil_kwargs, not directly
+        # note: quality parameter is handled differently for JPEG in matplotlib
+        # it's passed via pil_kwargs, not directly
         if format.lower() in ['jpg', 'jpeg']:
             save_kwargs['pil_kwargs'] = {'quality': 95}
 
@@ -333,7 +325,7 @@ class TopoMapInteractor:
         else:
             self.draw_control.polygon = {"shapeOptions": {"color": "red", "fillColor": "red", "fillOpacity": 0.3}}
         
-        # Add draw control if not already added
+        # add draw control if not already added
         if self.draw_control not in self.map.controls:
             self.map.add_control(self.draw_control)
 
@@ -343,42 +335,41 @@ class TopoMapInteractor:
         if action != 'created' or self.current_category is None:
             return
         
-        # Extract polygon from GeoJSON
+        # extract Polygon from GeoJSON
         geom = shape(geo_json['geometry'])
         
-        # Transform from WGS84 to raster CRS
+        # transform from WGS84 to Raster CRS
         with rasterio.open(self.topo_diff.filename) as src:
             raster_crs = src.crs
         
         transformer = Transformer.from_crs('EPSG:4326', raster_crs, always_xy=True)
         poly_native = shapely_transform(transformer.transform, geom)
         
-        # Store geometry
+        # store geometry
         if self.current_category == 'stable':
             self.stable_geoms.append(poly_native)
             self.stable_names.append(f"Stable_{len(self.stable_geoms)}")
-            # Track that user has manually drawn stable areas
+            # track that user has manually drawn stable areas
             self._user_drew_stable = True
         else:
             self.unstable_geoms.append(poly_native)
             self.unstable_names.append(f"FOI_{len(self.unstable_geoms)}")
 
-            # Auto-derive stable areas only if:
+            # auto-derive stable areas only if:
             # 1. auto_stable_from_unstable is enabled, AND
             # 2. User has NOT manually drawn any stable areas
             if self.auto_stable_from_unstable and not getattr(self, '_user_drew_stable', False):
                 self.derive_stable_from_unstable(replace=True)
         
-        # Update GeoJSON layers
+        # update GeoJSON layers
         self._update_geojson_layers()
 
     # -------------------- GeoJSON updates --------------------
     def _update_geojson_layers(self):
         """Refresh the GeoJSON layers on the map."""
-        # Stable features
         stable_features = []
         for geom, name in zip(self.stable_geoms, self.stable_names):
-            # Transform to WGS84 for display
+            # transform to WGS84 for display
             with rasterio.open(self.topo_diff.filename) as src:
                 raster_crs = src.crs
             transformer = Transformer.from_crs(raster_crs, 'EPSG:4326', always_xy=True)
@@ -395,7 +386,7 @@ class TopoMapInteractor:
             "features": stable_features
         }
         
-        # Unstable features
+        # unstable features
         unstable_features = []
         for geom, name in zip(self.unstable_geoms, self.unstable_names):
             with rasterio.open(self.topo_diff.filename) as src:
@@ -424,16 +415,16 @@ class TopoMapInteractor:
         """Load stable area polygons from a file."""
         gdf = gpd.read_file(path)
         
-        # Handle missing CRS
+        # handle missing CRS
         if gdf.crs is None and assume_crs is not None:
             gdf = gdf.set_crs(assume_crs)
         
-        # Transform to raster CRS
+        # transform to Raster CRS
         with rasterio.open(self.topo_diff.filename) as src:
             raster_crs = src.crs
         gdf = gdf.to_crs(raster_crs)
         
-        # Extract geometries and names
+        # extract geometries and names
         for idx, row in gdf.iterrows():
             geom = row.geometry
             if isinstance(geom, MultiPolygon):
@@ -446,7 +437,7 @@ class TopoMapInteractor:
                 name = row[name_field] if name_field and name_field in row else f"Stable_{len(self.stable_geoms)}"
                 self.stable_names.append(str(name))
 
-        # Mark that user has provided stable areas (don't auto-derive)
+        # mark that user has provided stable areas (don't auto-derive)
         if self.stable_geoms:
             self._user_drew_stable = True
 
@@ -461,16 +452,16 @@ class TopoMapInteractor:
         """Load unstable area (FOI) polygons from a file."""
         gdf = gpd.read_file(path)
         
-        # Handle missing CRS
+        # handle missing CRS
         if gdf.crs is None and assume_crs is not None:
             gdf = gdf.set_crs(assume_crs)
         
-        # Transform to raster CRS
+        # transform to Raster CRS
         with rasterio.open(self.topo_diff.filename) as src:
             raster_crs = src.crs
         gdf = gdf.to_crs(raster_crs)
         
-        # Extract geometries and names
+        # extract geometries and names
         for idx, row in gdf.iterrows():
             geom = row.geometry
             if isinstance(geom, MultiPolygon):
@@ -498,35 +489,35 @@ class TopoMapInteractor:
         if not self.unstable_geoms:
             return
         
-        # Get valid data mask from raster
+        # get valid data mask from Raster
         with rasterio.open(self.topo_diff.filename) as src:
             data = src.read(1)
             nodata = src.nodata
             transform = src.transform
             
-            # Create mask of valid pixels
+            # create mask of valid pixels
             valid = np.ones(data.shape, dtype=np.uint8)
             if nodata is not None:
                 valid[data == nodata] = 0
             valid[np.isnan(data)] = 0
             
-            # Vectorize valid areas
+            # vectorize valid areas
             shapes_gen = rfeatures.shapes(valid, mask=valid.astype(bool), transform=transform)
             valid_polys = [shape(geom) for geom, val in shapes_gen if val == 1]
         
         if not valid_polys:
             return
         
-        # Union all valid areas
+        # union all valid areas
         valid_union = unary_union(valid_polys)
         
-        # Union all unstable areas
+        # union all unstable areas
         unstable_union = unary_union(self.unstable_geoms)
         
-        # Compute difference
+        # compute difference
         stable_derived = valid_union.difference(unstable_union)
         
-        # Handle multi-part results
+        # handle multi-part results
         if isinstance(stable_derived, MultiPolygon):
             derived_polys = list(stable_derived.geoms)
         elif isinstance(stable_derived, Polygon):
@@ -534,15 +525,15 @@ class TopoMapInteractor:
         else:
             derived_polys = []
         
-        # Filter by area if requested
+        # filter by area if requested
         if self.derive_min_area is not None:
             derived_polys = [p for p in derived_polys if p.area >= self.derive_min_area]
         
-        # Simplify if requested
+        # simplify if requested
         if self.simplify_tolerance is not None:
             derived_polys = [p.simplify(self.simplify_tolerance) for p in derived_polys]
         
-        # Update stable geometries
+        # update stable geometries
         if replace:
             self.stable_geoms = derived_polys
             self.stable_names = [f"Stable_{i+1}" for i in range(len(derived_polys))]
@@ -793,3 +784,4 @@ class StableAreaAnalyzer:
             records.append(df)
         result = pd.concat(records, ignore_index=True).set_index('area_id')
         return result
+

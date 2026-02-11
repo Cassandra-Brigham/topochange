@@ -1,19 +1,17 @@
-"""
-Tests for metadata propagation through transformation chains.
+"""Tests for metadata propagation through transformation chains.
 
 These tests target the five structural gaps identified in the audit:
 
-1. Cross-function metadata propagation — does metadata survive a chain of
+1. Cross-function metadata propagation : does metadata survive a chain of
    transforms?  (The "baton-passing" problem.)
-2. Error-path / failure-mode tests — what happens when grids are missing,
+2. Error-path / failure-mode tests : what happens when grids are missing,
    PROJ errors occur, etc.?
-3. Negative-case property tests — edge-case inputs to the CRS auto-sync
+3. Negative-case property tests : edge-case inputs to the CRS auto-sync
    property setters.
-4. Provenance / audit-trail tests — is the audit trail complete after a
+4. Provenance / audit-trail tests : is the audit trail complete after a
    pipeline run?
-5. Pipeline integration tests — does the full multi-step pipeline preserve
-   metadata end-to-end?
-"""
+5. Pipeline integration tests : does the full multi-step pipeline preserve
+   metadata end-to-end?"""
 
 import os
 import warnings
@@ -35,9 +33,7 @@ from topochange.crs_utils import (
 from topochange.unit_utils import UnitInfo, get_vertical_unit
 
 
-# =============================================================================
-# Helpers
-# =============================================================================
+# helpers
 
 def _make_raster(
     tmp_path,
@@ -98,13 +94,11 @@ def _make_raster_pair(tmp_path, crs1="EPSG:32610", crs2="EPSG:32610",
     return RasterPair(r1, r2)
 
 
-# =============================================================================
 # 1. Cross-function metadata propagation tests
-#
-# These test that metadata set on a raster *before* a transform survives
+# 
+# these test that metadata set on a Raster *before* a transform survives
 # the transform.  The original tests only checked output CRS, not the
 # vertical/epoch/geoid metadata that rides along.
-# =============================================================================
 
 class TestMetadataSurvivesHorizontalReproject:
     """H1 regression: vertical metadata must survive horizontal-only warp."""
@@ -115,16 +109,16 @@ class TestMetadataSurvivesHorizontalReproject:
         vert_wkt = CRS.from_epsg(5703).to_wkt()  # NAVD88
         r.current_vertical_crs = vert_wkt
         r.is_orthometric = True
-        # Set geoid model directly (bypass select_geoid_grid resolution)
+        # set geoid model directly (bypass select_geoid_grid resolution)
         r.current_geoid_model = "us_noaa_geoid18_conus.tif"
 
         out = r.warp_raster(target_crs="EPSG:32611", overwrite=True)
 
-        # Horizontal should change
+        # horizontal should change
         out_epsg = CRS.from_wkt(out.current_horizontal_crs).to_epsg()
         assert out_epsg == 32611
 
-        # Vertical must survive
+        # vertical must survive
         assert out.current_vertical_crs is not None, (
             "Vertical CRS was wiped during horizontal-only reprojection"
         )
@@ -174,13 +168,11 @@ class TestMetadataSurvivesGridAlignment:
         assert out.is_orthometric is True
 
 
-# =============================================================================
 # 2. Error-path / failure-mode tests
-#
-# The original tests never exercised what happens when grids are missing,
+# 
+# the original tests never exercised what happens when grids are missing,
 # PROJ can't find a deformation model, or a transformation fails partway
 # through.
-# =============================================================================
 
 class TestTransformerWithEpochErrorPaths:
     """H2 regression: transformer_with_epoch must degrade gracefully."""
@@ -190,11 +182,11 @@ class TestTransformerWithEpochErrorPaths:
         src = CRS.from_epsg(32610)
         dst = CRS.from_epsg(32611)
 
-        # Patch at the import site — Transformer is imported locally inside
+        # patch at the import site : Transformer is imported locally inside
         # transformer_with_epoch, so we patch pyproj.Transformer
         with patch("pyproj.Transformer") as MockT:
-            # First call (epoch-aware) raises RuntimeError
-            # Second call (fallback) succeeds
+            # first call (epoch-aware) raises RuntimeError
+            # second call (fallback) succeeds
             mock_fallback = MagicMock()
             MockT.from_crs.side_effect = [RuntimeError("missing grid"), mock_fallback]
 
@@ -202,12 +194,12 @@ class TestTransformerWithEpochErrorPaths:
                 warnings.simplefilter("always")
                 result = transformer_with_epoch(src, dst, src_epoch=2011.0, dst_epoch=2020.0)
 
-            # Should have issued a warning
+            # should have issued a warning
             warning_msgs = [str(x.message) for x in w]
             assert any("falling back" in m.lower() for m in warning_msgs), (
                 f"Expected fallback warning, got: {warning_msgs}"
             )
-            # Should have called from_crs twice (epoch attempt + fallback)
+            # should have called from_crs twice (epoch attempt + fallback)
             assert MockT.from_crs.call_count == 2
 
     def test_type_error_still_handled(self):
@@ -256,7 +248,7 @@ class TestGeoidGridErrorPaths:
                 geoid_name="NONEXISTENT_GEOID_999",
                 direction="subtract",
             )
-            # If we got here without an exception, the old silent-failure bug is back
+            # if we got here without an exception, the old silent-failure bug is back
             assert not np.allclose(result, 42.0), (
                 "Geoid correction silently returned original data unchanged"
             )
@@ -275,17 +267,15 @@ class TestEpochSkipWarning:
             warnings.simplefilter("always")
             comparison = pair.check_all_match()
 
-        # The epoch comparison should note the mismatch exists
+        # the epoch comparison should note the mismatch exists
         # (exact behavior depends on check_epoch_match handling None)
 
 
-# =============================================================================
 # 3. Negative-case property auto-sync tests
-#
-# The original tests verified that setting properties with *valid compound*
+# 
+# the original tests verified that setting properties with *valid compound*
 # WKT worked.  They never tested what happens with 2D-only CRS, None,
 # empty strings, or contradictory component sets.
-# =============================================================================
 
 class TestCompoundCRSSetterEdgeCases:
     """Edge cases for the current_compound_crs property setter."""
@@ -300,7 +290,7 @@ class TestCompoundCRSSetterEdgeCases:
 
         r.current_compound_crs = None
 
-        # Components should still be there
+        # components should still be there
         assert r._current_horizontal_crs == horiz_wkt
         assert r._current_vertical_crs == vert_wkt
 
@@ -310,7 +300,7 @@ class TestCompoundCRSSetterEdgeCases:
         vert_wkt = CRS.from_epsg(5703).to_wkt()
         r._current_vertical_crs = vert_wkt
 
-        # Set compound to a 2D-only CRS
+        # set compound to a 2D-only CRS
         r.current_compound_crs = CRS.from_epsg(32611).to_wkt()
 
         assert r._current_vertical_crs is not None, (
@@ -323,11 +313,11 @@ class TestCompoundCRSSetterEdgeCases:
         r = _make_raster(tmp_path)
         r._current_vertical_crs = CRS.from_epsg(5703).to_wkt()
 
-        # Create a compound with a different vertical (EGM96 = 5773)
+        # create a compound with a different vertical (EGM96 = 5773)
         compound = create_compound_crs(CRS.from_epsg(32610), CRS.from_epsg(5773))
         r.current_compound_crs = compound.to_wkt()
 
-        # Vertical should now be 5773, not 5703
+        # vertical should now be 5773, not 5703
         parsed_vert = CRS.from_wkt(r._current_vertical_crs)
         assert parsed_vert.to_epsg() == 5773
 
@@ -396,13 +386,11 @@ class TestAddMetadataEdgeCases:
         )
 
 
-# =============================================================================
 # 4. Provenance / audit-trail tests
-#
-# The original tests never checked time_info, epoch_source, or crs_history
+# 
+# the original tests never checked time_info, epoch_source, or crs_history
 # contents after transformations.  These tests verify that the audit trail
 # is populated correctly.
-# =============================================================================
 
 class TestTimeInfoProvenance:
     """M2 regression: time_info must be updated after epoch changes."""
@@ -445,19 +433,19 @@ class TestCRSHistoryCompleteness:
     def test_convert_vertical_units_records_history(self, tmp_path):
         """convert_vertical_units should produce a crs_history entry."""
         r = _make_raster(tmp_path)
-        # Set up with foot units — UnitInfo(name, display_name, abbreviation, to_base_factor, category)
+        # set up with foot units : UnitInfo(name, display_name, abbreviation, to_base_factor, category)
         foot_unit = UnitInfo("foot", "foot", "ft", 0.3048, "linear")
         r.current_vertical_unit = foot_unit
         r.current_vertical_units = "foot"
 
-        # Initialize crs_history
+        # initialize crs_history
         from topochange.crs_history import CRSHistory
         r.crs_history = CRSHistory(r)
         initial_len = len(r.crs_history.history)
 
         result = r.convert_vertical_units(target_units="meter", overwrite=True)
 
-        # The history on *result* should have at least one entry beyond initial
+        # the history on *result* should have at least one entry beyond initial
         if result.crs_history is not None:
             assert len(result.crs_history.history) > initial_len, (
                 "convert_vertical_units did not record a CRS history entry"
@@ -468,7 +456,7 @@ class TestCRSHistoryCompleteness:
 
         Note: warp_raster records the transformation on the *source* raster's
         crs_history (self.crs_history), not on the output raster.  This is by
-        design — the source tracks its lineage of derived products.
+        design : the source tracks its lineage of derived products.
         """
         r = _make_raster(tmp_path)
         from topochange.crs_history import CRSHistory
@@ -477,7 +465,7 @@ class TestCRSHistoryCompleteness:
 
         out = r.warp_raster(target_crs="EPSG:32611", overwrite=True)
 
-        # The SOURCE raster's history should have a new transformation entry
+        # the SOURCE raster's history should have a new transformation entry
         entries = r.crs_history.history
         assert len(entries) > initial_len, (
             "warp_raster did not record any CRS history entry on the source raster"
@@ -488,13 +476,11 @@ class TestCRSHistoryCompleteness:
         )
 
 
-# =============================================================================
 # 5. Pipeline integration tests
-#
-# These test the full transformation pipeline end-to-end, which was never
+# 
+# these test the full transformation Pipeline end-to-end, which was never
 # exercised by the original test suite.  The key insight is that bugs in
 # metadata propagation only manifest when multiple transforms are chained.
-# =============================================================================
 
 class TestPipelineMetadataIntegration:
     """End-to-end tests for multi-step transformation metadata."""
@@ -509,18 +495,18 @@ class TestPipelineMetadataIntegration:
         r.is_orthometric = True
         r.current_vertical_crs = CRS.from_epsg(5703).to_wkt()
 
-        # Step 1: Horizontal reproject
+        # step 1: Horizontal reproject
         r2 = r.warp_raster(target_crs="EPSG:32611", overwrite=True)
 
-        # Metadata should survive step 1
+        # metadata should survive step 1
         assert r2.epoch == 2011.5
         assert r2.current_vertical_crs is not None
         assert r2.is_orthometric is True
 
-        # Step 2: Another horizontal warp (grid alignment sim)
+        # step 2: Another horizontal warp (grid alignment sim)
         r3 = r2.warp_raster(target_crs="EPSG:32611", overwrite=True)
 
-        # Everything should still be intact
+        # everything should still be intact
         assert r3.epoch == 2011.5
         assert r3.current_vertical_crs is not None
         assert r3.is_orthometric is True
@@ -532,16 +518,16 @@ class TestPipelineMetadataIntegration:
         """
         r = _make_raster(tmp_path)
 
-        # Set epoch first
+        # set epoch first
         r.add_metadata(epoch=2011.5)
         assert r.epoch == 2011.5
 
-        # Then set CRS
+        # then set CRS
         r.add_metadata(horizontal_CRS=CRS.from_epsg(32611))
         assert r.epoch == 2011.5  # epoch should survive
         assert CRS.from_wkt(r.current_horizontal_crs).to_epsg() == 32611
 
-        # Then set vertical
+        # then set vertical
         r.add_metadata(vertical_CRS=CRS.from_epsg(5703))
         assert r.epoch == 2011.5  # epoch should still survive
         assert CRS.from_wkt(r.current_horizontal_crs).to_epsg() == 32611
@@ -556,15 +542,15 @@ class TestPipelineMetadataIntegration:
         r.add_metadata(epoch=2011.5)
         r.is_orthometric = True
         r.current_vertical_crs = CRS.from_epsg(5703).to_wkt()
-        # Set geoid model directly to avoid select_geoid_grid lookup
+        # set geoid model directly to avoid select_geoid_grid lookup
         r.current_geoid_model = "us_noaa_geoid18_conus.tif"
 
-        # Chain of warps
+        # chain of warps
         warped = r
         for i in range(3):
             warped = warped.warp_raster(target_crs="EPSG:32610", overwrite=True)
 
-        # After 3 warps, everything should still be there
+        # after 3 warps, everything should still be there
         assert warped.epoch == 2011.5, f"Epoch lost after warp chain: {warped.epoch}"
         assert warped.current_vertical_crs is not None, "Vertical CRS lost after warp chain"
         assert warped.is_orthometric is True, "Orthometric flag lost after warp chain"
@@ -576,7 +562,7 @@ class TestPipelineMetadataIntegration:
 
         out = r.warp_raster(target_crs="EPSG:32611", overwrite=True)
 
-        # Output should retain epoch
+        # output should retain epoch
         assert out.epoch == 2011.5
 
 
@@ -612,9 +598,7 @@ class TestParseCRSComponentsEdgeCases:
         assert vert is not None
 
 
-# =============================================================================
-# Regression tests for specific bug scenarios
-# =============================================================================
+# regression tests for specific bug scenarios
 
 class TestBugScenarioRegressions:
     """
@@ -633,10 +617,10 @@ class TestBugScenarioRegressions:
         r.current_vertical_crs = vert_wkt
         r.is_orthometric = True
 
-        # Horizontal-only reproject
+        # horizontal-only reproject
         out = r.warp_raster(target_crs="EPSG:32611", overwrite=True)
 
-        # The bug was: out.current_vertical_crs == None here
+        # the bug was: out.current_vertical_crs == None here
         assert out.current_vertical_crs is not None, (
             "H1 REGRESSION: Horizontal warp wiped vertical CRS"
         )
@@ -648,26 +632,26 @@ class TestBugScenarioRegressions:
         """
         from topochange.rasterpair import RasterPair
 
-        # Source: has vertical CRS
+        # source: has vertical CRS
         r1 = _make_raster(tmp_path, "r1.tif", crs="EPSG:32610")
         r1.current_vertical_crs = CRS.from_epsg(5703).to_wkt()
         r1.is_orthometric = True
 
-        # Target: different CRS, same vertical
+        # target: different CRS, same vertical
         r2 = _make_raster(tmp_path, "r2.tif", crs="EPSG:32611")
         r2.current_vertical_crs = CRS.from_epsg(5703).to_wkt()
         r2.is_orthometric = True
 
-        # Step 1: Reproject r1 to match r2's horizontal CRS
+        # step 1: Reproject r1 to match r2's horizontal CRS
         r1_reprojected = r1.warp_raster(target_crs="EPSG:32611", overwrite=True)
 
-        # Step 2: Now check if vertical CRS still matches
-        # Before fix: r1_reprojected.current_vertical_crs was None,
+        # step 2: Now check if vertical CRS still matches
+        # before fix: r1_reprojected.current_vertical_crs was None,
         # so the pair would see a mismatch (None vs NAVD88)
         pair = RasterPair(r1_reprojected, r2)
         comparison = pair.check_all_match()
 
-        # Vertical CRS should still match (both NAVD88)
+        # vertical CRS should still match (both NAVD88)
         assert 'vertical_datum' not in comparison.get('transformations_needed', []), (
             "H1 CASCADE: Vertical CRS mismatch detected after horizontal reproject "
             "because vertical metadata was wiped"
@@ -684,12 +668,12 @@ class TestBugScenarioRegressions:
         r = _make_raster(tmp_path)
         r.crs_history = CRSHistory(r)
 
-        # Verify record_transformation_entry exists (the replacement method)
+        # verify record_transformation_entry exists (the replacement method)
         assert hasattr(r.crs_history, 'record_transformation_entry')
 
-        # Verify add_entry does NOT exist (the old broken method)
+        # verify add_entry does NOT exist (the old broken method)
         assert not hasattr(r.crs_history, 'add_entry'), (
-            "add_entry method exists now — if intentional, M4 fix should use it"
+            "add_entry method exists now : if intentional, M4 fix should use it"
         )
 
     def test_m8_scenario_compound_inconsistency(self, tmp_path):
@@ -703,7 +687,7 @@ class TestBugScenarioRegressions:
         r._current_vertical_crs = None
         r._current_compound_crs = None
 
-        # Trigger the update via property setter
+        # trigger the update via property setter
         r.current_horizontal_crs = CRS.from_epsg(32610).to_wkt()
 
         # compound should not be None (M8 fix)
@@ -717,7 +701,7 @@ class TestBugScenarioRegressions:
         the new value.  Old code left time_info stale.
         """
         r = _make_raster(tmp_path)
-        # Simulate what from_file() creates
+        # simulate what from_file() creates
         r.time_info = {
             'epoch': 2026.1,
             'epoch_source': 'parsed_tifftag_datetime',
@@ -754,3 +738,4 @@ class TestBugScenarioRegressions:
         assert raised, (
             "H3 REGRESSION: _apply_geoid_to_raster did not raise for missing grid"
         )
+

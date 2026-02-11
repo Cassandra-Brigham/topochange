@@ -1,3 +1,2 @@
-"""
-Test suite for topochange point cloud processing workflow
-"""
+"""Test suite for topochange point cloud processing workflow"""
+

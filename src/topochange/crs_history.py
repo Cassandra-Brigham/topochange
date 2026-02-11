@@ -1,8 +1,4 @@
-"""CRS transformation history tracking.
-
-Provides the CRSHistory class for tracking all CRS and coordinate transformations
-applied to rasters and point clouds, including interpolation methods used.
-"""
+"""CRS transformation history tracking."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -20,13 +16,10 @@ if TYPE_CHECKING:  # for type hints only
 OwnerType = Union["PointCloud", "Raster"]
 
 
-# =============================================================================
-# Interpolation Method Constants
-# =============================================================================
+# interpolation Method Constants
 
-# Common interpolation methods for reference
+# common interpolation methods for reference
 INTERPOLATION_METHODS = {
-    # Raster resampling methods (rasterio/GDAL)
     'nearest': {
         'description': 'Nearest neighbor - no interpolation, preserves original values',
         'order': 0,
@@ -69,7 +62,7 @@ INTERPOLATION_METHODS = {
         'smoothing': False,
         'preserves_values': True,
     },
-    # Point cloud / DEM creation methods
+    # point cloud / DEM creation methods
     'idw': {
         'description': 'Inverse Distance Weighting',
         'order': None,
@@ -100,7 +93,7 @@ INTERPOLATION_METHODS = {
         'smoothing': True,
         'preserves_values': False,
     },
-    # Geoid sampling
+    # geoid sampling
     'map_coordinates': {
         'description': 'scipy.ndimage.map_coordinates grid sampling',
         'order': 1,  # Typically bilinear
@@ -123,18 +116,18 @@ class InterpolationEntry:
     method: str  # 'nearest', 'bilinear', 'cubic', 'idw', 'kriging', etc.
     description: str
     
-    # Optional details
+    # optional details
     source_file: Optional[str] = None
     target_file: Optional[str] = None
     
-    # Method-specific parameters (e.g., power for IDW, variogram for kriging)
+    # method-specific parameters (e.g., power for IDW, variogram for Kriging)
     parameters: Dict[str, Any] = field(default_factory=dict)
     
-    # Grid/resolution info
+    # grid/resolution info
     source_resolution: Optional[float] = None
     target_resolution: Optional[float] = None
     
-    # Quality indicators
+    # quality indicators
     pixel_shift_magnitude: Optional[float] = None  # Max shift in pixels
     resampling_skipped: bool = False  # True if shift was sub-pixel and skipped
     
@@ -164,7 +157,6 @@ class CRSEntry:
     entry_type: str  # "initial", "manual_change", "transformation", "raster_creation"
     description: str
 
-    # CRS state
     compound_crs_proj: Optional[_CRS] = None
     horizontal_crs_proj: Optional[_CRS] = None
     vertical_crs_proj: Optional[_CRS] = None
@@ -184,10 +176,10 @@ class CRSEntry:
     geoid_model: Optional[str] = None
     epoch: Optional[float] = None  # decimal year
     
-    # Interpolation method used for this operation (if applicable)
+    # interpolation method used for this operation (if applicable)
     interpolation_method: Optional[str] = None
 
-    # Any additional info (e.g., raster creation params, alignment params, etc.)
+    # any additional info (e.g., Raster creation params, alignment params, etc.)
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -207,14 +199,14 @@ class CRSHistory:
     owner: OwnerType
     history: List[CRSEntry] = field(default_factory=list)
     
-    # Interpolation tracking (Raster-specific, but available for all)
+    # interpolation tracking (Raster-specific, but available for all)
     interpolation_history: List[InterpolationEntry] = field(default_factory=list)
 
-    # New: explicit linkage fields
+    # new: explicit linkage fields
     derived_from: Optional[str] = None
     derived_products: List[Dict[str, Any]] = field(default_factory=list)
 
-    # Original state
+    # original state
     original_compound_crs_proj: Optional[_CRS] = None
     original_compound_crs_wkt: Optional[str] = None
     original_compound_crs_wkt2: Optional[str] = None
@@ -233,7 +225,7 @@ class CRSHistory:
     original_geoid_model: Optional[str] = None
     original_epoch: Optional[float] = None  # decimal year
 
-    # Current state
+    # current state
     current_compound_crs_proj: Optional[_CRS] = None
     current_compound_crs_wkt: Optional[str] = None
     current_compound_crs_wkt2: Optional[str] = None
@@ -256,7 +248,7 @@ class CRSHistory:
         """
         Initialize original and current CRS information from the owner.
         """
-        # Compound CRS
+        # compound CRS
         owner_compound = getattr(self.owner, "current_compound_crs", None) or getattr(
             self.owner, "original_compound_crs", None
         )
@@ -268,7 +260,7 @@ class CRSHistory:
         else:
             comp_crs = None
 
-        # Horizontal CRS
+        # horizontal CRS
         owner_horizontal = getattr(self.owner, "current_horizontal_crs", None) or getattr(
             self.owner, "original_horizontal_crs", None
         )
@@ -280,7 +272,7 @@ class CRSHistory:
         else:
             horiz_crs = None
 
-        # Vertical CRS
+        # vertical CRS
         owner_vertical = getattr(self.owner, "current_vertical_crs", None) or getattr(
             self.owner, "original_vertical_crs", None
         )
@@ -295,12 +287,12 @@ class CRSHistory:
         epoch = getattr(self.owner, "epoch", None)
         geoid_model = getattr(self.owner, "geoid_model", None)
 
-        # Fill original
+        # fill original
         self._set_original(comp_crs, horiz_crs, vert_crs, geoid_model, epoch)
-        # Initialize current to original
+        # initialize current to original
         self._set_current(comp_crs, horiz_crs, vert_crs, geoid_model, epoch)
 
-        # Record initial entry
+        # record initial entry
         self.history.append(
             self._make_entry(
                 entry_type="initial",
@@ -427,7 +419,7 @@ class CRSHistory:
         if epoch is not None:
             self.current_epoch = float(epoch)
 
-        # Refresh WKT/WKT2/EPSG for new current state
+        # refresh WKT/WKT2/EPSG for new current state
         self._set_current(
             self.current_compound_crs_proj,
             self.current_horizontal_crs_proj,
@@ -476,7 +468,7 @@ class CRSHistory:
         src = _ensure_crs_obj(source_crs_proj) if source_crs_proj is not None else None
         tgt = _ensure_crs_obj(target_crs_proj) if target_crs_proj is not None else None
 
-        # Update current CRS to target if present
+        # update current CRS to target if present
         if tgt is not None:
             self.current_compound_crs_proj = tgt
             self._set_current(
@@ -498,7 +490,7 @@ class CRSHistory:
         }
         info.update(extra)
 
-        # Keep an explicit list of derived products for this owner
+        # keep an explicit list of derived products for this owner
         target_file = info.get("target_file")
         if target_file:
             self.derived_products.append(
@@ -515,7 +507,7 @@ class CRSHistory:
             "transformation", desc, extra=info, interpolation_method=interpolation_method
         ))
         
-        # Also record in interpolation history if method was specified
+        # also record in interpolation history if method was specified
         if interpolation_method:
             self.record_interpolation_entry(
                 operation_type=transformation_type,
@@ -546,7 +538,7 @@ class CRSHistory:
         desc = description or "Raster creation / post-processing."
         extra = {"creation_parameters": creation_parameters}
         
-        # Include interpolation method in creation parameters if provided
+        # include interpolation method in creation parameters if provided
         if interpolation_method:
             creation_parameters["interpolation_method"] = interpolation_method
         
@@ -554,7 +546,7 @@ class CRSHistory:
             "raster_creation", desc, extra=extra, interpolation_method=interpolation_method
         ))
         
-        # Record in interpolation history if method was specified
+        # record in interpolation history if method was specified
         if interpolation_method:
             self.record_interpolation_entry(
                 operation_type="creation",
@@ -696,11 +688,11 @@ class CRSHistory:
         """
         owner_file = getattr(self.owner, "filename", None)
 
-        # Determine derived_products for this object
+        # determine derived_products for this object
         if self.derived_products:
             derived_products = list(self.derived_products)
         else:
-            # Backward-compatible: collect children (derived products) from history
+            # backward-compatible: collect children (derived products) from history
             derived_products = []
             for e in self.history:
                 if e.entry_type == "transformation":
@@ -715,7 +707,7 @@ class CRSHistory:
                             }
                         )
 
-        # Determine parent file for this object, if any
+        # determine parent file for this object, if any
         if self.derived_from is not None:
             parent_file: Optional[str] = self.derived_from
         else:

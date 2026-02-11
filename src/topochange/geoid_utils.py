@@ -1,8 +1,4 @@
-"""Geoid grid discovery and management utilities.
-
-Provides functions for finding PROJ data directories, searching for geoid grids,
-and resolving geoid model aliases to grid file paths.
-"""
+"""geoid grid discovery and management."""
 import os
 import re
 import subprocess
@@ -191,17 +187,17 @@ def ensure_proj_grid(
     >>> ensure_proj_grid('us_noaa_g2018u0.tif')  # GEOID18
     >>> ensure_proj_grid('us_noaa_geoid09_conus.tif')  # GEOID09
     """
-    # Normalize filename (just the basename)
+    # normalize filename (just the basename)
     grid_basename = os.path.basename(grid_filename)
 
-    # Get all PROJ directories
+    # get all PROJ directories
     all_dirs = get_all_proj_data_dirs()
 
     if verbose:
         print(f"Checking for grid: {grid_basename}")
         print(f"  PROJ directories: {all_dirs}")
 
-    # Check if grid exists in any directory
+    # check if grid exists in any directory
     existing_path = None
     for d in all_dirs:
         candidate = os.path.join(d, grid_basename)
@@ -211,14 +207,14 @@ def ensure_proj_grid(
                 print(f"  Found existing grid: {existing_path}")
             break
 
-    # If not found, optionally download
+    # if not found, optionally download
     if existing_path is None:
         if not download_if_missing:
             raise FileNotFoundError(
                 f"Grid file '{grid_basename}' not found in any PROJ directory: {all_dirs}"
             )
 
-        # Download to primary directory
+        # download to primary directory
         primary_dir = get_primary_proj_data_dir()
         dest_path = os.path.join(primary_dir, grid_basename)
         cdn_url = f"https://cdn.proj.org/{grid_basename}"
@@ -237,7 +233,7 @@ def ensure_proj_grid(
                 f"Failed to download grid '{grid_basename}' from {cdn_url}: {e}"
             )
 
-    # Optionally copy to all directories for maximum compatibility
+    # optionally copy to all directories for maximum compatibility
     if copy_to_all_dirs and existing_path:
         import shutil
         for d in all_dirs:
@@ -286,7 +282,7 @@ def ensure_proj_grids_for_region(
     List[str]
         List of paths to the downloaded/verified grid files
     """
-    # Define common grids per region
+    # define common grids per region
     REGION_GRIDS = {
         'us_noaa': [
             'us_noaa_g2012bu0.tif',   # GEOID12B CONUS
@@ -337,28 +333,28 @@ def ensure_proj_grids_for_region(
 
 # -------- Geoid helpers ---------
 GEOID_HINTS = [
-    # Common North America
+    # common North America
     r"\bNAVD ?88\b",
     r"\bNGVD ?29\b",
     r"\bGEOID(?:03|06|09|12[A-Z]?|18)\b",
-    # Global geoids
+    # global geoids
     r"\bEGM(?:96|2008)\b",
     r"\bEGM ?96\b",
     r"\bEGM ?2008\b",
-    # Canada, UK, AUS, EU examples
+    # canada, UK, AUS, EU examples
     r"\bCGVD(?:28|2013)\b",
     r"\bMSL\b",
     r"\bOSGM\d+\b",
     r"\bAHD(?: ?(71|83))?\b",
     r"\bDVR90\b",
     r"\bEVRF(?:2000|2007|2019)\b",
-    # Generic vertical hints
+    # generic vertical hints
     r"\bgeoid(?:grid|model)?\b",
     r"\bvertical cs\b",
     r"\bverticalcrs\b",
 ]
 
-# Vertical EPSG names often contain these tokens
+# vertical EPSG names often contain these tokens
 VERT_NAME_HINTS = [
     "height",
     "vertical",
@@ -416,7 +412,7 @@ def _from_json_vertical(srs_json: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Try to interpret vertical CRS info from PDAL-style SRS JSON.
     """
-    # Direct vertical CRS object
+    # direct vertical CRS object
     vert = srs_json.get("vertical") or {}
     if isinstance(vert, dict) and vert:
         name = vert.get("name") or ""
@@ -430,7 +426,7 @@ def _from_json_vertical(srs_json: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 "source": "srs.json.vertical",
             }
 
-    # Some PDAL exports keep everything under 'json' root; check 'name'
+    # some PDAL exports keep everything under 'JSON' root; check 'name'
     name = srs_json.get("name") or ""
     if any(t in name.lower() for t in VERT_NAME_HINTS) and srs_json.get("type", "").lower().startswith("vertical"):
         code = (srs_json.get("id") or {}).get("code")
@@ -484,7 +480,7 @@ def parse_geoid_info(meta: Dict[str, Any]) -> Dict[str, Any]:
     wkt_like_paths = [p for p, t in texts if any(tok in t.upper() for tok in WKT_VERTICAL_TOKENS)]
     for p, t in texts:
         if p in wkt_like_paths or any(tok in t.upper() for tok in WKT_VERTICAL_TOKENS):
-            # Vertical CRS name
+            # vertical CRS name
             m = re.search(r'(VERT(?:ICAL)?_?CRS|VERT_CS)\s*\[\s*"([^"]+)"', t, flags=re.IGNORECASE)
             if m:
                 name = m.group(2)
@@ -497,7 +493,7 @@ def parse_geoid_info(meta: Dict[str, Any]) -> Dict[str, Any]:
                     "confidence": "high",
                     "note": "Vertical CRS discovered in WKT.",
                 }
-            # AUTHORITY["EPSG","57xx"]
+            # aUTHORITY["EPSG","57xx"]
             m2 = re.search(r'AUTHORITY\["EPSG","(57\d{2})"\]', t, flags=re.IGNORECASE)
             if m2:
                 code = m2.group(1)
@@ -581,7 +577,7 @@ def parse_geoid_info(meta: Dict[str, Any]) -> Dict[str, Any]:
             "note": note,
         }
 
-    # Fallback: unknown
+    # fallback: unknown
     return {
         "vertical_datum": None,
         "geoid_model": None,
@@ -600,7 +596,7 @@ def list_proj_geoid_grids(
     """
     List all geoid grid files accessible to PROJ â€” locally and optionally from the CDN.
     """
-    # Local search
+    # local search
     dirs = set()
     dd = datadir.get_data_dir()
     if dd and os.path.isdir(dd):
@@ -629,7 +625,7 @@ def list_proj_geoid_grids(
     local_files = sorted(local_files)
     local_display = [Path(f).name if not as_paths else f for f in local_files]
 
-    # CDN search
+    # cDN search
     cdn_files: List[str] = []
     if include_cdn:
         cdn_url = "https://cdn.proj.org/"
@@ -683,7 +679,7 @@ def list_proj_geoid_grids(
 
     cdn_display = sorted(cdn_files)
 
-    # Merge
+    # merge
     merged = []
     if merge:
         local_basenames = {Path(f).name for f in local_files}
@@ -848,16 +844,16 @@ def select_geoid_grid(
     """
     name_lower = name.lower()
     
-    # Check if input is a filename rather than an alias
+    # check if input is a filename rather than an alias
     geoid_extensions = ('.tif', '.gtx', '.gtx.gz', '.gvb', '.byn', '.grid')
     if any(name_lower.endswith(ext) for ext in geoid_extensions):
-        # It's a filename - check if it exists directly
+        # it's a filename - check if it exists directly
         if os.path.isfile(name):
             if verbose:
                 print(f"Geoid grid (direct file): {name}")
             return name, [name]
         
-        # Check in PROJ data directory
+        # check in PROJ data directory
         proj_dir = datadir.get_data_dir()
         if proj_dir:
             proj_path = os.path.join(proj_dir, os.path.basename(name))
@@ -866,12 +862,12 @@ def select_geoid_grid(
                     print(f"Geoid grid (PROJ dir): {proj_path}")
                 return proj_path, [proj_path]
         
-        # Try to extract alias from filename pattern
+        # try to extract alias from filename pattern
         # e.g., "us_noaa_geoid09_conus.tif" -> "geoid09"
         # e.g., "us_noaa_g2018u0.tif" -> "geoid18"
         basename = os.path.basename(name_lower)
         
-        # Pattern: geoidXX or gXXXX
+        # pattern: geoidXX or gXXXX
         match = re.search(r'geoid(\d+)', basename)
         if match:
             extracted_alias = f"geoid{match.group(1)}"
@@ -880,11 +876,11 @@ def select_geoid_grid(
                 if verbose:
                     print(f"Extracted alias '{extracted_alias}' from filename '{name}'")
         else:
-            # Try pattern like g2018, g2012
+            # try pattern like g2018, g2012
             match = re.search(r'g(\d{4})', basename)
             if match:
                 year = match.group(1)
-                # Map year to geoid version
+                # map year to geoid version
                 year_to_alias = {
                     '2003': 'geoid03',
                     '2006': 'geoid06',
@@ -938,7 +934,7 @@ def select_geoid_grid(
             mark = f"  <== selected ({reason})" if f == selected else ""
             print(f"  [{i}] {base} ({origin}){mark}")
 
-    # If the selected grid is not local and ensure_available is True, download it
+    # if the selected grid is not local and ensure_available is True, download it
     if ensure_available and not _is_local(selected):
         grid_basename = Path(selected).name
         if verbose:
@@ -951,7 +947,7 @@ def select_geoid_grid(
                 copy_to_all_dirs=True,
                 verbose=verbose,
             )
-            # Update selected to point to the local path
+            # update selected to point to the local path
             selected = local_path
             if verbose:
                 print(f"Grid now available at: {selected}")

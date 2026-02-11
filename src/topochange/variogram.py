@@ -1,16 +1,4 @@
-"""Analyze vertical differencing uncertainty using variogram methods.
-
-Provides utilities for:
-- Loading and sampling raster data for variogram analysis
-- Fitting parametric semivariogram models (spherical, with/without nugget)
-- Bootstrap resampling for parameter confidence intervals
-- Efficient Numba kernels for pairwise distance calculations
-
-Classes:
-- RasterDataHandler: Load and sample raster data
-- StatisticalAnalysis: Exploratory statistics and bootstrap uncertainty
-- VariogramAnalysis: Compute empirical variograms and fit models
-"""
+"""variogram analysis and model fitting for differencing uncertainty."""
 
 from __future__ import annotations
 
@@ -126,7 +114,7 @@ class VariogramModelSelector:
     for choosing models for variograms of soil properties. Eur. J. Soil Sci.
     """
     
-    # Models to include in candidate generation
+    # models to include in candidate generation
     BOUNDED_MODELS = ['spherical', 'exponential', 'gaussian', 'matern']
     UNBOUNDED_MODELS = ['power', 'linear']
     
@@ -140,13 +128,13 @@ class VariogramModelSelector:
         self.lags = np.asarray(lags, dtype=float)
         self.empirical_variogram = np.asarray(empirical_variogram, dtype=float)
         
-        # Weights for WLS fitting
+        # weights for WLS fitting
         if weights is not None:
             self.weights = np.asarray(weights, dtype=float)
         else:
             self.weights = np.ones_like(self.lags)
         
-        # Standard deviation per bin (for likelihood-based criteria)
+        # standard deviation per bin (for likelihood-based criteria)
         if sigma is not None:
             self.sigma = np.asarray(sigma, dtype=float)
             self.sigma = np.where(self.sigma <= 0, np.finfo(float).eps, self.sigma)
@@ -187,11 +175,11 @@ class VariogramModelSelector:
         """
         candidates = []
         
-        # Get model lists
+        # get model lists
         bounded = self.BOUNDED_MODELS
         unbounded = self.UNBOUNDED_MODELS if include_unbounded else []
         
-        # Generate bounded-only combinations
+        # generate bounded-only combinations
         for n in range(1, max_components + 1):
             for combo in combinations_with_replacement(bounded, n):
                 try:
@@ -203,7 +191,7 @@ class VariogramModelSelector:
                 except ValueError:
                     continue
         
-        # Add single unbounded models (not in combinations to preserve validity)
+        # add single unbounded models (not in combinations to preserve validity)
         if include_unbounded:
             for name in unbounded:
                 try:
@@ -215,7 +203,7 @@ class VariogramModelSelector:
                 except ValueError:
                     continue
             
-            # Optionally: bounded + unbounded combinations
+            # optionally: bounded + unbounded combinations
             if not bounded_only_combinations:
                 for bounded_name in bounded:
                     for unbounded_name in unbounded:
@@ -252,11 +240,11 @@ class VariogramModelSelector:
         fitted : FittedVariogramModel or None
             Fitted model, or None if fitting failed.
         """
-        # Get initial guess and bounds
+        # get initial guess and bounds
         p0_base = model.default_guess(self.lags, self.empirical_variogram)
         bounds = model.bounds(self.lags, self.empirical_variogram)
         
-        # Prepare fitting function
+        # prepare fitting function
         def model_func(h, *params):
             model.set_params(np.array(params))
             return model(h)
@@ -266,7 +254,7 @@ class VariogramModelSelector:
         rng = np.random.default_rng()
         
         for restart in range(n_restarts):
-            # Perturb initial guess
+            # perturb initial guess
             if restart == 0:
                 p0 = p0_base
             else:
@@ -285,7 +273,7 @@ class VariogramModelSelector:
                     maxfev=maxfev,
                 )
                 
-                # Compute RSS
+                # compute RSS
                 model.set_params(popt)
                 residuals = self.empirical_variogram - model(self.lags)
                 rss = np.sum(self.weights * residuals**2)
@@ -303,18 +291,18 @@ class VariogramModelSelector:
         popt, pcov, rss = best_result
         model.set_params(popt)
         
-        # Compute information criteria
+        # compute information criteria
         n = len(self.lags)
         k = model.n_params
         
-        # AIC and BIC
+        # aIC and BIC
         if self.sigma is not None:
-            # Log-likelihood based
+            # log-likelihood based
             ll = self._log_likelihood(model, popt)
             aic = 2 * k - 2 * ll
             bic = k * np.log(n) - 2 * ll
         else:
-            # RSS-based approximation
+            # rSS-based approximation
             aic = n * np.log(rss / n) + 2 * k
             bic = n * np.log(rss / n) + k * np.log(n)
         
@@ -337,7 +325,7 @@ class VariogramModelSelector:
         predicted = model(self.lags)
         residuals = self.empirical_variogram - predicted
         
-        # Heteroscedastic Gaussian log-likelihood
+        # heteroscedastic Gaussian log-likelihood
         ll = -0.5 * np.sum(
             np.log(2 * np.pi * self.sigma**2) + 
             (residuals**2) / (self.sigma**2)
@@ -374,14 +362,14 @@ class VariogramModelSelector:
         squared_errors = []
         
         for i in range(k):
-            # Split indices
+            # split indices
             val_idx = indices[i * fold_size: min((i + 1) * fold_size, n)]
             train_idx = np.setdiff1d(indices, val_idx)
             
             if len(train_idx) < fitted_model.composite_model.n_params:
                 continue
             
-            # Fit on training set
+            # fit on training set
             model_copy = CompositeVariogramModel(
                 fitted_model.composite_model.component_names,
                 fitted_model.composite_model.include_nugget,
@@ -401,7 +389,7 @@ class VariogramModelSelector:
                     maxfev=5000,
                 )
                 
-                # Predict on validation set
+                # predict on validation set
                 model_copy.set_params(popt)
                 predictions = model_copy(self.lags[val_idx])
                 errors = self.empirical_variogram[val_idx] - predictions
@@ -456,7 +444,7 @@ class VariogramModelSelector:
                     fitted.cv_rmse = self.cross_validate(fitted, k=cv_folds, seed=seed)
                 self.fitted_models.append(fitted)
         
-        # Compute Akaike weights
+        # compute Akaike weights
         if self.fitted_models:
             self._compute_akaike_weights()
     
@@ -465,7 +453,7 @@ class VariogramModelSelector:
         aics = np.array([m.aic for m in self.fitted_models])
         delta_aic = aics - np.min(aics)
         
-        # Akaike weights
+        # akaike weights
         exp_terms = np.exp(-0.5 * delta_aic)
         self.model_weights = exp_terms / np.sum(exp_terms)
     
@@ -526,7 +514,7 @@ class VariogramModelSelector:
         p0 = self.best_model.params
         bounds = model.bounds(self.lags, self.empirical_variogram)
         
-        # Generate synthetic variograms
+        # generate synthetic variograms
         if self.sigma is not None:
             noise = rng.normal(
                 loc=self.empirical_variogram,
@@ -534,7 +522,7 @@ class VariogramModelSelector:
                 size=(n_boot, len(self.lags))
             )
         else:
-            # Use residual-based bootstrap
+            # use residual-based bootstrap
             fitted = self.best_model.predict(self.lags)
             residuals = self.empirical_variogram - fitted
             noise = fitted + rng.choice(residuals, size=(n_boot, len(self.lags)))
@@ -561,7 +549,7 @@ class VariogramModelSelector:
         
         param_samples = np.array(param_samples)
         
-        # Remove failed fits
+        # remove failed fits
         valid = ~np.isnan(param_samples).any(axis=1)
         param_samples = param_samples[valid]
         
@@ -602,14 +590,14 @@ class VariogramModelSelector:
         """
         predictions = np.array([m.predict(np.array([h]))[0] for m in self.fitted_models])
         
-        # BMA mean
+        # bMA mean
         bma_mean = np.sum(self.model_weights * predictions)
         
-        # Between-model variance
+        # between-model variance
         between_var = np.sum(self.model_weights * (predictions - bma_mean)**2)
         
-        # Within-model variance (would require bootstrap samples from each model)
-        # For now, approximate as 0 or could be computed if needed
+        # within-model variance (would require bootstrap samples from each model)
+        # for now, approximate as 0 or could be computed if needed
         within_var = 0.0
         
         return bma_mean, within_var, between_var
@@ -625,7 +613,7 @@ def summary(self) -> str:
     lines.append(f"{'Model':<30} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10} {'Weight':>8}")
     lines.append("-" * 70)
     
-    # Sort by AIC
+    # sort by AIC
     sorted_models = sorted(
         zip(self.fitted_models, self.model_weights or [0] * len(self.fitted_models)),
         key=lambda x: x[0].aic
@@ -649,7 +637,7 @@ def summary(self) -> str:
         lines.append(self.best_model.composite_model.description())
         
         if not self.best_model.composite_model.is_stationary:
-            lines.append("\n⚠️ WARNING: Selected model is NON-STATIONARY.")
+            lines.append("\nWARNING: Selected model is NON-STATIONARY.")
             lines.append("The process has no finite variance.")
             lines.append("Results are scale-dependent. Consider detrending.")
     
@@ -840,7 +828,6 @@ class RasterDataHandler:
             self.coords = coords[mask]
 
 
-
 class StatisticalAnalysis:
     """
     Statistical utilities for exploratory plotting and bootstrap uncertainty of the median.
@@ -868,7 +855,7 @@ class StatisticalAnalysis:
 
         mean = np.mean(data)
         median = np.median(data)
-        # Mode on continuous data is often not meaningful; kept for completeness
+        # mode on continuous data is often not meaningful; kept for completeness
         mode_result = stats.mode(data, nan_policy="omit", keepdims=False)
         mode_vals = np.atleast_1d(mode_result.mode).astype(float)
         q1 = np.percentile(data, 25)
@@ -956,7 +943,7 @@ class VariogramAnalysis:
         self.rmse = None
         self.sills = None
         self.ranges = None
-        # Full range percentiles (2.5th to 97.5th)
+        # full range percentiles (2.5th to 97.5th)
         self.ranges_min = None
         self.ranges_max = None
         self.ranges_median = None
@@ -965,23 +952,23 @@ class VariogramAnalysis:
         self.ranges_p84 = None
         self.err_sills = None
         self.err_ranges = None
-        # Full range percentiles for sills
+        # full range percentiles for sills
         self.sills_min = None
         self.sills_max = None
         self.sills_median = None
         # 1σ range percentiles for sills
         self.sills_p16 = None
         self.sills_p84 = None
-        # Nugget parameters
+        # nugget parameters
         self.best_nugget = None
-        # Full range percentiles for nugget
+        # full range percentiles for nugget
         self.min_nugget = None
         self.max_nugget = None
         self.median_nugget = None
         # 1σ range percentiles for nugget
         self.nugget_p16 = None
         self.nugget_p84 = None
-        # Model selection attributes
+        # model selection attributes
         self.best_aic = None
         self.best_bic = None
         self.selection_criterion = None
@@ -998,7 +985,6 @@ class VariogramAnalysis:
         self.all_variograms = None
         self.all_counts = None
 
-    
     
     @staticmethod
     @njit(parallel=True)
@@ -1031,7 +1017,7 @@ class VariogramAnalysis:
         else:
             max_lag = float(approx_max_distance * max_lag_multiplier)
         
-        # Determine bin edges using diagonal distance as maximum lag
+        # determine bin edges using diagonal distance as maximum lag
         n_bins = int(np.ceil(max_lag / bin_width)) + 1
         bin_edges = np.arange(0, n_bins * bin_width, bin_width)
         
@@ -1042,7 +1028,7 @@ class VariogramAnalysis:
 
         for i in prange(M):
             for j in range(i + 1, M):
-                # Compute the pairwise distance
+                # compute the pairwise distance
                 d = 0.0
                 for k in range(coords.shape[1]):
                     tmp = coords[i, k] - coords[j, k]
@@ -1050,13 +1036,13 @@ class VariogramAnalysis:
                 dist = np.sqrt(d)
                 max_distance = max(max_distance, dist)
                 
-                # Compute the difference
+                # compute the difference
                 diff = values[i] - values[j]
                 
-                # Compute the squared difference
+                # compute the squared difference
                 diff_squared = (diff) ** 2
 
-                # Find the bin for this distance
+                # find the bin for this distance
                 bin_idx = int(dist / bin_width)
                 if 0 <= bin_idx < n_bins:
                     bin_counts[bin_idx] += 1
@@ -1148,7 +1134,7 @@ class VariogramAnalysis:
         seed : int | None
             Base seed; each run uses a child seed for reproducibility.
         """
-        # Child seeds for each run to keep realizations independent but reproducible.
+        # child seeds for each run to keep realizations independent but reproducible.
         ss = np.random.SeedSequence(seed)
         child_seeds = ss.spawn(n_runs)
 
@@ -1223,36 +1209,36 @@ class VariogramAnalysis:
         max_semivariance = np.max(mean_variogram)
         half_max_lag = np.max(lags) / 2
 
-        # Estimate nugget by extrapolating to h=0 from first few lags
+        # estimate nugget by extrapolating to h=0 from first few lags
         if nugget:
-            # Use first 3-5 valid lag points for linear extrapolation
+            # use first 3-5 valid lag points for linear extrapolation
             n_extrap = min(5, len(lags) // 3, len(lags))
             n_extrap = max(2, n_extrap)  # Need at least 2 points
 
             short_lags = lags[:n_extrap]
             short_gamma = mean_variogram[:n_extrap]
 
-            # Linear fit: γ(h) = nugget + slope * h
-            # Extrapolate to h=0 to get nugget estimate
+            # linear fit: γ(h) = nugget + slope * h
+            # extrapolate to h=0 to get nugget estimate
             if len(short_lags) >= 2:
                 slope, intercept = np.polyfit(short_lags, short_gamma, 1)
                 nugget_estimate = max(0.0, intercept)  # Nugget can't be negative
-                # Cap nugget at 50% of max semivariance as sanity check
+                # cap nugget at 50% of max semivariance as sanity check
                 nugget_estimate = min(nugget_estimate, max_semivariance * 0.5)
             else:
-                # Fallback: use smallest lag value as upper bound
+                # fallback: use smallest lag value as upper bound
                 nugget_estimate = mean_variogram[0] * 0.5
 
-            # Partial sill is what remains after nugget
+            # partial sill is what remains after nugget
             partial_sill_total = max(max_semivariance - nugget_estimate, max_semivariance * 0.5)
         else:
             nugget_estimate = 0.0
             partial_sill_total = max_semivariance
 
-        # Distribute sill across components
+        # distribute sill across components
         C = [partial_sill_total / n] * n
 
-        # Spread ranges linearly
+        # spread ranges linearly
         a = [((half_max_lag) / 3) * (i + 1) for i in range(n)]
 
         p0 = C + a + ([nugget_estimate] if nugget else [])
@@ -1330,7 +1316,7 @@ class VariogramAnalysis:
             Successful parameter vectors (rows).
         """
         rng = np.random.default_rng(seed)
-        # Draw synthetic variograms with Gaussian noise per bin using sigma_vario.
+        # draw synthetic variograms with Gaussian noise per bin using sigma_vario.
         noise_array = rng.normal(loc=mean_vario, scale=np.where(sigma_vario > 0, sigma_vario, 0.0), size=(n_boot, len(mean_vario)))
 
         param_samples = []
@@ -1468,15 +1454,15 @@ class VariogramAnalysis:
         elif sigma_type == 'sq':
             sigma = 1.0 / (1.0 + self.lags ** 2)
         elif sigma_type == 'nugget_focus':
-            #Weight short lags heavily for better nugget estimation
-            # Uses exponential decay with characteristic length = 20% of max lag
+            # weight short lags heavily for better nugget estimation
+            # uses exponential decay with characteristic length = 20% of max lag
             char_length = np.max(self.lags) * 0.2
             sigma = np.exp(-self.lags / char_length)
-            # Normalize so first bin has sigma=1
+            # normalize so first bin has sigma=1
             sigma = sigma / sigma[0]
         elif sigma_type == 'cressie':
-            # Cressie's robust weighting: N_h / gamma(h)^2
-            # Downweights large semivariance values which are more variable
+            # cressie's robust weighting: N_h / gamma(h)^2
+            # downweights large semivariance values which are more variable
             sigma = self.mean_variogram**2 / np.maximum(self.mean_count, 1)
             sigma = np.sqrt(sigma)  # curve_fit expects std dev
         else:
@@ -1513,9 +1499,9 @@ class VariogramAnalysis:
             else:
                 model = self.spherical_model_with_nugget if nugget else self.spherical_model
 
-                # Constrain nugget upper bound to prevent overestimation
-                # Nugget > 50% of total sill is unusual and often indicates
-                # fitting problems rather than true micro-scale variation
+                # constrain nugget upper bound to prevent overestimation
+                # nugget > 50% of total sill is unusual and often indicates
+                # fitting problems rather than True micro-scale variation
                 max_gamma = float(np.max(self.mean_variogram))
                 nugget_upper = max_gamma * 0.5  # Cap nugget at 50% of observed max
 
@@ -1582,7 +1568,7 @@ class VariogramAnalysis:
             else self.spherical_model
         )(self.lags, *self.best_params)
 
-        # Extract sill & range point estimates; nugget last if present
+        # extract sill & range point estimates; nugget last if present
         n = self.best_model_config['components']
         if self.best_model_config['nugget']:
             self.sills = self.best_params[:n]
@@ -1593,7 +1579,7 @@ class VariogramAnalysis:
             self.ranges = self.best_params[n:2 * n]
             self.best_nugget = None
 
-        # Prepare bounds for bootstrap consistent with nugget-last convention
+        # prepare bounds for bootstrap consistent with nugget-last convention
         max_gamma = float(np.max(self.mean_variogram))
         nugget_upper = max_gamma * 0.5  # Same constraint as fitting
 
@@ -1604,7 +1590,7 @@ class VariogramAnalysis:
             ub = [np.inf] * n + [2.0 * lag_max] * n + ([nugget_upper] if self.best_model_config['nugget'] else [])
             bounds_boot = (lb, ub)
 
-        # Parametric bootstrap using per-bin sigma (std across runs)
+        # parametric bootstrap using per-bin sigma (std across runs)
         samples = self.bootstrap_fit_variogram(
             self.lags,
             self.mean_variogram,
@@ -1616,14 +1602,14 @@ class VariogramAnalysis:
             maxfev=20000,
             seed=seed,
         )
-        # Include optimal parameters in bootstrap samples to ensure they fall within bounds
+        # include optimal parameters in bootstrap samples to ensure they fall within bounds
         if samples.size:
             self.param_samples = np.vstack([samples, self.best_params])
         else:
             self.param_samples = np.array([self.best_params])
 
-        # Percentiles of parameters
-        # Full range: 2.5th to 97.5th percentiles (robust bounds for plotting)
+        # percentiles of parameters
+        # full range: 2.5th to 97.5th percentiles (robust bounds for plotting)
         # 1σ range: 16th to 84th percentiles (darker shading)
         if self.param_samples.size:
             if self.best_model_config['nugget']:
@@ -1636,7 +1622,7 @@ class VariogramAnalysis:
             sill_samps = samp[:, :n]
             range_samps = samp[:, n:2 * n]
 
-            # Full range (2.5th to 97.5th percentiles)
+            # full range (2.5th to 97.5th percentiles)
             self.sills_min = np.percentile(sill_samps, 2.5, axis=0)
             self.sills_max = np.percentile(sill_samps, 97.5, axis=0)
             self.sills_median = np.percentile(sill_samps, 50, axis=0)
@@ -1645,7 +1631,7 @@ class VariogramAnalysis:
             self.sills_p16 = np.percentile(sill_samps, 16, axis=0)
             self.sills_p84 = np.percentile(sill_samps, 84, axis=0)
 
-            # Full range for ranges
+            # full range for ranges
             self.ranges_min = np.percentile(range_samps, 2.5, axis=0)
             self.ranges_max = np.percentile(range_samps, 97.5, axis=0)
             self.ranges_median = np.percentile(range_samps, 50, axis=0)
@@ -1655,7 +1641,7 @@ class VariogramAnalysis:
             self.ranges_p84 = np.percentile(range_samps, 84, axis=0)
 
             if nug_samps is not None:
-                # Full range for nugget
+                # full range for nugget
                 self.min_nugget = float(np.percentile(nug_samps, 2.5))
                 self.max_nugget = float(np.percentile(nug_samps, 97.5))
                 self.median_nugget = float(np.percentile(nug_samps, 50))
@@ -1678,7 +1664,7 @@ class VariogramAnalysis:
                 self.min_nugget = self.max_nugget = self.median_nugget = None
                 self.nugget_p16 = self.nugget_p84 = None
 
-        # Compute and store cross-validation metrics on best model
+        # compute and store cross-validation metrics on best model
         self.cv_mean_error_best_aic = self.cross_validate_variogram(
             self.best_model_func, self.best_params, self.best_bounds, k=5, seed=seed
         )
@@ -1743,19 +1729,19 @@ class VariogramAnalysis:
                 coeffs = np.polyfit(lags_short, gamma_short, 2)
                 nugget_est = max(coeffs[2], 0.0)  # Constant term
             else:
-                # Fall back to linear if not enough points
+                # fall back to linear if not enough points
                 slope, intercept = np.polyfit(lags_short, gamma_short, 1)
                 nugget_est = max(intercept, 0.0)
 
         elif method == 'first_lag':
-            # Conservative: first lag value is upper bound on nugget
+            # conservative: first lag value is upper bound on nugget
             # (γ(h) at small h includes both nugget and some spatial correlation)
             nugget_est = gamma_short[0] * 0.5  # Assume ~half is nugget
 
         else:
             raise ValueError(f"Unknown method '{method}'. Use 'linear_extrap', 'quadratic_extrap', or 'first_lag'.")
 
-        # Sanity check: nugget shouldn't exceed observed semivariance
+        # sanity check: nugget shouldn't exceed observed semivariance
         max_gamma = np.max(self.mean_variogram)
         if nugget_est > max_gamma * 0.5:
             import warnings
@@ -1809,21 +1795,21 @@ class VariogramAnalysis:
         This method stores results in the same attributes as fit_model() for
         compatibility with downstream analysis.
         """
-        # Stage 1: Estimate nugget
+        # stage 1: Estimate nugget
         nugget_est = self.estimate_nugget_from_short_lags(method=nugget_method)
 
-        # Stage 2: Fit with constrained nugget
+        # stage 2: Fit with constrained nugget
         lag_max = float(np.max(self.lags))
         nugget_lb = max(0.0, nugget_est * (1 - nugget_tolerance))
         nugget_ub = nugget_est * (1 + nugget_tolerance)
 
-        # Build bounds with constrained nugget
+        # build bounds with constrained nugget
         n = n_components
         lb = [0.0] * n + [1e-6] * n + [nugget_lb]
         ub = [np.inf] * n + [2.0 * lag_max] * n + [nugget_ub]
         constrained_bounds = (lb, ub)
 
-        # Now call fit_model with the constrained bounds
+        # now call fit_model with the constrained bounds
         self.fit_model(
             criterion=criterion,
             sigma_type=sigma_type,
@@ -1831,7 +1817,7 @@ class VariogramAnalysis:
             seed=seed,
         )
 
-        # Store the Stage 1 estimate for reference
+        # store the Stage 1 estimate for reference
         self.stage1_nugget_estimate = nugget_est
 
     def fit_best_model_auto(
@@ -1876,13 +1862,13 @@ class VariogramAnalysis:
         if model_types is None:
             model_types = ['spherical', 'exponential', 'gaussian', 'matern']
 
-        # Validate model_types
+        # validate model_types
         available = MODEL_REGISTRY.list_models()
         for mt in model_types:
             if mt not in available:
                 raise ValueError(f"Unknown model type '{mt}'. Available: {available}")
 
-        # Create selector
+        # create selector
         selector = VariogramModelSelector(
             lags=self.lags,
             empirical_variogram=self.mean_variogram,
@@ -1890,11 +1876,11 @@ class VariogramAnalysis:
             sigma=self.sigma_variogram,
         )
 
-        # Override model lists with user selection
+        # override model lists with user selection
         selector.BOUNDED_MODELS = [m for m in model_types if MODEL_REGISTRY.is_bounded(m)]
         selector.UNBOUNDED_MODELS = [m for m in model_types if not MODEL_REGISTRY.is_bounded(m)]
 
-        # Fit all candidates
+        # fit all candidates
         selector.fit_all_candidates(
             max_components=min(max_components, 3),
             include_nugget=include_nugget,
@@ -1907,14 +1893,14 @@ class VariogramAnalysis:
         if not selector.fitted_models:
             raise RuntimeError("No models successfully fitted. Check input data.")
 
-        # Select best model
+        # select best model
         best = selector.select_best(criterion=criterion)
 
-        # Bootstrap parameter uncertainty
+        # bootstrap parameter uncertainty
         if n_bootstrap > 0:
             selector.bootstrap_best_model(n_boot=n_bootstrap, seed=seed)
 
-        # Store results for compatibility
+        # store results for compatibility
         self._store_fitted_model_results(best, selector)
         self.fitted_model = best
         self.model_selector = selector
@@ -1934,8 +1920,8 @@ class VariogramAnalysis:
         model = fitted.composite_model
         params = fitted.params
 
-        # Extract sills, ranges from composite model
-        # Note: 'wavelength' (damped_hole_effect) is treated as a range-like parameter
+        # extract sills, ranges from composite model
+        # note: 'wavelength' (damped_hole_effect) is treated as a range-like parameter
         sills = []
         ranges = []
         sill_indices = []
@@ -1965,7 +1951,7 @@ class VariogramAnalysis:
         self.best_aic = fitted.aic
         self.best_bic = fitted.bic
 
-        # Callable for the model function
+        # callable for the model function
         self.best_model_func = lambda h, *p: model(np.asarray(h, dtype=float))
         self.fitted_variogram = model(self.lags)
 
@@ -1975,7 +1961,7 @@ class VariogramAnalysis:
             'model_types': model.component_names,
         }
 
-        # Bootstrap percentiles - include optimal params to ensure they fall within bounds
+        # bootstrap percentiles - include optimal params to ensure they fall within bounds
         if fitted.param_samples is not None and len(fitted.param_samples) > 0:
             self.param_samples = np.vstack([fitted.param_samples, params])
         else:
@@ -1984,10 +1970,10 @@ class VariogramAnalysis:
         if self.param_samples.size > 0:
             samples = self.param_samples
 
-            # Extract sill percentiles
+            # extract sill percentiles
             if sill_indices:
                 sill_samps = samples[:, sill_indices]
-                # Full range (2.5th to 97.5th)
+                # full range (2.5th to 97.5th)
                 self.sills_min = np.percentile(sill_samps, 2.5, axis=0)
                 self.sills_max = np.percentile(sill_samps, 97.5, axis=0)
                 self.sills_median = np.percentile(sill_samps, 50, axis=0)
@@ -1998,10 +1984,10 @@ class VariogramAnalysis:
                 self.sills_min = self.sills_max = self.sills_median = np.array([])
                 self.sills_p16 = self.sills_p84 = np.array([])
 
-            # Extract range percentiles
+            # extract range percentiles
             if range_indices:
                 range_samps = samples[:, range_indices]
-                # Full range (2.5th to 97.5th)
+                # full range (2.5th to 97.5th)
                 self.ranges_min = np.percentile(range_samps, 2.5, axis=0)
                 self.ranges_max = np.percentile(range_samps, 97.5, axis=0)
                 self.ranges_median = np.percentile(range_samps, 50, axis=0)
@@ -2012,11 +1998,11 @@ class VariogramAnalysis:
                 self.ranges_min = self.ranges_max = self.ranges_median = np.array([])
                 self.ranges_p16 = self.ranges_p84 = np.array([])
 
-            # Extract nugget percentiles
+            # extract nugget percentiles
             if model.include_nugget:
                 nugget_idx = model.n_params - 1  # Nugget is always last
                 nug_samps = samples[:, nugget_idx]
-                # Full range
+                # full range
                 self.min_nugget = float(np.percentile(nug_samps, 2.5))
                 self.max_nugget = float(np.percentile(nug_samps, 97.5))
                 self.median_nugget = float(np.percentile(nug_samps, 50))
@@ -2027,7 +2013,7 @@ class VariogramAnalysis:
                 self.min_nugget = self.max_nugget = self.median_nugget = None
                 self.nugget_p16 = self.nugget_p84 = None
         else:
-            # Fallback to point estimates when no bootstrap samples
+            # fallback to point estimates when no bootstrap samples
             self.sills_min = self.sills_max = self.sills_median = self.sills
             self.sills_p16 = self.sills_p84 = self.sills
             self.ranges_min = self.ranges_max = self.ranges_median = self.ranges
@@ -2113,7 +2099,7 @@ class VariogramAnalysis:
 
         fig, axs = plt.subplots(2, 1, gridspec_kw={'height_ratios': [1, 3]}, figsize=(10, 8), sharex=True)
 
-        # Guard single-bin bar width
+        # guard single-bin bar width
         if len(lags) > 1:
             bar_width = (lags[1] - lags[0]) * 0.9
         else:
@@ -2122,37 +2108,37 @@ class VariogramAnalysis:
         axs[0].set_ylabel('Mean Count')
         axs[0].tick_params(labelbottom=False)
 
-        # Plot empirical variogram and fitted model
+        # plot empirical variogram and fitted model
         axs[1].errorbar(lags, gamma, yerr=errs, fmt='o-', color='blue', label='Mean Variogram ± spread')
         axs[1].plot(lags, model, 'r-', label='Fitted Model')
 
-        # Range uncertainty shading (vertical bands)
+        # range uncertainty shading (vertical bands)
         colors = ['red', 'green', 'blue']
         if self.ranges is not None and self.ranges_min is not None and self.ranges_max is not None:
             ylim = axs[1].get_ylim()
             for i, (r, rmin, rmax) in enumerate(zip(self.ranges, self.ranges_min, self.ranges_max)):
                 c = colors[i % len(colors)]
-                # Full range (very light shading)
+                # full range (very light shading)
                 axs[1].fill_betweenx(ylim, rmin, rmax, color=c, alpha=0.1)
                 # 1σ range (darker shading) if available
                 if hasattr(self, 'ranges_p16') and self.ranges_p16 is not None:
                     r_p16 = self.ranges_p16[i]
                     r_p84 = self.ranges_p84[i]
                     axs[1].fill_betweenx(ylim, r_p16, r_p84, color=c, alpha=0.3)
-                # Optimal value (dashed line)
+                # optimal value (dashed line)
                 axs[1].axvline(r, color=c, linestyle='--', linewidth=1.5)
 
-        # Nugget uncertainty shading (horizontal bands)
+        # nugget uncertainty shading (horizontal bands)
         if self.best_nugget is not None and self.min_nugget is not None and self.max_nugget is not None:
-            # Full range (very light shading)
+            # full range (very light shading)
             axs[1].fill_between(lags, [self.min_nugget] * len(lags), [self.max_nugget] * len(lags), color='orange', alpha=0.1)
             # 1σ range (darker shading) if available
             if hasattr(self, 'nugget_p16') and self.nugget_p16 is not None:
                 axs[1].fill_between(lags, [self.nugget_p16] * len(lags), [self.nugget_p84] * len(lags), color='orange', alpha=0.3)
-            # Optimal value (dashed line)
+            # optimal value (dashed line)
             axs[1].axhline(self.best_nugget, color='orange', linestyle='--', linewidth=1.5)
 
-        # Build custom legend
+        # build custom legend
         legend_elements = [
             Line2D([0], [0], marker='o', color='blue', label='Mean Variogram ± spread', linestyle='-'),
             Line2D([0], [0], color='r', linestyle='-', label='Fitted Model'),
@@ -2160,7 +2146,7 @@ class VariogramAnalysis:
             Patch(facecolor='gray', alpha=0.4, label='1σ range (68%)'),
             Line2D([0], [0], color='black', linestyle='--', linewidth=1.5, label='Optimal'),
         ]
-        # Add color swatches for each range/wavelength
+        # add color swatches for each range/wavelength
         if self.ranges is not None:
             for i in range(len(self.ranges)):
                 c = colors[i % len(colors)]
@@ -2168,7 +2154,7 @@ class VariogramAnalysis:
                     i < len(self.range_labels) and
                     self.range_labels[i] == 'wavelength') else 'Range'
                 legend_elements.append(Patch(facecolor=c, alpha=0.5, label=f'{lbl} {i + 1}'))
-        # Add nugget to legend if present
+        # add nugget to legend if present
         if self.best_nugget is not None:
             legend_elements.append(Patch(facecolor='orange', alpha=0.5, label='Nugget'))
 
@@ -2176,7 +2162,7 @@ class VariogramAnalysis:
         axs[1].set_ylabel('Semivariance')
         axs[1].legend(handles=legend_elements, loc='upper right')
 
-        # Add model info to title
+        # add model info to title
         rmse_str = ""
         if isinstance(self.cv_mean_error_best_aic, dict):
             rmse = self.cv_mean_error_best_aic.get('rmse', None)
@@ -2187,10 +2173,11 @@ class VariogramAnalysis:
         plt.tight_layout()
         return fig
 
-    # Alias for backward compatibility
+    # alias for backward compatibility
     def plot_best_spherical_model(self):
         """Alias for plot_best_model() for backward compatibility."""
         return self.plot_best_model()
 
 
-#class RegionalUncertaintyEstimator:
+# class RegionalUncertaintyEstimator:
+

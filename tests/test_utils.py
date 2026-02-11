@@ -1,10 +1,8 @@
-"""
-Comprehensive pytest test file for unit_utils and time_utils modules.
+"""Comprehensive pytest test file for unit_utils and time_utils modules.
 
 Tests two utility modules:
 1. src/topochange/unit_utils.py - Unit conversion and CRS handling
-2. src/topochange/time_utils.py - Time and epoch conversion
-"""
+2. src/topochange/time_utils.py - Time and epoch conversion"""
 
 import pytest
 import numpy as np
@@ -46,9 +44,7 @@ from topochange.time_utils import (
 )
 
 
-# =============================================================================
-# UNIT_UTILS TESTS
-# =============================================================================
+# uNIT_UTILS TESTS
 
 class TestUnitInfoDataclass:
     """Tests for UnitInfo dataclass and basic properties."""
@@ -294,7 +290,7 @@ class TestCRSUnitExtraction:
     def test_get_crs_units_compound(self):
         """Test getting both units from compound CRS."""
         h_unit, v_unit = get_crs_units("EPSG:6349")
-        # EPSG:6349 is a geographic+vertical compound, so h_unit is angular (degree)
+        # ePSG:6349 is a geographic+vertical compound, so h_unit is angular (degree)
         assert h_unit.category in ["linear", "angular"]
         # v_unit should be meter
         assert v_unit is not None
@@ -449,7 +445,7 @@ class TestGetConversionFactor:
 
     def test_category_mismatch_raises_error(self):
         """Test that convert_length with mismatched categories raises ValueError."""
-        # Note: get_conversion_factor computes directly but convert_length checks categories
+        # note: get_conversion_factor computes directly but convert_length checks categories
         with pytest.raises(ValueError):
             convert_length(1, "meter", "degree")
 
@@ -584,9 +580,7 @@ class TestDescribeUnit:
         assert "°" in result
 
 
-# =============================================================================
-# TIME_UTILS TESTS
-# =============================================================================
+# tIME_UTILS TESTS
 
 class TestDatetimeToDecimalYear:
     """Tests for _datetime_to_decimal_year() function."""
@@ -595,7 +589,7 @@ class TestDatetimeToDecimalYear:
         """Test that Jan 1 returns integer year (0 fraction)."""
         dt = datetime.datetime(2020, 1, 1, 0, 0, 0)
         result = _datetime_to_decimal_year(dt)
-        # Jan 1 should have minimal fractional part
+        # jan 1 should have minimal fractional part
         assert int(result) == 2020
         assert result < 2020.01
 
@@ -604,7 +598,7 @@ class TestDatetimeToDecimalYear:
         dt = datetime.datetime(2020, 7, 1, 0, 0, 0)
         result = _datetime_to_decimal_year(dt)
         assert int(result) == 2020
-        # July 1 is approximately halfway (0.5), but leap year makes it slightly less
+        # july 1 is approximately halfway (0.5), but leap year makes it slightly less
         assert 0.49 < (result - 2020) < 0.51
 
     def test_dec_31_near_end_of_year(self):
@@ -623,21 +617,21 @@ class TestDatetimeToDecimalYear:
         dec_leap = _datetime_to_decimal_year(dt_leap)
         dec_common = _datetime_to_decimal_year(dt_common)
 
-        # Due to leap year, the fractions should differ slightly
+        # due to leap year, the fractions should differ slightly
         frac_leap = dec_leap - 2020
         frac_common = dec_common - 2021
         assert abs(frac_leap - frac_common) < 0.01
 
     def test_consistency(self):
         """Test that same date each year gives similar decimal fraction."""
-        # Use non-leap years for consistency
+        # use non-leap years for consistency
         dt1 = datetime.datetime(2019, 3, 15)
         dt2 = datetime.datetime(2021, 3, 15)
 
         frac1 = _datetime_to_decimal_year(dt1) - 2019
         frac2 = _datetime_to_decimal_year(dt2) - 2021
 
-        # Fractions should be similar (within ~0.01, allowing for leap year differences)
+        # fractions should be similar (within ~0.01, allowing for leap year differences)
         assert abs(frac1 - frac2) < 0.01
 
 
@@ -766,7 +760,7 @@ class TestGpsSecondsToDecimalYear:
 
     def test_seconds_produce_valid_year(self):
         """Test that large GPS seconds produce valid year."""
-        # Approximately 1 billion seconds from GPS epoch
+        # approximately 1 billion seconds from GPS epoch
         result = gps_seconds_to_decimal_year_utc(1e9)
         assert 2000 < result < 2050
 
@@ -807,15 +801,15 @@ class TestGuessInTimeFromStats:
 
     def test_boundary_cases(self):
         """Test boundary cases."""
-        # Small values should be gws
+        # small values should be gws
         result1 = _guess_in_time_from_stats(0, 100000, 500000)
         assert result1 == "gws"
 
-        # Around adjusted magnitude should be gst
+        # around adjusted magnitude should be gst
         result2 = _guess_in_time_from_stats(-5e8, 1e8, 2e8)
         assert result2 == "gst"
 
-        # Large absolute GPS seconds
+        # large absolute GPS seconds
         result3 = _guess_in_time_from_stats(1.5e9, 1.8e9, 2.0e9)
         assert result3 == "gt"
 
@@ -828,25 +822,23 @@ class TestTimeUtilsIntegration:
         dt1 = datetime.datetime(2010, 6, 15, 12, 0, 0)
         dec1 = _datetime_to_decimal_year(dt1)
 
-        # Decimal year should be between 2010 and 2011
+        # decimal year should be between 2010 and 2011
         assert 2010 < dec1 < 2011
 
-        # Fractional part should be between 0 and 1
+        # fractional part should be between 0 and 1
         assert 0 < (dec1 - 2010) < 1
 
     def test_epoch_string_to_decimal_consistency(self):
         """Test consistency of epoch string parsing."""
-        # Same date in different formats should give same result
+        # same date in different formats should give same result
         iso = _parse_epoch_string_to_decimal("2006-04-06")
         us_fmt = _parse_epoch_string_to_decimal("04/06/2006")
 
-        # Should be very close (allowing for format ambiguity)
+        # should be very close (allowing for format ambiguity)
         assert abs(iso - us_fmt) < 0.01
 
 
-# =============================================================================
-# EDGE CASES AND ERROR HANDLING
-# =============================================================================
+# eDGE CASES AND ERROR HANDLING
 
 class TestEdgeCases:
     """Tests for edge cases and error conditions."""
@@ -990,3 +982,4 @@ class TestCategorySeparation:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+

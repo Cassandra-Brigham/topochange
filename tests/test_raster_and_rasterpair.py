@@ -1,9 +1,7 @@
-"""
-Comprehensive test suite for Raster and RasterPair classes.
+"""Comprehensive test suite for Raster and RasterPair classes.
 
 Tests `topochange.raster.Raster` and `topochange.rasterpair.RasterPair`
-with synthetic GeoTIFF fixtures.
-"""
+with synthetic GeoTIFF fixtures."""
 
 import pytest
 import numpy as np
@@ -25,9 +23,7 @@ from topochange.rasterpair import (
 )
 
 
-# =============================================================================
-# Synthetic GeoTIFF Fixture Functions
-# =============================================================================
+# synthetic GeoTIFF Fixture Functions
 
 def create_synthetic_raster(
     filepath,
@@ -70,9 +66,7 @@ def create_synthetic_raster(
         dst.write(data, 1)
 
 
-# =============================================================================
-# Pytest Fixtures
-# =============================================================================
+# pytest Fixtures
 
 @pytest.fixture
 def tmp_dir(tmp_path):
@@ -87,11 +81,11 @@ def synthetic_dem_path(tmp_dir):
     data = np.random.RandomState(42).randn(100, 100) * 10 + 1000
     data = data.astype(np.float32)
 
-    # Add some nodata pixels in corners
+    # add some nodata pixels in corners
     data[0:5, 0:5] = -9999.0
     data[-5:, -5:] = -9999.0
 
-    # Bounds in UTM zone 10N (meters)
+    # bounds in UTM zone 10N (meters)
     bounds = (500000, 4000000, 500500, 4000500)
 
     filepath = os.path.join(tmp_dir, "dem1.tif")
@@ -109,16 +103,16 @@ def synthetic_dem_path(tmp_dir):
 @pytest.fixture
 def synthetic_dem_path_2(tmp_dir):
     """Create a second synthetic DEM for differencing (slightly different data)."""
-    # Same data structure as DEM1, but with small changes
+    # same data structure as DEM1, but with small changes
     data = np.random.RandomState(42).randn(100, 100) * 10 + 1000
     data = data + np.random.RandomState(43).randn(100, 100) * 0.5  # Small changes
     data = data.astype(np.float32)
 
-    # Add some nodata pixels in corners
+    # add some nodata pixels in corners
     data[0:5, 0:5] = -9999.0
     data[-5:, -5:] = -9999.0
 
-    # Same bounds as DEM1
+    # same bounds as DEM1
     bounds = (500000, 4000000, 500500, 4000500)
 
     filepath = os.path.join(tmp_dir, "dem2.tif")
@@ -139,10 +133,10 @@ def synthetic_dem_feet(tmp_dir):
     data = np.random.RandomState(44).randn(80, 80) * 100 + 3000  # elevation in feet
     data = data.astype(np.float32)
 
-    # Add nodata pixels
+    # add nodata pixels
     data[0:4, 0:4] = -9999.0
 
-    # Bounds in US feet (approximate)
+    # bounds in US feet (approximate)
     bounds = (1640419, 13123360, 1641959, 13124900)
 
     filepath = os.path.join(tmp_dir, "dem_feet.tif")
@@ -163,10 +157,10 @@ def synthetic_dem_geographic(tmp_dir):
     data = np.random.RandomState(45).randn(60, 60) * 50 + 1500
     data = data.astype(np.float32)
 
-    # Add nodata pixels
+    # add nodata pixels
     data[0:3, 0:3] = -9999.0
 
-    # Bounds in geographic degrees (roughly California)
+    # bounds in geographic degrees (roughly California)
     bounds = (-120.5, 37.5, -120.0, 38.0)
 
     filepath = os.path.join(tmp_dir, "dem_geographic.tif")
@@ -181,9 +175,7 @@ def synthetic_dem_geographic(tmp_dir):
     return filepath
 
 
-# =============================================================================
-# Tests for Raster class
-# =============================================================================
+# tests for Raster class
 
 class TestRasterCreation:
     """Tests for Raster creation and loading."""
@@ -209,7 +201,7 @@ class TestRasterCreation:
         raster = Raster.from_file(synthetic_dem_path)
 
         assert raster.bounds is not None
-        # Check bounds are reasonable (should match our fixture bounds)
+        # check bounds are reasonable (should match our fixture bounds)
         assert raster.bounds.left == 500000
         assert raster.bounds.bottom == 4000000
         assert raster.bounds.right == 500500
@@ -226,7 +218,7 @@ class TestRasterCreation:
         """Test that resolution is correctly calculated."""
         raster = Raster.from_file(synthetic_dem_path)
 
-        # Bounds: 500000 to 500500 (500 units) over 100 pixels = 5 units/pixel
+        # bounds: 500000 to 500500 (500 units) over 100 pixels = 5 units/pixel
         assert raster.resolution is not None
         assert abs(raster.resolution - 5.0) < 0.01
 
@@ -245,19 +237,19 @@ class TestRasterDataAccess:
 
     def test_data_values_match(self, synthetic_dem_path):
         """Test that loaded data matches synthetic input."""
-        # Create reference data
+        # create reference data
         ref_data = np.random.RandomState(42).randn(100, 100) * 10 + 1000
         ref_data[0:5, 0:5] = -9999.0
         ref_data[-5:, -5:] = -9999.0
         ref_data = ref_data.astype(np.float32)
 
-        # Load raster
+        # load Raster
         raster = Raster.from_file(synthetic_dem_path)
         loaded_data = raster.data.values
 
-        # Check that data matches (allowing for float precision)
+        # check that data matches (allowing for float precision)
         assert loaded_data.shape == ref_data.shape
-        # Compare non-nodata regions
+        # compare non-nodata regions
         valid = ref_data != -9999.0
         assert np.allclose(loaded_data[valid], ref_data[valid], atol=0.01)
 
@@ -269,7 +261,7 @@ class TestRasterUnitConversion:
         """Test set_units method."""
         raster = Raster.from_file(synthetic_dem_path)
 
-        # Should not raise
+        # should not raise
         raster.set_units(horizontal_unit="meter", vertical_unit="meter")
 
     def test_convert_values_to_meters_with_meter_units(self, synthetic_dem_path):
@@ -301,13 +293,13 @@ class TestRasterUnitConversion:
 
         original = np.array([100.0, 200.0, 300.0])
 
-        # Convert to meters
+        # convert to meters
         in_meters = raster.convert_values_to_meters(original)
 
-        # Convert back from meters
+        # convert back from meters
         back_to_original = raster.convert_values_from_meters(in_meters)
 
-        # Should match original
+        # should match original
         assert np.allclose(back_to_original, original, rtol=0.01)
 
     def test_are_units_metric(self, synthetic_dem_path):
@@ -317,9 +309,9 @@ class TestRasterUnitConversion:
         # UTM zone 10N uses meters for horizontal, but vertical may not be defined
         is_metric_horiz, is_metric_vert = raster.are_units_metric()
 
-        # Horizontal should be metric (UTM uses meters)
+        # horizontal should be metric (UTM uses meters)
         assert is_metric_horiz is True
-        # Vertical may not be metric or may be undefined
+        # vertical may not be metric or may be undefined
         assert isinstance(is_metric_vert, (bool, type(None)))
 
 
@@ -339,7 +331,7 @@ class TestRasterMetadata:
         """Test add_metadata updates CRS."""
         raster = Raster.from_file(synthetic_dem_path)
 
-        # Update with a different horizontal CRS
+        # update with a different horizontal CRS
         new_crs = CRS.from_epsg(32611)  # UTM zone 11N
         raster.add_metadata(horizontal_CRS=new_crs)
 
@@ -363,9 +355,7 @@ class TestRasterCRSProperties:
         assert raster.current_horizontal_crs == raster.original_horizontal_crs
 
 
-# =============================================================================
-# Tests for utility functions
-# =============================================================================
+# tests for utility functions
 
 class TestCRSEquivalence:
     """Tests for _crs_equivalent function."""
@@ -413,7 +403,7 @@ class TestGeoidEquivalence:
 
     def test_geoid_equivalent_with_prefix(self):
         """Test normalization of geoid with prefixes."""
-        # Both should normalize to "geoid12b"
+        # both should normalize to "geoid12b"
         assert _geoid_equivalent("us_noaa_geoid12b", "geoid12B") is True
         assert _geoid_equivalent("noaa_geoid12b", "geoid12b") is True
 
@@ -506,9 +496,7 @@ class TestCreateValidDataMask:
         assert not mask[1, 1]
 
 
-# =============================================================================
-# Tests for RasterPair class
-# =============================================================================
+# tests for RasterPair class
 
 class TestRasterPairCreation:
     """Tests for RasterPair creation."""
@@ -613,7 +601,7 @@ class TestRasterPairDifferencing:
 
         stats = result.get("stats", {})
 
-        # Check for expected statistical keys
+        # check for expected statistical keys
         expected_keys = {"mean", "std", "min", "max"}
         for key in expected_keys:
             assert key in stats, f"Expected key '{key}' in stats"
@@ -632,7 +620,7 @@ class TestRasterPairDifferencing:
         stats = result.get("stats", {})
         mean_diff = stats.get("mean", 0)
 
-        # Difference should be small since DEMs are similar (within 0.5 * sigma)
+        # difference should be small since DEMs are similar (within 0.5 * sigma)
         assert abs(mean_diff) < 1.0, f"Mean difference too large: {mean_diff}"
 
 
@@ -676,22 +664,20 @@ class TestRasterPairExtent:
         assert result["has_overlap"] is True  # Same bounds, so should overlap
 
 
-# =============================================================================
-# Integration tests
-# =============================================================================
+# integration tests
 
 class TestRasterIntegration:
     """Integration tests combining multiple Raster methods."""
 
     def test_load_transform_metadata(self, synthetic_dem_path):
         """Test loading, transforming metadata, and querying."""
-        # Load raster
+        # load Raster
         raster = Raster.from_file(synthetic_dem_path)
 
-        # Add metadata
+        # add metadata
         raster.add_metadata(epoch=2020.5)
 
-        # Check various properties
+        # check various properties
         assert raster.filename == synthetic_dem_path
         assert raster.epoch == 2020.5
         assert raster.width == 100
@@ -709,20 +695,21 @@ class TestRasterPairIntegration:
 
         pair = RasterPair(raster1, raster2)
 
-        # Step 1: Compare
+        # step 1: Compare
         crs_check = pair.check_horizontal_crs_match()
         assert crs_check["match"] is True
 
-        # Step 2: Compute difference
+        # step 2: Compute difference
         diff_result = pair.compute_difference(
             transform_first=False,
             verbose=False,
         )
 
-        # Step 3: Check results
+        # step 3: Check results
         assert "stats" in diff_result
         assert diff_result["stats"]["count_valid"] > 0
 
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+

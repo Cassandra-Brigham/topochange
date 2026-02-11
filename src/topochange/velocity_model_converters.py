@@ -1,15 +1,4 @@
-# velocity_model_converters.py
-"""
-Format converters for velocity/deformation models.
-
-Handles conversion of various source formats to PROJ-compatible GeoTIFF:
-  - UCERF3 OpenSHA → GeoTIFF
-  - USGS NSHM NetCDF → GeoTIFF  
-  - GEM GSRM ASCII → GeoTIFF
-  - EarthScope point data → GeoTIFF
-  - Generic NetCDF → GeoTIFF
-  - Generic ASCII/CSV → GeoTIFF
-"""
+"""format converters for velocity/deformation models to PROJ-compatible GeoTIFF."""
 
 from __future__ import annotations
 
@@ -42,9 +31,7 @@ except ImportError:
     griddata = None
 
 
-# ============================================================================
-# Base converter class
-# ============================================================================
+# base converter class
 
 class VelocityConverter:
     """Base class for velocity model format converters."""
@@ -69,9 +56,7 @@ class VelocityConverter:
         raise NotImplementedError
 
 
-# ============================================================================
-# UCERF3 OpenSHA converter
-# ============================================================================
+# uCERF3 OpenSHA converter
 
 class UCERF3Converter(VelocityConverter):
     """
@@ -104,7 +89,7 @@ class UCERF3Converter(VelocityConverter):
         
         input_path = Path(input_path)
         
-        # Extract if zip
+        # extract if zip
         if input_path.suffix == '.zip':
             extract_dir = input_path.parent / input_path.stem
             extract_dir.mkdir(exist_ok=True)
@@ -116,9 +101,9 @@ class UCERF3Converter(VelocityConverter):
         else:
             work_dir = input_path
         
-        # Find strain rate files
-        # UCERF3 format: off-fault strain on 0.1 degree grid
-        # Typically: *_strain_rates.txt or similar
+        # find strain rate files
+        # uCERF3 format: off-fault strain on 0.1 degree grid
+        # typically: *_strain_rates.txt or similar
         strain_files = list(work_dir.glob(f"*{model_variant}*strain*.txt"))
         if not strain_files:
             strain_files = list(work_dir.glob("*strain*.txt"))
@@ -131,8 +116,8 @@ class UCERF3Converter(VelocityConverter):
         
         strain_file = strain_files[0]
         
-        # Parse UCERF3 strain rate file
-        # Format: lon, lat, exx, eyy, exy (strain rate tensor components)
+        # parse UCERF3 strain rate file
+        # format: lon, lat, exx, eyy, exy (strain rate tensor components)
         data = np.loadtxt(strain_file, skiprows=1)
         
         if data.shape[1] < 5:
@@ -147,37 +132,37 @@ class UCERF3Converter(VelocityConverter):
         eyy = data[:, 3]  # N-S strain rate (1/yr)
         exy = data[:, 4]  # Shear strain rate (1/yr)
         
-        # Convert strain rates to velocities
-        # This is simplified - proper conversion requires:
+        # convert strain rates to velocities
+        # this is simplified - proper conversion requires:
         # 1. Integration of strain field
         # 2. Boundary conditions (plate motion)
         # 3. Rotation consideration
         
-        # For now, approximate using strain × characteristic length
-        # This gives relative velocities, not absolute
+        # for now, approximate using strain × characteristic length
+        # this gives relative velocities, not absolute
         R_earth = 6371000  # meters
         deg_to_rad = np.pi / 180
         lat_rad = lats * deg_to_rad
         
-        # Approximate velocity from strain (simplified)
+        # approximate velocity from strain (simplified)
         # v = strain_rate × distance
-        # Use local earth radius for characteristic scale
+        # use local earth radius for characteristic scale
         dx = 0.1 * deg_to_rad * R_earth * np.cos(lat_rad)  # E-W distance
         dy = 0.1 * deg_to_rad * R_earth  # N-S distance
         
-        # Velocity components (mm/yr)
+        # velocity components (mm/yr)
         ve = exx * dx * 1000  # East velocity
         vn = eyy * dy * 1000  # North velocity
         
-        # For vertical: assume negligible from horizontal strain
+        # for vertical: assume negligible from horizontal strain
         # (would need full 3D model for proper vertical)
         vu = np.zeros_like(ve)
         
-        # Create regular grid
+        # create regular grid
         lon_min, lon_max = lons.min(), lons.max()
         lat_min, lat_max = lats.min(), lats.max()
         
-        # UCERF3 uses 0.1 degree spacing
+        # uCERF3 uses 0.1 degree spacing
         resolution = 0.1
         nx = int((lon_max - lon_min) / resolution) + 1
         ny = int((lat_max - lat_min) / resolution) + 1
@@ -186,7 +171,7 @@ class UCERF3Converter(VelocityConverter):
         lat_grid = np.linspace(lat_min, lat_max, ny)
         lon_mesh, lat_mesh = np.meshgrid(lon_grid, lat_grid)
         
-        # Interpolate to regular grid
+        # interpolate to regular grid
         if griddata is None:
             raise ImportError("scipy required for gridding")
         
@@ -196,7 +181,7 @@ class UCERF3Converter(VelocityConverter):
         vn_grid = griddata((lons, lats), vn, (lon_mesh, lat_mesh), method='linear')
         vu_grid = np.zeros_like(ve_grid)
         
-        # Write to GeoTIFF
+        # write to GeoTIFF
         transform = from_bounds(lon_min, lat_min, lon_max, lat_max, nx, ny)
         
         with rasterio.open(
@@ -232,9 +217,7 @@ class UCERF3Converter(VelocityConverter):
         return Path(output_path)
 
 
-# ============================================================================
-# USGS NSHM NetCDF converter
-# ============================================================================
+# uSGS NSHM NetCDF converter
 
 class USGSNSHMConverter(VelocityConverter):
     """
@@ -269,7 +252,7 @@ class USGSNSHMConverter(VelocityConverter):
         
         input_path = Path(input_path)
         
-        # Find NetCDF file
+        # find NetCDF file
         if input_path.is_dir():
             nc_files = list(input_path.glob(f"*{model_variant}*.nc"))
             if not nc_files:
@@ -280,12 +263,12 @@ class USGSNSHMConverter(VelocityConverter):
         else:
             nc_file = input_path
         
-        # Load NetCDF
+        # load NetCDF
         print(f"Loading {nc_file}")
         ds = xr.open_dataset(nc_file)
         
-        # Extract velocity components
-        # NSHM format may vary - try common variable names
+        # extract velocity components
+        # nSHM format may vary - try common variable names
         var_names = {
             've': ['velocity_east', 've', 'east_velocity', 'veast'],
             'vn': ['velocity_north', 'vn', 'north_velocity', 'vnorth'],
@@ -312,8 +295,8 @@ class USGSNSHMConverter(VelocityConverter):
         vn = ds[vn_var].values
         vu = ds[vu_var].values if vu_var else np.zeros_like(ve)
         
-        # Get coordinates
-        # Try common names
+        # get coordinates
+        # try common names
         lon_var = find_var(['lon', 'longitude', 'x'])
         lat_var = find_var(['lat', 'latitude', 'y'])
         
@@ -326,8 +309,8 @@ class USGSNSHMConverter(VelocityConverter):
         lons = ds[lon_var].values
         lats = ds[lat_var].values
         
-        # Convert to mm/year if needed
-        # Check units
+        # convert to mm/year if needed
+        # check units
         ve_units = ds[ve_var].attrs.get('units', 'm/year')
         if 'm/year' in ve_units.lower() or 'm/yr' in ve_units.lower():
             print(f"Converting from m/year to mm/year")
@@ -335,7 +318,7 @@ class USGSNSHMConverter(VelocityConverter):
             vn *= 1000
             vu *= 1000
         
-        # Determine grid spacing and create GeoTIFF
+        # determine grid spacing and create GeoTIFF
         if lons.ndim == 1 and lats.ndim == 1:
             # 1D coordinate arrays - create mesh
             ny, nx = len(lats), len(lons)
@@ -347,7 +330,7 @@ class USGSNSHMConverter(VelocityConverter):
             lat_min, lat_max = lats.min(), lats.max()
             transform = from_bounds(lon_min, lat_min, lon_max, lat_max, nx, ny)
         
-        # Write GeoTIFF
+        # write GeoTIFF
         with rasterio.open(
             output_path, 'w',
             driver='GTiff',
@@ -382,9 +365,7 @@ class USGSNSHMConverter(VelocityConverter):
         return Path(output_path)
 
 
-# ============================================================================
-# GEM GSRM ASCII converter
-# ============================================================================
+# gEM GSRM ASCII converter
 
 class GSRMConverter(VelocityConverter):
     """
@@ -409,7 +390,7 @@ class GSRMConverter(VelocityConverter):
         
         input_path = Path(input_path)
         
-        # Find strain rate files
+        # find strain rate files
         if input_path.is_dir():
             ascii_files = list(input_path.glob("*.txt"))
             if not ascii_files:
@@ -420,8 +401,8 @@ class GSRMConverter(VelocityConverter):
         else:
             ascii_file = input_path
         
-        # Parse GSRM format
-        # Typical: lon, lat, exx, eyy, exy, [uncertainties]
+        # parse GSRM format
+        # typical: lon, lat, exx, eyy, exy, [uncertainties]
         data = np.loadtxt(ascii_file, skiprows=1)
         
         lons = data[:, 0]
@@ -430,12 +411,12 @@ class GSRMConverter(VelocityConverter):
         eyy = data[:, 3]
         exy = data[:, 4]
         
-        # Convert to velocities (same approach as UCERF3)
+        # convert to velocities (same approach as UCERF3)
         R_earth = 6371000
         deg_to_rad = np.pi / 180
         lat_rad = lats * deg_to_rad
         
-        # Estimate grid spacing
+        # estimate grid spacing
         unique_lons = np.unique(lons)
         resolution = np.median(np.diff(unique_lons))
         
@@ -446,7 +427,7 @@ class GSRMConverter(VelocityConverter):
         vn = eyy * dy * 1000
         vu = np.zeros_like(ve)
         
-        # Grid
+        # grid
         lon_min, lon_max = lons.min(), lons.max()
         lat_min, lat_max = lats.min(), lats.max()
         
@@ -464,7 +445,7 @@ class GSRMConverter(VelocityConverter):
         vn_grid = griddata((lons, lats), vn, (lon_mesh, lat_mesh), method='linear')
         vu_grid = np.zeros_like(ve_grid)
         
-        # Write GeoTIFF
+        # write GeoTIFF
         transform = from_bounds(lon_min, lat_min, lon_max, lat_max, nx, ny)
         
         with rasterio.open(
@@ -496,9 +477,7 @@ class GSRMConverter(VelocityConverter):
         return Path(output_path)
 
 
-# ============================================================================
-# EarthScope point data converter
-# ============================================================================
+# earthScope point data converter
 
 class EarthScopeConverter(VelocityConverter):
     """
@@ -525,19 +504,19 @@ class EarthScopeConverter(VelocityConverter):
         lat_rad = np.radians(lat)
         lon_rad = np.radians(lon)
 
-        # Rotation matrix from ECEF to ENU
+        # rotation matrix from ECEF to ENU
         sin_lat = np.sin(lat_rad)
         cos_lat = np.cos(lat_rad)
         sin_lon = np.sin(lon_rad)
         cos_lon = np.cos(lon_rad)
 
-        # East component: -sin(lon)*vx + cos(lon)*vy
+        # east component: -sin(lon)*vx + cos(lon)*vy
         ve = -sin_lon * vx + cos_lon * vy
 
-        # North component: -sin(lat)*cos(lon)*vx - sin(lat)*sin(lon)*vy + cos(lat)*vz
+        # north component: -sin(lat)*cos(lon)*vx - sin(lat)*sin(lon)*vy + cos(lat)*vz
         vn = -sin_lat * cos_lon * vx - sin_lat * sin_lon * vy + cos_lat * vz
 
-        # Up component: cos(lat)*cos(lon)*vx + cos(lat)*sin(lon)*vy + sin(lat)*vz
+        # up component: cos(lat)*cos(lon)*vx + cos(lat)*sin(lon)*vy + sin(lat)*vz
         vu = cos_lat * cos_lon * vx + cos_lat * sin_lon * vy + sin_lat * vz
 
         return ve, vn, vu
@@ -561,20 +540,20 @@ class EarthScopeConverter(VelocityConverter):
             for line in f:
                 line = line.strip()
 
-                # Skip empty lines and comments
+                # skip empty lines and comments
                 if not line or line.startswith('#') or line.startswith('*'):
-                    # Check for data section start
+                    # check for data section start
                     if 'Dot#' in line or 'dX/dt' in line:
                         in_data = True
                     continue
 
-                # Try to parse data line
+                # try to parse data line
                 parts = line.split()
                 if len(parts) < 15:
                     continue
 
                 try:
-                    # Column indices (0-based):
+                    # column indices (0-based):
                     # 0: Dot#, 1: Name, 2: Ref_epoch, 3: Ref_jday
                     # 4: Ref_X, 5: Ref_Y, 6: Ref_Z
                     # 7: Ref_Nlat, 8: Ref_Elong, 9: Ref_Up
@@ -587,7 +566,7 @@ class EarthScopeConverter(VelocityConverter):
                     vy = float(parts[11])  # m/yr
                     vz = float(parts[12])  # m/yr
 
-                    # Validate reasonable values
+                    # validate reasonable values
                     if -180 <= lon <= 180 and -90 <= lat <= 90:
                         lons.append(lon)
                         lats.append(lat)
@@ -607,10 +586,10 @@ class EarthScopeConverter(VelocityConverter):
         vy = np.array(vy_list)
         vz = np.array(vz_list)
 
-        # Convert XYZ to ENU
+        # convert XYZ to ENU
         ve, vn, vu = EarthScopeConverter._xyz_to_enu(vx, vy, vz, lats, lons)
 
-        # Convert from m/yr to mm/yr
+        # convert from m/yr to mm/yr
         ve *= 1000
         vn *= 1000
         vu *= 1000
@@ -643,7 +622,7 @@ class EarthScopeConverter(VelocityConverter):
 
         input_path = Path(input_path)
 
-        # Parse the velocity file
+        # parse the velocity file
         print(f"Parsing velocity file: {input_path}")
         lons, lats, ve, vn, vu = EarthScopeConverter._parse_vel_file(input_path)
 
@@ -653,21 +632,21 @@ class EarthScopeConverter(VelocityConverter):
         print(f"  East velocity range: {ve.min():.2f} to {ve.max():.2f} mm/yr")
         print(f"  North velocity range: {vn.min():.2f} to {vn.max():.2f} mm/yr")
 
-        # Determine grid bounds
+        # determine grid bounds
         if bbox is not None:
             lon_min, lat_min, lon_max, lat_max = bbox
         else:
             lon_min, lon_max = lons.min(), lons.max()
             lat_min, lat_max = lats.min(), lats.max()
 
-        # Add small buffer
+        # add small buffer
         buffer = resolution / 2
         lon_min -= buffer
         lon_max += buffer
         lat_min -= buffer
         lat_max += buffer
 
-        # Create regular grid
+        # create regular grid
         nx = int((lon_max - lon_min) / resolution) + 1
         ny = int((lat_max - lat_min) / resolution) + 1
 
@@ -677,13 +656,13 @@ class EarthScopeConverter(VelocityConverter):
 
         print(f"Creating {nx}x{ny} grid ({resolution}° resolution)")
 
-        # Interpolate
+        # interpolate
         print(f"Interpolating using '{method}' method...")
         ve_grid = griddata((lons, lats), ve, (lon_mesh, lat_mesh), method=method)
         vn_grid = griddata((lons, lats), vn, (lon_mesh, lat_mesh), method=method)
         vu_grid = griddata((lons, lats), vu, (lon_mesh, lat_mesh), method=method)
 
-        # Fill NaN values at edges with nearest neighbor
+        # fill NaN values at edges with nearest neighbor
         mask = np.isnan(ve_grid)
         if mask.any():
             print(f"Filling {mask.sum()} NaN values with nearest neighbor...")
@@ -694,12 +673,12 @@ class EarthScopeConverter(VelocityConverter):
             vn_grid[mask] = vn_nn[mask]
             vu_grid[mask] = vu_nn[mask]
 
-        # Write GeoTIFF
-        # Note: rasterio expects data in (rows, cols) = (lat, lon) order
+        # write GeoTIFF
+        # note: rasterio expects data in (rows, cols) = (lat, lon) order
         # with lat decreasing from top to bottom
         transform = from_bounds(lon_min, lat_min, lon_max, lat_max, nx, ny)
 
-        # Flip latitude axis so north is up
+        # flip latitude axis so north is up
         ve_grid = np.flipud(ve_grid)
         vn_grid = np.flipud(vn_grid)
         vu_grid = np.flipud(vu_grid)
@@ -738,9 +717,7 @@ class EarthScopeConverter(VelocityConverter):
         return Path(output_path)
 
 
-# ============================================================================
-# Converter registry and dispatcher
-# ============================================================================
+# converter registry and dispatcher
 
 CONVERTERS = {
     'ucerf3': UCERF3Converter,
@@ -768,7 +745,7 @@ def convert_model(
     Returns:
         Path to created GeoTIFF
     """
-    # Determine converter
+    # determine converter
     converter_key = None
     for key in CONVERTERS:
         if key in model_name.lower():
@@ -781,18 +758,16 @@ def convert_model(
             f"Available: {list(CONVERTERS.keys())}"
         )
     
-    # Auto-generate output path
+    # auto-generate output path
     if output_path is None:
         output_path = input_path.parent / f"{model_name}_velocity.tif"
     
-    # Run converter
+    # run converter
     converter = CONVERTERS[converter_key]
     return converter.convert(input_path, output_path, **kwargs)
 
 
-# ============================================================================
-# Convenience exports
-# ============================================================================
+# convenience exports
 
 __all__ = [
     'VelocityConverter',

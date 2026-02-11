@@ -1,8 +1,6 @@
-"""
-Tests for point cloud transformation (Option 1 workflow)
+"""Tests for point cloud transformation (Option 1 workflow)
 Uses synthetic LAZ data from conftest fixtures.
-Excludes velocity transformation tests as requested
-"""
+Excludes velocity transformation tests as requested"""
 
 import pytest
 from topochange import PointCloud, PointCloudPair
@@ -26,7 +24,7 @@ class TestPointCloudPairCreation:
         """Test printing comparison of point cloud pair"""
         pc_pair = PointCloudPair(compare_pc, reference_pc)
 
-        # This should run without error
+        # this should run without error
         pc_pair.print_comparison()
 
 
@@ -36,7 +34,7 @@ class TestPointCloudTransformation:
     @pytest.fixture
     def pc_pair_with_metadata(self, compare_pc, reference_pc):
         """Create a PointCloudPair with updated metadata"""
-        # Update metadata (simulating notebook workflow)
+        # update metadata (simulating notebook workflow)
         compare_pc.add_metadata(
             compound_CRS="EPSG:4979",
             epoch="05/18/2005 - 05/27/2005"
@@ -53,29 +51,29 @@ class TestPointCloudTransformation:
     @requires_pdal
     def test_transform_compare_to_reference_skip_epoch(self, pc_pair_with_metadata):
         """Test transformation with skip_epoch=True (faster for testing)"""
-        # Transform compare to match reference
+        # transform compare to match reference
         transformed = pc_pair_with_metadata.transform_compare_to_match_reference(
             skip_epoch=True,
             verbose=False
         )
 
-        # Check that transformation completed
+        # check that transformation completed
         assert transformed is True or transformed is None  # Some implementations return None
 
     @requires_pdal
     def test_crs_after_transformation(self, pc_pair_with_metadata):
         """Test that CRS matches after transformation"""
-        # Get reference CRS before transformation
+        # get reference CRS before transformation
         ref_crs = pc_pair_with_metadata.pc2.current_compound_crs or \
                   pc_pair_with_metadata.pc2.original_compound_crs
 
-        # Transform
+        # transform
         pc_pair_with_metadata.transform_compare_to_match_reference(
             skip_epoch=True,
             verbose=False
         )
 
-        # Check that compare CRS now matches reference
+        # check that compare CRS now matches reference
         compare_crs = pc_pair_with_metadata.pc1.current_compound_crs
 
         # CRS should be set (exact match depends on implementation)
@@ -93,11 +91,11 @@ class TestCRSTransformationComponents:
     @requires_pdal
     def test_horizontal_crs_transformation(self, simple_pc_pair):
         """Test that horizontal CRS transformation is possible"""
-        # Set different horizontal CRS
+        # set different horizontal CRS
         simple_pc_pair.pc1.add_metadata(horizontal_CRS="EPSG:32611")  # UTM 11N
         simple_pc_pair.pc2.add_metadata(horizontal_CRS="EPSG:32612")  # UTM 12N
 
-        # Should be able to transform
+        # should be able to transform
         try:
             simple_pc_pair.transform_compare_to_match_reference(
                 skip_epoch=True,
@@ -113,11 +111,11 @@ class TestCRSTransformationComponents:
     @requires_pdal
     def test_vertical_crs_transformation(self, simple_pc_pair):
         """Test that vertical CRS transformation is possible"""
-        # Set different vertical CRS
+        # set different vertical CRS
         simple_pc_pair.pc1.add_metadata(vertical_CRS="EPSG:5703")  # NAVD88
         simple_pc_pair.pc2.add_metadata(vertical_CRS="EPSG:5703")  # NAVD88 (same)
 
-        # Should work without error
+        # should work without error
         try:
             simple_pc_pair.transform_compare_to_match_reference(
                 skip_epoch=True,
@@ -142,7 +140,8 @@ class TestTransformationWithVerboseOutput:
             verbose=True
         )
 
-        # Check that some output was produced
+        # check that some output was produced
         captured = capsys.readouterr()
-        # There should be some output (exact content depends on implementation)
+        # there should be some output (exact content depends on implementation)
         assert len(captured.out) > 0 or len(captured.err) > 0
+

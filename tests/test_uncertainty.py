@@ -4,8 +4,7 @@ Tests cover:
 1. DerivativeUncertaintyEstimator - covariance, kernel variance, slope/curvature
 2. Monte Carlo integration with various variogram models
 3. KERNELS dictionary validation
-4. Edge cases (zero sill, resolution)
-"""
+4. Edge cases (zero sill, resolution)"""
 
 import pytest
 import numpy as np
@@ -16,9 +15,7 @@ from topochange.uncertainty import DerivativeUncertaintyEstimator
 from topochange.variogram_models import spherical, exponential, nugget
 
 
-# =============================================================================
-# Test Fixtures and Helpers
-# =============================================================================
+# test Fixtures and Helpers
 
 @pytest.fixture
 def spherical_gamma():
@@ -90,9 +87,7 @@ class MockRegionalEstimator:
         return 0.0 if var_mean < 0 else math.sqrt(var_mean)
 
 
-# =============================================================================
-# Test DerivativeUncertaintyEstimator - Covariance
-# =============================================================================
+# test DerivativeUncertaintyEstimator - Covariance
 
 
 class TestDerivativeEstimatorCovariance:
@@ -120,7 +115,7 @@ class TestDerivativeEstimatorCovariance:
             gamma_func=spherical_gamma, sill=1.0, resolution=1.0
         )
         cov_large = estimator.covariance(np.array([1000.0]))
-        # For spherical, γ(h >> range) = sill, so C(h) ≈ 0
+        # for spherical, γ(h >> range) = sill, so C(h) ≈ 0
         assert np.isclose(cov_large[0], 0.0, atol=1e-10)
 
     def test_covariance_large_lag_exponential(self, exponential_gamma):
@@ -129,7 +124,7 @@ class TestDerivativeEstimatorCovariance:
             gamma_func=exponential_gamma, sill=1.0, resolution=1.0
         )
         cov_large = estimator.covariance(np.array([1000.0]))
-        # For exponential, γ(h) → sill as h → ∞
+        # for exponential, γ(h) → sill as h → ∞
         assert cov_large[0] < 0.01
 
     def test_covariance_nugget(self, nugget_gamma):
@@ -138,12 +133,12 @@ class TestDerivativeEstimatorCovariance:
             gamma_func=nugget_gamma, sill=1.0, resolution=1.0
         )
         cov_nonzero = estimator.covariance(np.array([1.0, 10.0, 100.0]))
-        # For pure nugget with sill=1.0, γ(h>0)=1.0, so C(h)=0
+        # for pure nugget with sill=1.0, γ(h>0)=1.0, so C(h)=0
         assert np.allclose(cov_nonzero, 0.0)
 
     def test_covariance_multiple_lags(self):
         """Test covariance with array input."""
-        # Create a consistent gamma function and sill
+        # create a consistent gamma function and sill
         sill = 1.0
         gamma = lambda h: spherical(h, sill=sill, range_=50.0)
         estimator = DerivativeUncertaintyEstimator(
@@ -153,13 +148,11 @@ class TestDerivativeEstimatorCovariance:
         cov = estimator.covariance(h_array)
         assert cov.shape == h_array.shape
         assert np.isclose(cov[0], sill)  # C(0) = σ²
-        # For spherical with range=50, h=100 >> range, so γ(h)=sill, thus C(h)≈0
+        # for spherical with range=50, h=100 >> range, so γ(h)=sill, thus C(h)≈0
         assert np.isclose(cov[-1], 0.0, atol=1e-10)  # C(large) ≈ 0
 
 
-# =============================================================================
-# Test DerivativeUncertaintyEstimator - Kernel Variance
-# =============================================================================
+# test DerivativeUncertaintyEstimator - Kernel Variance
 
 
 class TestDerivativeEstimatorKernelVariance:
@@ -173,10 +166,10 @@ class TestDerivativeEstimatorKernelVariance:
         kernel = estimator.KERNELS["sobel_x"]
         var = estimator.kernel_variance(kernel)
 
-        # For nugget model (C(h)=0 for h>0, C(0)=sill):
-        # Var = K²_center * sill = (0)² * 1.0 = 0 (center of Sobel X is 0)
-        # Actually, Var = sum_i sum_j K_i K_j C(||x_i - x_j||)
-        # Only the diagonal terms (i=j) contribute: sum_i K_i² * sill
+        # for nugget model (C(h)=0 for h>0, C(0)=sill):
+        # var = K²_center * sill = (0)² * 1.0 = 0 (center of Sobel X is 0)
+        # actually, Var = sum_i sum_j K_i K_j C(||x_i - x_j||)
+        # only the diagonal terms (i=j) contribute: sum_i K_i² * sill
         expected_var = np.sum(kernel**2) * 1.0
         assert np.isclose(var, expected_var, rtol=1e-5)
 
@@ -204,7 +197,7 @@ class TestDerivativeEstimatorKernelVariance:
 
     def test_kernel_variance_scales_with_sill(self, spherical_gamma):
         """Kernel variance should scale linearly with sill."""
-        # Create two estimators with different sills
+        # create two estimators with different sills
         est_sill1 = DerivativeUncertaintyEstimator(
             gamma_func=lambda h: spherical(h, sill=1.0, range_=50.0),
             sill=1.0,
@@ -236,10 +229,10 @@ class TestDerivativeEstimatorKernelVariance:
         var1 = est_res1.kernel_variance(kernel)
         var2 = est_res2.kernel_variance(kernel)
 
-        # Variance scales as resolution² (lags become 2x, covariance at 2x lag is lower)
-        # For nugget this is straightforward: all non-zero lags have covariance 0
-        # So variance should be independent of resolution
-        # Actually for nugget, it should be sum(K²)*sill regardless
+        # variance scales as resolution² (lags become 2x, covariance at 2x lag is lower)
+        # for nugget this is straightforward: all non-zero lags have covariance 0
+        # so variance should be independent of resolution
+        # actually for nugget, it should be sum(K²)*sill regardless
         assert np.isclose(var1, var2, rtol=1e-5)
 
     def test_kernel_variance_nonzero(self, spherical_gamma):
@@ -253,9 +246,7 @@ class TestDerivativeEstimatorKernelVariance:
             assert var >= 0.0, f"{kernel_name} variance should be non-negative"
 
 
-# =============================================================================
-# Test DerivativeUncertaintyEstimator - Slope Uncertainty
-# =============================================================================
+# test DerivativeUncertaintyEstimator - Slope Uncertainty
 
 
 class TestDerivativeEstimatorSlopeUncertainty:
@@ -295,7 +286,7 @@ class TestDerivativeEstimatorSlopeUncertainty:
             gamma_func=nugget_gamma, sill=1.0, resolution=1.0
         )
         std_x, std_y, std_mag = estimator.slope_uncertainty()
-        # With nugget=sill=1, Var(dz/dx) ≈ K_x².sum * sill
+        # with nugget=sill=1, Var(dz/dx) ≈ K_x².sum * sill
         assert std_x > 0.0
         assert std_y > 0.0
         assert std_mag > 0.0
@@ -312,7 +303,7 @@ class TestDerivativeEstimatorSlopeUncertainty:
         std_x1, std_y1, std_mag1 = est_res1.slope_uncertainty()
         std_x2, std_y2, std_mag2 = est_res2.slope_uncertainty()
 
-        # Finer resolution (0.5 < 1.0) should give higher slope uncertainty
+        # finer resolution (0.5 < 1.0) should give higher slope uncertainty
         assert std_mag2 > std_mag1
 
     def test_slope_uncertainty_symmetry(self, spherical_gamma):
@@ -321,13 +312,11 @@ class TestDerivativeEstimatorSlopeUncertainty:
             gamma_func=spherical_gamma, sill=1.0, resolution=1.0
         )
         std_x, std_y, std_mag = estimator.slope_uncertainty()
-        # Spherical is isotropic, so Sobel X and Y should give similar results
+        # spherical is isotropic, so Sobel X and Y should give similar results
         assert np.isclose(std_x, std_y, rtol=0.1)
 
 
-# =============================================================================
-# Test DerivativeUncertaintyEstimator - Curvature Uncertainty
-# =============================================================================
+# test DerivativeUncertaintyEstimator - Curvature Uncertainty
 
 
 class TestDerivativeEstimatorCurvatureUncertainty:
@@ -387,13 +376,11 @@ class TestDerivativeEstimatorCurvatureUncertainty:
         var1 = est_res1.curvature_uncertainty()
         var2 = est_res2.curvature_uncertainty()
 
-        # Finer resolution increases uncertainty
+        # finer resolution increases uncertainty
         assert var2 > var1
 
 
-# =============================================================================
-# Test KERNELS Dictionary
-# =============================================================================
+# test KERNELS Dictionary
 
 
 class TestKernelsDictionary:
@@ -438,9 +425,7 @@ class TestKernelsDictionary:
                 f"{name} should be numeric but is {kernel.dtype}"
 
 
-# =============================================================================
-# Test Monte Carlo Integration (RegionalUncertaintyEstimator logic)
-# =============================================================================
+# test Monte Carlo Integration (RegionalUncertaintyEstimator logic)
 
 
 class TestMonteCarloIntegration:
@@ -452,8 +437,8 @@ class TestMonteCarloIntegration:
         std_mean = estimator.estimate_std_mean_monte_carlo(
             small_polygon, nugget_gamma, sigma2=1.0, n_pairs=5000, seed=42
         )
-        # For pure nugget, covariance is 0 except at h=0
-        # Average covariance should be ≈ 0
+        # for pure nugget, covariance is 0 except at h=0
+        # average covariance should be ≈ 0
         assert std_mean < 0.01
 
     def test_monte_carlo_nugget_large_polygon(self, nugget_gamma, large_polygon):
@@ -462,7 +447,7 @@ class TestMonteCarloIntegration:
         std_mean = estimator.estimate_std_mean_monte_carlo(
             large_polygon, nugget_gamma, sigma2=1.0, n_pairs=5000, seed=42
         )
-        # Still should be ≈ 0
+        # still should be ≈ 0
         assert std_mean < 0.01
 
     def test_monte_carlo_exponential_decreasing_uncertainty(
@@ -476,7 +461,7 @@ class TestMonteCarloIntegration:
         std_large = estimator.estimate_std_mean_monte_carlo(
             large_polygon, exponential_gamma, sigma2=1.0, n_pairs=5000, seed=42
         )
-        # Larger area → more averaging → lower uncertainty
+        # larger area → more averaging → lower uncertainty
         assert std_large < std_small
 
     def test_monte_carlo_spherical_decreasing_uncertainty(
@@ -512,8 +497,8 @@ class TestMonteCarloIntegration:
         std2 = estimator.estimate_std_mean_monte_carlo(
             small_polygon, exponential_gamma, sigma2=1.0, n_pairs=5000, seed=123
         )
-        # Should be different (with very high probability)
-        # But allow some tolerance due to randomness
+        # should be different (with very high probability)
+        # but allow some tolerance due to randomness
         assert abs(std1 - std2) > 1e-6 or np.isclose(std1, std2)
 
     def test_monte_carlo_scales_with_sigma2(self, exponential_gamma, small_polygon):
@@ -538,9 +523,7 @@ class TestMonteCarloIntegration:
         assert std >= 0.0
 
 
-# =============================================================================
-# Test Edge Cases
-# =============================================================================
+# test Edge Cases
 
 
 class TestEdgeCases:
@@ -569,15 +552,15 @@ class TestEdgeCases:
         estimator = DerivativeUncertaintyEstimator(
             gamma_func=gamma_large_range, sill=1.0, resolution=1.0
         )
-        # Covariance should be nearly constant everywhere
+        # covariance should be nearly constant everywhere
         c0 = estimator.covariance(np.array([0.0]))
         c_large = estimator.covariance(np.array([1000.0]))
-        # Should be very close
+        # should be very close
         assert np.isclose(c0[0], c_large[0], rtol=0.1)
 
     def test_negative_variance_handling(self):
         """Monte Carlo should handle negative variance (return 0)."""
-        # Create a "bad" gamma that exceeds sill
+        # create a "bad" gamma that exceeds sill
         def bad_gamma(h):
             return np.ones_like(h) * 2.0
 
@@ -586,7 +569,7 @@ class TestEdgeCases:
         std = estimator.estimate_std_mean_monte_carlo(
             poly, bad_gamma, sigma2=1.0, n_pairs=1000, seed=42
         )
-        # Should return 0 if variance is negative
+        # should return 0 if variance is negative
         assert std == 0.0
 
     def test_covariance_array_scalar_consistency(self, spherical_gamma):
@@ -594,17 +577,15 @@ class TestEdgeCases:
         estimator = DerivativeUncertaintyEstimator(
             gamma_func=spherical_gamma, sill=1.0, resolution=1.0
         )
-        # Scalar-like (1-element array)
+        # scalar-like (1-element array)
         cov_scalar = estimator.covariance(np.array([10.0]))
-        # Array
+        # array
         cov_array = estimator.covariance(np.array([10.0, 10.0]))
         assert np.isclose(cov_scalar[0], cov_array[0])
         assert np.isclose(cov_array[0], cov_array[1])
 
 
-# =============================================================================
-# Test Integration: Combining Multiple Components
-# =============================================================================
+# test Integration: Combining Multiple Components
 
 
 class TestIntegration:
@@ -617,7 +598,7 @@ class TestIntegration:
         )
         std_x, std_y, std_mag = estimator.slope_uncertainty()
 
-        # Verify all values are consistent
+        # verify all values are consistent
         assert std_x >= 0.0
         assert std_y >= 0.0
         assert std_mag >= 0.0
@@ -653,12 +634,13 @@ class TestIntegration:
             )
             results[name] = std
 
-        # Nugget should give near-zero uncertainty
+        # nugget should give near-zero uncertainty
         assert results["nugget"] < 0.01
-        # Spherical and exponential should give similar positive uncertainty
+        # spherical and exponential should give similar positive uncertainty
         assert results["spherical"] > 0.0
         assert results["exponential"] > 0.0
 
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+

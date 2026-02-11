@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pyproj import datadir
 
-# Import the new registry system
+# import the new registry system
 from .velocity_model_registry import (
     VelocityModelInfo,
     load_registry,
@@ -22,7 +22,7 @@ from .velocity_model_registry import (
 
 
 # # Load models from registry at module import
-# VELOCITY_MODELS: List[VelocityModelInfo] =[]# load_registry(
+# vELOCITY_MODELS: List[VelocityModelInfo] =[]# load_registry(
 # #    include_defaults=True,
 # #)
 
@@ -44,7 +44,7 @@ def select_velocity_model(
     
     Now delegates to the registry system for enhanced functionality.
     """
-    # Use the registry's selection function with our loaded models
+    # use the registry's selection function with our loaded models
     return registry_select_model(
         bbox_4326=bbox_4326,
         src_epoch=src_epoch,
@@ -56,7 +56,7 @@ def select_velocity_model(
     )
 
 
-# Keep your bbox intersection helper for compatibility
+# keep your bbox intersection helper for compatibility
 def _bbox_intersects(
     a: Tuple[float, float, float, float],
     b: Tuple[float, float, float, float],

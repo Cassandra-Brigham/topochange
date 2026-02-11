@@ -1,22 +1,8 @@
-"""Propagate variogram-based uncertainty to specific regions.
+"""variogram-based regional uncertainty propagation via Krige's relation.
 
-This module implements model-agnostic uncertainty propagation based on Krige's
-Relation, which guarantees that Monte Carlo integration works for ANY valid
-variogram function (spherical, exponential, Gaussian, Matérn, etc.).
-
-Mathematical Foundation
------------------------
-For a second-order stationary random field Z(x) with covariance C(h) = σ² - γ(h),
-the variance of the spatial average over domain A is:
-
-    Var(Z̄_A) = (1/|A|²) ∬_{A×A} C(x-y) dx dy
-
-This integral depends ONLY on the geometry of A and the functional form of γ(h).
-
-References
-----------
-Chilès, J.P. & Delfiner, P. (2012). Geostatistics: Modeling Spatial Uncertainty.
-Hugonnet, R., et al. (2022). IEEE JSTARS, 15, 6456-6472.
+references:
+- Chilès & Delfiner (2012). Geostatistics: Modeling Spatial Uncertainty.
+- Hugonnet et al. (2022). IEEE JSTARS, 15, 6456-6472.
 """
 
 from __future__ import annotations
@@ -78,7 +64,7 @@ class RegionalUncertaintyEstimator:
             variogram_analysis, fitted_model, use_bma
         )
 
-        # --- Resolve polygon of interest ---
+        # --- Resolve Polygon of interest ---
         if isinstance(area_of_interest, (str, Path)):
             gdf = gpd.read_file(area_of_interest)
             if gdf.empty:
@@ -131,23 +117,23 @@ class RegionalUncertaintyEstimator:
     ) -> None:
         """Setup gamma functions for central, min, max parameter estimates."""
         
-        # Initialize all gamma functions to None
+        # initialize all gamma functions to None
         self.gamma_func = None
         self.gamma_func_min = None
         self.gamma_func_max = None
         
-        # Component-wise gamma functions
+        # component-wise gamma functions
         self.gamma_funcs_components: List[Optional[Callable]] = [None, None, None]
         self.gamma_funcs_components_min: List[Optional[Callable]] = [None, None, None]
         self.gamma_funcs_components_max: List[Optional[Callable]] = [None, None, None]
         
-        # Total variance (sill + nugget)
+        # total variance (sill + nugget)
         self.sigma2 = None
         self.sigma2_min = None
         self.sigma2_max = None
 
         if fitted_model is not None:
-            # Validate model is suitable for uncertainty propagation
+            # validate model is suitable for uncertainty propagation
             if not fitted_model.composite_model.is_stationary:
                 unbounded = fitted_model.composite_model.unbounded_components
                 raise ValueError(
@@ -157,7 +143,7 @@ class RegionalUncertaintyEstimator:
                     f"(spherical, exponential, gaussian, matern, damped_hole_effect)."
                 )
 
-            # Warn about gaussian without nugget (numerical instability risk)
+            # warn about Gaussian without nugget (numerical instability risk)
             cm = fitted_model.composite_model
             has_gaussian = 'gaussian' in cm.component_names
             has_nugget = cm.include_nugget and cm.get_nugget() > 0
@@ -171,11 +157,11 @@ class RegionalUncertaintyEstimator:
                     stacklevel=2
                 )
 
-            # New approach: use FittedVariogramModel
+            # new approach: use FittedVariogramModel
             self.gamma_func = fitted_model.predict
             self.sigma2 = fitted_model.composite_model.get_total_sill()
             
-            # Min/max from bootstrap if available
+            # min/max from bootstrap if available
             if fitted_model.param_samples is not None and len(fitted_model.param_samples) > 0:
                 self._setup_minmax_from_bootstrap(fitted_model)
             else:
@@ -185,7 +171,7 @@ class RegionalUncertaintyEstimator:
                 self.sigma2_max = self.sigma2
                 
         elif use_bma and hasattr(va, 'model_selector') and va.model_selector is not None:
-            # Validate BMA models are all stationary
+            # validate BMA models are all stationary
             selector = va.model_selector
             for m in selector.fitted_models:
                 if not m.composite_model.is_stationary:
@@ -196,20 +182,20 @@ class RegionalUncertaintyEstimator:
                         f"Exclude non-stationary models from the ensemble."
                     )
 
-            # Bayesian Model Averaging
+            # bayesian Model Averaging
             self.gamma_func = va.get_bma_variogram_function()
             self.sigma2 = sum(
                 w * m.composite_model.get_total_sill()
                 for m, w in zip(selector.fitted_models, selector.model_weights)
             )
-            # BMA doesn't have simple min/max - use same for all
+            # bMA doesn't have simple min/max - use same for all
             self.gamma_func_min = self.gamma_func
             self.gamma_func_max = self.gamma_func
             self.sigma2_min = self.sigma2
             self.sigma2_max = self.sigma2
             
         elif va.best_model_func is not None:
-            # Legacy spherical model
+            # legacy spherical model
             self._setup_legacy_gamma(va)
         else:
             raise ValueError("No variogram model available. Fit a model first.")
@@ -219,11 +205,11 @@ class RegionalUncertaintyEstimator:
         samples = fitted_model.param_samples
         model = fitted_model.composite_model
         
-        # Get parameter percentiles
+        # get parameter percentiles
         params_16 = np.percentile(samples, 16, axis=0)
         params_84 = np.percentile(samples, 84, axis=0)
         
-        # Create min/max model functions
+        # create min/max model functions
         def make_gamma(params):
             def gamma(h):
                 model.set_params(params)
@@ -233,23 +219,23 @@ class RegionalUncertaintyEstimator:
         self.gamma_func_min = make_gamma(params_16)
         self.gamma_func_max = make_gamma(params_84)
         
-        # Reset to central params
+        # reset to central params
         model.set_params(fitted_model.params)
         
-        # Estimate sigma2 min/max (sum of sills + nugget at percentiles)
-        # This is approximate - proper way would parse param structure
+        # estimate sigma2 min/max (sum of sills + nugget at percentiles)
+        # this is approximate - proper way would parse param structure
         self.sigma2_min = self.sigma2 * 0.8  # rough approximation
         self.sigma2_max = self.sigma2 * 1.2
 
     def _setup_legacy_gamma(self, va: VariogramAnalysis) -> None:
         """Setup gamma functions from legacy spherical model."""
-        # Central estimates
+        # central estimates
         self.sills = np.array(va.sills, dtype=float)
         self.ranges = np.array(va.ranges, dtype=float)
         self.nugget = getattr(va, 'best_nugget', 0.0) or 0.0
         self.sigma2 = self.nugget + float(np.sum(self.sills))
 
-        # Min/max estimates
+        # min/max estimates
         self.sills_min = np.array(getattr(va, 'sills_min', self.sills), dtype=float)
         self.sills_max = np.array(getattr(va, 'sills_max', self.sills), dtype=float)
         self.ranges_min = np.array(getattr(va, 'ranges_min', self.ranges), dtype=float)
@@ -263,40 +249,40 @@ class RegionalUncertaintyEstimator:
         has_nugget = va.best_model_config.get('nugget', False)
         model_func = va.best_model_func
 
-        # Central gamma function
+        # central gamma function
         params = list(self.sills) + list(self.ranges)
         if has_nugget:
             params.append(self.nugget)
         self.gamma_func = lambda h, p=params: model_func(np.asarray(h, dtype=float), *p)
 
-        # Min gamma function
+        # min gamma function
         params_min = list(self.sills_min) + list(self.ranges_min)
         if has_nugget:
             params_min.append(self.nugget_min)
         self.gamma_func_min = lambda h, p=params_min: model_func(np.asarray(h, dtype=float), *p)
 
-        # Max gamma function
+        # max gamma function
         params_max = list(self.sills_max) + list(self.ranges_max)
         if has_nugget:
             params_max.append(self.nugget_max)
         self.gamma_func_max = lambda h, p=params_max: model_func(np.asarray(h, dtype=float), *p)
 
-        # Component-wise gamma functions (for multi-component models)
+        # component-wise gamma functions (for multi-component models)
         n_components = len(self.sills)
         for i in range(min(n_components, 3)):
-            # Central
+            # central
             p = [self.sills[i], self.ranges[i]]
             if has_nugget:
                 p.append(self.nugget)
             self.gamma_funcs_components[i] = lambda h, p=p: model_func(np.asarray(h, dtype=float), *p)
             
-            # Min
+            # min
             p_min = [self.sills_min[i], self.ranges_min[i]]
             if has_nugget:
                 p_min.append(self.nugget_min)
             self.gamma_funcs_components_min[i] = lambda h, p=p_min: model_func(np.asarray(h, dtype=float), *p)
             
-            # Max
+            # max
             p_max = [self.sills_max[i], self.ranges_max[i]]
             if has_nugget:
                 p_max.append(self.nugget_max)
@@ -304,32 +290,32 @@ class RegionalUncertaintyEstimator:
 
     def _init_result_storage(self) -> None:
         """Initialize all result storage attributes."""
-        # Uncorrelated
+        # uncorrelated
         self.sigma0_uncorrelated = None
         self.mean_uncorrelated_polygon = None
         self.mean_uncorrelated_raster = None
 
-        # Correlated - polygon (central, min, max)
+        # correlated - Polygon (central, min, max)
         self.mean_correlated_polygon = None
         self.mean_correlated_polygon_min = None
         self.mean_correlated_polygon_max = None
 
-        # Correlated - raster (central, min, max)
+        # correlated - Raster (central, min, max)
         self.mean_correlated_raster = None
         self.mean_correlated_raster_min = None
         self.mean_correlated_raster_max = None
 
-        # Component-wise - polygon
+        # component-wise - Polygon
         self.mean_correlated_components_polygon: List[Optional[float]] = [None, None, None]
         self.mean_correlated_components_polygon_min: List[Optional[float]] = [None, None, None]
         self.mean_correlated_components_polygon_max: List[Optional[float]] = [None, None, None]
 
-        # Component-wise - raster
+        # component-wise - Raster
         self.mean_correlated_components_raster: List[Optional[float]] = [None, None, None]
         self.mean_correlated_components_raster_min: List[Optional[float]] = [None, None, None]
         self.mean_correlated_components_raster_max: List[Optional[float]] = [None, None, None]
 
-        # Total uncertainty (central, min, max)
+        # total uncertainty (central, min, max)
         self.total_uncertainty_polygon = None
         self.total_uncertainty_polygon_min = None
         self.total_uncertainty_polygon_max = None
@@ -384,7 +370,6 @@ class RegionalUncertaintyEstimator:
         N_poly = max(self.area / cell_area, 1.0)
         self.mean_uncorrelated_polygon = sigma0 / math.sqrt(N_poly)
 
-        # Raster mean
         N_raster = int(valid_mask.sum())
         if N_raster > 0:
             self.mean_uncorrelated_raster = sigma0 / math.sqrt(N_raster)
@@ -405,7 +390,7 @@ class RegionalUncertaintyEstimator:
         rng = np.random.default_rng(seed)
         minx, miny, maxx, maxy = domain.bounds
 
-        # Sample points inside domain
+        # sample points inside domain
         pts = []
         batch_size = n_pairs
         while len(pts) < n_pairs * 2:
@@ -432,25 +417,25 @@ class RegionalUncertaintyEstimator:
         seed: Optional[int] = None,
     ) -> None:
         """Compute correlated uncertainty for polygon mean (central, min, max)."""
-        # Central
+        # central
         if self.gamma_func is not None:
             self.mean_correlated_polygon = self.estimate_std_mean_monte_carlo(
                 self.polygon, self.gamma_func, self.sigma2, n_pairs, seed
             )
 
-        # Min
+        # min
         if self.gamma_func_min is not None:
             self.mean_correlated_polygon_min = self.estimate_std_mean_monte_carlo(
                 self.polygon, self.gamma_func_min, self.sigma2_min, n_pairs, seed
             )
 
-        # Max
+        # max
         if self.gamma_func_max is not None:
             self.mean_correlated_polygon_max = self.estimate_std_mean_monte_carlo(
                 self.polygon, self.gamma_func_max, self.sigma2_max, n_pairs, seed
             )
 
-        # Component-wise
+        # component-wise
         for i in range(3):
             if self.gamma_funcs_components[i] is not None:
                 self.mean_correlated_components_polygon[i] = self.estimate_std_mean_monte_carlo(
@@ -474,25 +459,25 @@ class RegionalUncertaintyEstimator:
         self.raster_data_handler.get_detailed_area()
         raster_geom = self.raster_data_handler.merged_geom or box(*self.raster_data_handler.bounds)
 
-        # Central
+        # central
         if self.gamma_func is not None:
             self.mean_correlated_raster = self.estimate_std_mean_monte_carlo(
                 raster_geom, self.gamma_func, self.sigma2, n_pairs, seed
             )
 
-        # Min
+        # min
         if self.gamma_func_min is not None:
             self.mean_correlated_raster_min = self.estimate_std_mean_monte_carlo(
                 raster_geom, self.gamma_func_min, self.sigma2_min, n_pairs, seed
             )
 
-        # Max
+        # max
         if self.gamma_func_max is not None:
             self.mean_correlated_raster_max = self.estimate_std_mean_monte_carlo(
                 raster_geom, self.gamma_func_max, self.sigma2_max, n_pairs, seed
             )
 
-        # Component-wise
+        # component-wise
         for i in range(3):
             if self.gamma_funcs_components[i] is not None:
                 self.mean_correlated_components_raster[i] = self.estimate_std_mean_monte_carlo(
@@ -534,7 +519,6 @@ class RegionalUncertaintyEstimator:
             self.mean_uncorrelated_polygon, self.mean_correlated_polygon_max
         )
 
-        # Raster totals
         self.total_uncertainty_raster = quadrature(
             self.mean_uncorrelated_raster, self.mean_correlated_raster
         )

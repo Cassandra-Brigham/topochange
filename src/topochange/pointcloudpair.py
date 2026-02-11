@@ -1,20 +1,4 @@
-# pointcloudpair.py
-"""Compare, transform, align, and difference two point clouds.
-
-Provides tools for:
-- Comparing CRS, epoch, geoid, and other parameters between point clouds
-- Transforming pc1 to match pc2's reference frame
-- ICP-based alignment using small_gicp
-- 3D point cloud differencing
-- 2D DEM-based differencing via RasterPair
-
-Transformation order:
-1. Dynamic epoch transformation
-2. Horizontal CRS reprojection
-3. Vertical datum transformation
-4. ICP alignment (optional)
-5. DEM creation and differencing
-"""
+"""compare, transform, align, and difference two point clouds."""
 
 from __future__ import annotations
 
@@ -25,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
-# Use pdal_wrapper for Colab compatibility (falls back to native pdal locally)
+# use pdal_wrapper for Colab compatibility (falls back to native PDAL locally)
 try:
     from .pdal_wrapper import pdal
 except ImportError:
@@ -33,7 +17,7 @@ except ImportError:
 from pyproj import CRS as _CRS
 from pyproj.crs import CompoundCRS
 
-# Handle imports
+# handle imports
 from .pointcloud import PointCloud
 from .raster import Raster
 from .rasterpair import RasterPair
@@ -57,7 +41,7 @@ except ImportError:
     UNKNOWN_UNIT = None
     METER = None
 
-# Import shared alignment utilities
+# import shared alignment utilities
 from .alignment_utils import (
     load_points_from_las,
     save_transformed_las,
@@ -68,7 +52,7 @@ from .alignment_utils import (
     AlignmentQualityMetrics,
 )
 
-# Import alignment classes (for type hints and optional direct usage)
+# import alignment classes (for type hints and optional direct usage)
 from .alignment import (
     LandscapeAligner,
     RegistrationConfig,
@@ -76,9 +60,7 @@ from .alignment import (
 )
 
 
-# =============================================================================
-# Utility Functions
-# =============================================================================
+# utility Functions
 
 def _has_small_gicp() -> bool:
     """Check if small_gicp is available."""
@@ -100,7 +82,7 @@ def _crs_equivalent(crs1: Any, crs2: Any) -> bool:
         obj1 = _ensure_crs_obj(crs1)
         obj2 = _ensure_crs_obj(crs2)
         
-        # Try EPSG comparison first (fastest)
+        # try EPSG comparison first (fastest)
         epsg1 = obj1.to_epsg()
         epsg2 = obj2.to_epsg()
         if epsg1 is not None and epsg2 is not None:
@@ -124,11 +106,11 @@ def _geoid_equivalent(geoid1: Optional[str], geoid2: Optional[str]) -> bool:
     
     def normalize(g):
         g = str(g).lower().strip()
-        # Remove common prefixes
+        # remove common prefixes
         for prefix in ['us_noaa_', 'noaa_', 'ngs_', 'egm', 'geoid']:
             if g.startswith(prefix):
                 g = g[len(prefix):]
-        # Remove file extensions
+        # remove file extensions
         for ext in ['.tif', '.tiff', '.gtx', '.bin']:
             if g.endswith(ext):
                 g = g[:-len(ext)]
@@ -151,7 +133,7 @@ def _units_equivalent(unit1: Any, unit2: Any) -> Tuple[bool, Optional[float]]:
     if unit1 is None or unit2 is None:
         return False, None
     
-    # Get unit names
+    # get unit names
     if hasattr(unit1, 'name'):
         name1 = unit1.name
     else:
@@ -168,7 +150,7 @@ def _units_equivalent(unit1: Any, unit2: Any) -> Tuple[bool, Optional[float]]:
     if name1 == "unknown" or name2 == "unknown":
         return False, None
     
-    # Try to get conversion factor
+    # try to get conversion factor
     try:
         unit1_obj = lookup_unit(name1) if isinstance(unit1, str) else unit1
         unit2_obj = lookup_unit(name2) if isinstance(unit2, str) else unit2
@@ -181,9 +163,7 @@ def _units_equivalent(unit1: Any, unit2: Any) -> Tuple[bool, Optional[float]]:
     return False, None
 
 
-# =============================================================================
 # PointCloudPair Class
-# =============================================================================
 
 @dataclass
 class PointCloudPair:
@@ -209,7 +189,7 @@ class PointCloudPair:
     pc1: PointCloud  # Compare
     pc2: PointCloud  # Reference
     
-    # Internal state
+    # internal state
     _transformation_history: List[Dict[str, Any]] = field(default_factory=list)
     _pc1_transformed: Optional[PointCloud] = field(default=None, repr=False)
     _pc1_cropped: Optional[PointCloud] = field(default=None, repr=False)
@@ -228,9 +208,7 @@ class PointCloudPair:
         self._pc2_cropped = None
         self._alignment_result = None
 
-    # =========================================================================
-    # Helper Methods
-    # =========================================================================
+    # helper Methods
 
     @staticmethod
     def _copy_pc_metadata_to_raster(raster: Raster, pc: PointCloud) -> None:
@@ -247,21 +225,21 @@ class PointCloudPair:
         pc : PointCloud
             Source point cloud to copy metadata from.
         """
-        # Epoch
+        # epoch
         raster.epoch = getattr(pc, 'epoch', None)
 
-        # Geoid model
+        # geoid model
         raster.current_geoid_model = getattr(pc, 'geoid_model', None)
         raster.original_geoid_model = getattr(pc, 'geoid_model', None)
 
-        # Vertical CRS
+        # vertical CRS
         raster.current_vertical_crs = getattr(pc, 'current_vertical_crs', None)
         raster.original_vertical_crs = getattr(pc, 'original_vertical_crs', None)
 
-        # Orthometric flag
+        # orthometric flag
         raster.is_orthometric = getattr(pc, 'is_orthometric', None)
 
-        # Units (only if raster has unknown units)
+        # units (only if Raster has unknown units)
         if hasattr(pc, 'vertical_unit') and pc.vertical_unit is not None:
             if not hasattr(raster, 'current_vertical_unit') or raster.current_vertical_unit is None or raster.current_vertical_unit.name == "unknown":
                 raster.current_vertical_unit = pc.vertical_unit
@@ -276,9 +254,7 @@ class PointCloudPair:
                 raster.current_horizontal_units = getattr(pc, 'horizontal_units', pc.horizontal_unit.display_name)
                 raster.original_horizontal_units = getattr(pc, 'horizontal_units', pc.horizontal_unit.display_name)
 
-    # =========================================================================
-    # Comparison Methods
-    # =========================================================================
+    # comparison Methods
     
     def check_all_match(self) -> Dict[str, Any]:
         """
@@ -302,7 +278,7 @@ class PointCloudPair:
             'transformations_needed': [],
         }
         
-        # Compound/3D CRS
+        # compound/3D CRS
         pc1_comp = (
             getattr(self.pc1, 'current_compound_crs', None) or
             getattr(self.pc1, 'original_compound_crs', None)
@@ -319,7 +295,7 @@ class PointCloudPair:
         )
         result['compound_crs']['match'] = _crs_equivalent(pc1_comp, pc2_comp)
         
-        # Horizontal CRS
+        # horizontal CRS
         pc1_horiz = (
             getattr(self.pc1, 'current_horizontal_crs', None) or
             getattr(self.pc1, 'original_horizontal_crs', None)
@@ -338,7 +314,7 @@ class PointCloudPair:
         if not result['horizontal_crs']['match']:
             result['transformations_needed'].append('horizontal_crs')
         
-        # Vertical CRS
+        # vertical CRS
         pc1_vert = (
             getattr(self.pc1, 'current_vertical_crs', None) or
             getattr(self.pc1, 'original_vertical_crs', None)
@@ -355,21 +331,21 @@ class PointCloudPair:
         )
         result['vertical_crs']['match'] = _crs_equivalent(pc1_vert, pc2_vert)
         
-        # Geoid model
+        # geoid model
         pc1_geoid = getattr(self.pc1, 'geoid_model', None)
         pc2_geoid = getattr(self.pc2, 'geoid_model', None)
         result['geoid']['pc1'] = pc1_geoid
         result['geoid']['pc2'] = pc2_geoid
         result['geoid']['match'] = _geoid_equivalent(pc1_geoid, pc2_geoid)
         
-        # Check if vertical datum transformation is needed
+        # check if vertical datum transformation is needed
         pc1_ortho = getattr(self.pc1, 'is_orthometric', None)
         pc2_ortho = getattr(self.pc2, 'is_orthometric', None)
         if not result['vertical_crs']['match'] or not result['geoid']['match']:
             if pc1_ortho != pc2_ortho or not result['geoid']['match']:
                 result['transformations_needed'].append('vertical_datum')
         
-        # Epoch
+        # epoch
         pc1_epoch = getattr(self.pc1, 'epoch', None)
         pc2_epoch = getattr(self.pc2, 'epoch', None)
         result['epoch']['pc1'] = pc1_epoch
@@ -381,7 +357,7 @@ class PointCloudPair:
         if not result['epoch']['match'] and pc1_epoch is not None and pc2_epoch is not None:
             result['transformations_needed'].append('epoch')
         
-        # Vertical units
+        # vertical units
         pc1_vunit = getattr(self.pc1, 'vertical_unit', UNKNOWN_UNIT)
         pc2_vunit = getattr(self.pc2, 'vertical_unit', UNKNOWN_UNIT)
         pc1_vunit_name = pc1_vunit.name if hasattr(pc1_vunit, 'name') else str(pc1_vunit)
@@ -409,7 +385,7 @@ class PointCloudPair:
         print(f"\n{'Parameter':<20} {'Match':<8} {'PC1':<20} {'PC2':<20}")
         print("-" * 70)
         
-        # Horizontal CRS - get directly from point clouds, not from truncated comparison dict
+        # horizontal CRS - get directly from point clouds, not from truncated comparison dict
         pc1_horiz = (
             getattr(self.pc1, 'current_horizontal_crs', None) or
             getattr(self.pc1, 'original_horizontal_crs', None)
@@ -429,7 +405,7 @@ class PointCloudPair:
                 if epsg:
                     pc1_str = f"EPSG:{epsg}"
                 elif crs_obj.name:
-                    # Truncate long names
+                    # truncate long names
                     name = crs_obj.name
                     pc1_str = name[:18] + ".." if len(name) > 20 else name
                 else:
@@ -453,7 +429,7 @@ class PointCloudPair:
         
         print(f"{'Horizontal CRS':<20} {match_sym(comparison['horizontal_crs']['match']):<8} {pc1_str:<20} {pc2_str:<20}")
         
-        # Vertical CRS - get directly from point clouds
+        # vertical CRS - get directly from point clouds
         pc1_vert = (
             getattr(self.pc1, 'current_vertical_crs', None) or
             getattr(self.pc1, 'original_vertical_crs', None)
@@ -463,30 +439,30 @@ class PointCloudPair:
             getattr(self.pc2, 'original_vertical_crs', None)
         )
         
-        # Determine vertical type
+        # determine vertical type
         def get_vertical_type(vert_crs, pc) -> str:
             if vert_crs is None:
                 return "None"
             
             vert_str = str(vert_crs).lower()
             
-            # Check for ellipsoidal
+            # check for ellipsoidal
             if "ellipsoidal" in vert_str:
                 return "Ellipsoidal"
             
-            # Check is_orthometric attribute
+            # check is_orthometric attribute
             is_ortho = getattr(pc, 'is_orthometric', None)
             if is_ortho is True:
                 return "Orthometric"
             elif is_ortho is False:
                 return "Ellipsoidal"
             
-            # Try to extract from CRS
+            # try to extract from CRS
             try:
                 crs_obj = _ensure_crs_obj(vert_crs)
                 epsg = crs_obj.to_epsg()
                 if epsg:
-                    # Known orthometric EPSG codes
+                    # known orthometric EPSG codes
                     if epsg in (5703, 5866, 6647, 8228):  # NAVD88, CGVD2013, etc.
                         return "Orthometric"
                     return f"EPSG:{epsg}"
@@ -505,19 +481,19 @@ class PointCloudPair:
         
         print(f"{'Vertical CRS':<20} {match_sym(comparison['vertical_crs']['match']):<8} {pc1_vert_str:<20} {pc2_vert_str:<20}")
         
-        # Geoid
+        # geoid
         pc1_geoid = comparison['geoid']['pc1'] or "None"
         pc2_geoid = comparison['geoid']['pc2'] or "None"
         pc1_geoid = pc1_geoid[:18] + ".." if len(pc1_geoid) > 20 else pc1_geoid
         pc2_geoid = pc2_geoid[:18] + ".." if len(pc2_geoid) > 20 else pc2_geoid
         print(f"{'Geoid Model':<20} {match_sym(comparison['geoid']['match']):<8} {pc1_geoid:<20} {pc2_geoid:<20}")
 
-        # Epoch
+        # epoch
         pc1_epoch = f"{comparison['epoch']['pc1']:.4f}" if comparison['epoch']['pc1'] else "None"
         pc2_epoch = f"{comparison['epoch']['pc2']:.4f}" if comparison['epoch']['pc2'] else "None"
         print(f"{'Epoch':<20} {match_sym(comparison['epoch']['match']):<8} {pc1_epoch:<20} {pc2_epoch:<20}")
 
-        # Units
+        # units
         print(f"{'Vertical Units':<20} {match_sym(comparison['vertical_units']['match']):<8} {comparison['vertical_units']['pc1']:<20} {comparison['vertical_units']['pc2']:<20}")
 
         print("-" * 70)
@@ -534,9 +510,7 @@ class PointCloudPair:
 
         print("")
 
-    # =========================================================================
-    # Overlap and Cropping Methods
-    # =========================================================================
+    # overlap and Cropping Methods
 
     def get_bounding_polygons(
         self,
@@ -563,10 +537,10 @@ class PointCloudPair:
                 'epsg_utm': str,
             }
         """
-        # Select pc1 source
+        # select pc1 source
         pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
 
-        # Get polygons from point clouds (set during from_file())
+        # get polygons from point clouds (set during from_file())
         pc1_poly_utm = getattr(pc1_source, 'poly_utm', None)
         pc2_poly_utm = getattr(self.pc2, 'poly_utm', None)
         pc1_poly_4326 = getattr(pc1_source, 'poly_4326', None)
@@ -697,7 +671,7 @@ class PointCloudPair:
             }
 
         overlap_poly = overlap_result['overlap_polygon']
-        # Negative buffer shrinks the polygon inward
+        # negative buffer shrinks the Polygon inward
         buffered_poly = overlap_poly.buffer(-buffer_distance)
 
         if buffered_poly.is_empty:
@@ -768,7 +742,7 @@ class PointCloudPair:
         from pyproj import CRS as CRS_, Transformer
         from shapely.ops import transform as shapely_transform
 
-        # Select pc1 source - check for horizontal-only first, then transformed
+        # select pc1 source - check for horizontal-only first, then transformed
         if self._pc1_horizontal_only is not None and not use_transformed:
             pc1_source = self._pc1_horizontal_only
         elif use_transformed and self._pc1_transformed is not None:
@@ -776,14 +750,14 @@ class PointCloudPair:
         else:
             pc1_source = self.pc1
 
-        # Get outline polygons in WGS84 (set during from_file())
+        # get outline polygons in WGS84 (set during from_file())
         pc1_poly_4326 = getattr(pc1_source, 'poly_4326', None)
         pc2_poly_4326 = getattr(self.pc2, 'poly_4326', None)
 
         if pc1_poly_4326 is None or pc2_poly_4326 is None:
             raise ValueError("Point cloud outline polygons not available. Ensure from_file() was called.")
 
-        # If interior_buffer is requested and use_true_extent is True, compute true
+        # if interior_buffer is requested and use_true_extent is True, compute True
         # data footprint for PC2 using hexbin (captures irregular boundaries)
         pc2_true_poly_4326 = None
         if interior_buffer is not None and interior_buffer > 0 and use_true_extent:
@@ -791,7 +765,7 @@ class PointCloudPair:
                 print(f"\n--- Computing true data footprint for reference cloud ---", file=sys.stderr)
             try:
                 from topochange.pointcloud import get_true_extent
-                # Use smaller hex cells (5m) for more accurate boundary, already shrunk internally
+                # use smaller hex cells (5m) for more accurate boundary, already shrunk internally
                 _, pc2_true_poly_utm, pc2_true_poly_4326 = get_true_extent(self.pc2, edge_size=5.0)
                 if verbose:
                     print(f"True extent computed successfully", file=sys.stderr)
@@ -803,7 +777,7 @@ class PointCloudPair:
                     print(f"Warning: Could not compute true extent ({e}), using bounding box", file=sys.stderr)
                 pc2_true_poly_4326 = None
 
-        # Get native CRS for each point cloud (for clipping)
+        # get native CRS for each point cloud (for clipping)
         pc1_native_crs_wkt = (
             getattr(pc1_source, 'current_horizontal_crs', None) or
             getattr(pc1_source, 'original_horizontal_crs', None) or
@@ -817,18 +791,18 @@ class PointCloudPair:
             getattr(self.pc2, 'original_compound_crs', None)
         )
 
-        # Determine target CRS for intersection computation
+        # determine target CRS for intersection computation
         if target_crs is not None:
             common_crs = CRS_.from_user_input(target_crs)
         elif pc2_native_crs_wkt:
             common_crs = CRS_.from_user_input(pc2_native_crs_wkt)
         else:
-            # Fallback to WGS84
+            # fallback to WGS84
             common_crs = CRS_.from_epsg(4326)
 
         wgs84 = CRS_.from_epsg(4326)
 
-        # Transform both polygons from WGS84 to common CRS
+        # transform both polygons from WGS84 to common CRS
         transformer_to_common = None
         if not common_crs.equals(wgs84):
             transformer_to_common = Transformer.from_crs(wgs84, common_crs, always_xy=True)
@@ -838,7 +812,7 @@ class PointCloudPair:
             pc1_poly_common = pc1_poly_4326
             pc2_poly_common = pc2_poly_4326
 
-        # Compute intersection in common CRS
+        # compute intersection in common CRS
         overlap_poly_common = pc1_poly_common.intersection(pc2_poly_common)
 
         if overlap_poly_common.is_empty:
@@ -848,7 +822,7 @@ class PointCloudPair:
         pc1_overlap_frac = overlap_area / pc1_poly_common.area if pc1_poly_common.area > 0 else 0
         pc2_overlap_frac = overlap_area / pc2_poly_common.area if pc2_poly_common.area > 0 else 0
 
-        # Transform true extent polygon to common CRS if available
+        # transform True extent Polygon to common CRS if available
         pc2_true_poly_common = None
         if pc2_true_poly_4326 is not None:
             if transformer_to_common is not None:
@@ -856,23 +830,23 @@ class PointCloudPair:
             else:
                 pc2_true_poly_common = pc2_true_poly_4326
 
-        # Apply interior buffer to compare cloud's clip polygon if requested
-        # This shrinks PC2's (reference) actual extent inward, ensuring PC1 is
+        # apply interior buffer to compare cloud's clip Polygon if requested
+        # this shrinks PC2's (reference) actual extent inward, ensuring PC1 is
         # fully within reference coverage with a margin on all sides
         if interior_buffer is not None and interior_buffer > 0:
-            # Use true extent polygon if available, otherwise fall back to bounding box
+            # use True extent Polygon if available, otherwise fall back to bounding box
             pc2_for_buffer = pc2_true_poly_common if pc2_true_poly_common is not None else pc2_poly_common
             using_true_extent = pc2_true_poly_common is not None
 
-            # Shrink PC2's actual boundary inward by the buffer distance
+            # shrink PC2's actual boundary inward by the buffer distance
             pc2_shrunk = pc2_for_buffer.buffer(-interior_buffer)
             if pc2_shrunk.is_empty:
                 raise ValueError(
                     f"Interior buffer of {interior_buffer}m resulted in empty polygon "
                     "when applied to reference extent. Try a smaller buffer value."
                 )
-            # PC1 clip polygon = PC2's shrunk boundary intersected with PC1's extent
-            # This ensures PC1 is 10m inside PC2's boundary, and only where PC1 has data
+            # pC1 clip Polygon = PC2's shrunk boundary intersected with PC1's extent
+            # this ensures PC1 is 10m inside PC2's boundary, and only where PC1 has data
             pc1_clip_poly_common = pc2_shrunk.intersection(pc1_poly_common)
             if pc1_clip_poly_common.is_empty:
                 raise ValueError(
@@ -885,7 +859,7 @@ class PointCloudPair:
             pc1_buffered_area = None
             using_true_extent = False
 
-        # Reference cloud uses full intersection polygon (clips to where both overlap)
+        # reference cloud uses full intersection Polygon (clips to where both overlap)
         pc2_clip_poly_common = overlap_poly_common
 
         if verbose:
@@ -910,7 +884,7 @@ class PointCloudPair:
                 print(f"PC1 clip poly area (PC2 shrunk ∩ PC1): {pc1_clip_poly_common.area:,.0f} m²", file=sys.stderr)
                 print(f"PC2 clip poly area (full intersection): {pc2_clip_poly_common.area:,.0f} m²", file=sys.stderr)
 
-        # Transform clip polygons to each point cloud's native CRS for clipping
+        # transform clip polygons to each point cloud's native CRS for clipping
         if pc1_native_crs_wkt:
             pc1_native_crs = CRS_.from_user_input(pc1_native_crs_wkt)
             if not pc1_native_crs.equals(common_crs):
@@ -931,7 +905,7 @@ class PointCloudPair:
         else:
             clip_poly_pc2 = pc2_clip_poly_common
 
-        # Determine output paths
+        # determine output paths
         if output_dir is None:
             out_dir1 = Path(pc1_source.filename).parent
             out_dir2 = Path(self.pc2.filename).parent
@@ -939,7 +913,7 @@ class PointCloudPair:
             out_dir1 = out_dir2 = Path(output_dir)
             out_dir1.mkdir(parents=True, exist_ok=True)
 
-        # Use different suffix if interior buffer applied
+        # use different suffix if interior buffer applied
         if interior_buffer is not None and interior_buffer > 0:
             pc1_suffix = "_intersection_buffered"
         else:
@@ -958,7 +932,7 @@ class PointCloudPair:
             print(f"PC2 CRS match common? {pc2_native_crs.equals(common_crs) if pc2_native_crs_wkt else 'N/A'}", file=sys.stderr)
             print(f"Cropping pc1 to: {out_path1.name}", file=sys.stderr)
 
-        # Clip both point clouds in parallel (independent I/O operations)
+        # clip both point clouds in parallel (independent I/O operations)
         from concurrent.futures import ThreadPoolExecutor
 
         if verbose:
@@ -983,7 +957,7 @@ class PointCloudPair:
         if verbose:
             print(f"Cropping complete.", file=sys.stderr)
 
-        # Store cropped clouds internally for use by alignment
+        # store cropped clouds internally for use by alignment
         self._pc1_cropped = pc1_cropped
         self._pc1_cropped_original = pc1_cropped  # Preserve unaligned version
         self._pc2_cropped = pc2_cropped
@@ -1043,10 +1017,10 @@ class PointCloudPair:
             print(f"Original overlap area: {buffered_result['overlap_area']:,.0f} m²", file=sys.stderr)
             print(f"Shrunk area: {buffered_result['buffered_area']:,.0f} m²", file=sys.stderr)
 
-        # Select pc1 source
+        # select pc1 source
         pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
 
-        # Reproject polygon from UTM to point cloud's native CRS
+        # reproject Polygon from UTM to point cloud's native CRS
         pc_crs_wkt = (
             getattr(pc1_source, 'current_horizontal_crs', None) or
             getattr(pc1_source, 'original_horizontal_crs', None) or
@@ -1062,7 +1036,7 @@ class PointCloudPair:
                 transformer = Transformer.from_crs(utm_crs, pc_crs, always_xy=True)
                 buffered_poly = shapely_transform(transformer.transform, buffered_poly_utm)
 
-        # Determine output path
+        # determine output path
         if output_dir is None:
             out_dir = Path(pc1_source.filename).parent
         else:
@@ -1085,9 +1059,7 @@ class PointCloudPair:
 
         return pc1_buffered
 
-    # =========================================================================
-    # Transformation Methods
-    # =========================================================================
+    # transformation Methods
 
     def transform_compare_to_match_reference(
         self,
@@ -1153,7 +1125,7 @@ class PointCloudPair:
         
         self._transformation_history = []
         
-        # Get target parameters from reference (pc2)
+        # get target parameters from reference (pc2)
         target_epoch = getattr(self.pc2, 'epoch', None)
         target_horiz_crs = (
             getattr(self.pc2, 'current_horizontal_crs', None) or
@@ -1165,7 +1137,7 @@ class PointCloudPair:
         )
         target_geoid = getattr(self.pc2, 'geoid_model', None)
         
-        # Determine vertical kinds
+        # determine vertical kinds
         source_is_ortho = getattr(self.pc1, 'is_orthometric', None)
         target_is_ortho = getattr(self.pc2, 'is_orthometric', None)
         
@@ -1181,7 +1153,7 @@ class PointCloudPair:
         )
         source_geoid = getattr(self.pc1, 'geoid_model', None)
         
-        # Determine what's actually needed
+        # determine what's actually needed
         needs_epoch = (
             not skip_epoch and
             'epoch' in comparison['transformations_needed'] and
@@ -1200,7 +1172,7 @@ class PointCloudPair:
             'vertical_units' in comparison['transformations_needed']
         )
 
-        # Get unit conversion factor if needed
+        # get unit conversion factor if needed
         unit_conversion_factor = None
         if needs_units:
             from .unit_utils import get_conversion_factor, UNKNOWN_UNIT
@@ -1227,10 +1199,10 @@ class PointCloudPair:
                 dst_vunit = getattr(self.pc2, 'vertical_unit', UNKNOWN_UNIT)
                 print(f"  Units: {src_vunit.name} -> {dst_vunit.name} (factor: {unit_conversion_factor:.6f})", file=sys.stderr)
 
-        # SINGLE warp_pointcloud call with ALL parameters
+        # sINGLE warp_pointcloud call with ALL parameters
         if needs_epoch or needs_vertical or needs_horizontal:
             
-            # Build output filename
+            # build output filename
             src_path = Path(self.pc1.filename)
             suffix_parts = []
             if needs_epoch:
@@ -1240,26 +1212,26 @@ class PointCloudPair:
             if needs_horizontal:
                 suffix_parts.append("reproj")
             suffix = "_".join(suffix_parts) if suffix_parts else ""
-            # Always add "_transformed" suffix to indicate this is a transformed point cloud
+            # always add "_transformed" suffix to indicate this is a transformed point cloud
             if suffix:
                 output_path = src_path.with_name(src_path.stem + f"_{suffix}_transformed" + src_path.suffix)
             else:
                 output_path = src_path.with_name(src_path.stem + "_transformed" + src_path.suffix)
             
             current = self.pc1.warp_pointcloud(
-                # Epoch parameters
+                # epoch parameters
                 dynamic_target_epoch=target_epoch if needs_epoch else None,
-                # Vertical parameters
+                # vertical parameters
                 source_vertical_kind=source_vertical_kind if needs_vertical else None,
                 target_vertical_kind=target_vertical_kind if needs_vertical else None,
                 source_geoid_model=source_geoid if needs_vertical else None,
                 target_geoid_model=target_geoid if needs_vertical else None,
-                # Horizontal parameters
+                # horizontal parameters
                 target_horizontal_crs=target_horiz_crs if needs_horizontal else None,
-                # Output
+                # output
                 output_path=output_path,
                 overwrite=overwrite,
-                # Custom velocity model
+                # custom velocity model
                 velocity_model_path=velocity_model_path,
             )
             
@@ -1284,7 +1256,7 @@ class PointCloudPair:
             elif verbose:
                 print(f"No CRS transformations needed (unit conversion still pending).", file=sys.stderr)
 
-        # Apply unit conversion if needed (separate step after CRS transformation)
+        # apply unit conversion if needed (separate step after CRS transformation)
         if needs_units and unit_conversion_factor is not None and abs(unit_conversion_factor - 1.0) > 1e-9:
             import json
             import pdal
@@ -1292,7 +1264,7 @@ class PointCloudPair:
             src_path = Path(current.filename)
             unit_output_path = src_path.with_name(src_path.stem + "_units" + src_path.suffix)
 
-            # Use PDAL filters.assign to scale Z values
+            # use PDAL filters.assign to scale Z values
             pipeline_spec = {
                 "pipeline": [
                     {
@@ -1313,7 +1285,7 @@ class PointCloudPair:
             pipe = pdal.Pipeline(json.dumps(pipeline_spec))
             pipe.execute_streaming(chunk_size=1000000)
 
-            # Propagate metadata from source instead of re-running from_file()
+            # propagate metadata from source instead of re-running from_file()
             prev = current
             current = PointCloud(str(unit_output_path))
             current.total_points = getattr(prev, 'total_points', None)
@@ -1340,7 +1312,7 @@ class PointCloudPair:
             current.epsg_utm = getattr(prev, 'epsg_utm', None)
             current.bbox_4326 = getattr(prev, 'bbox_4326', None)
 
-            # Update unit metadata
+            # update unit metadata
             dst_vunit = getattr(self.pc2, 'vertical_unit', None)
             if dst_vunit:
                 current.vertical_unit = dst_vunit
@@ -1355,7 +1327,7 @@ class PointCloudPair:
             if verbose:
                 print(f"  Unit conversion [done]", file=sys.stderr)
 
-        # Update metadata to match reference (only update fields that were transformed)
+        # update metadata to match reference (only update fields that were transformed)
         current.add_metadata(
             horizontal_CRS=target_horiz_crs if needs_horizontal else None,
             vertical_CRS=target_vert_crs if needs_vertical else None,
@@ -1363,9 +1335,9 @@ class PointCloudPair:
             epoch=target_epoch if needs_epoch else None,
         )
 
-        # Ensure unit metadata is propagated (from source if not converted, from reference if converted)
+        # ensure unit metadata is propagated (from source if not converted, from reference if converted)
         if not needs_units:
-            # Units weren't converted - preserve source units
+            # units weren't converted - preserve source units
             src_hunit = getattr(self.pc1, 'horizontal_unit', None)
             src_vunit = getattr(self.pc1, 'vertical_unit', None)
             if src_hunit and src_hunit.name != "unknown":
@@ -1375,7 +1347,7 @@ class PointCloudPair:
                 current.vertical_unit = src_vunit
                 current.vertical_units = src_vunit.display_name
 
-        # Cache result
+        # cache result
         self._pc1_transformed = current
         
         if verbose:
@@ -1411,18 +1383,18 @@ class PointCloudPair:
             New PointCloudPair with transformed point clouds
         """
         if target_crs_proj is not None:
-            # Warp both to explicit target CRS (horizontal only)
+            # warp both to explicit target CRS (horizontal only)
             warped_pc1 = self.pc1.warp_pointcloud(target_horizontal_crs=target_crs_proj)
             warped_pc2 = self.pc2.warp_pointcloud(target_horizontal_crs=target_crs_proj)
             return PointCloudPair(warped_pc1, warped_pc2)
         
         if target_pc == "pc2":
-            # Transform pc1 to match pc2 (reference)
+            # transform pc1 to match pc2 (reference)
             transformed_pc1 = self.transform_compare_to_match_reference(verbose=verbose)
             return PointCloudPair(transformed_pc1, self.pc2)
         
         elif target_pc == "pc1":
-            # Swap and transform pc2 to match pc1
+            # swap and transform pc2 to match pc1
             swapped_pair = PointCloudPair(self.pc2, self.pc1)
             transformed_pc2 = swapped_pair.transform_compare_to_match_reference(verbose=verbose)
             return PointCloudPair(self.pc1, transformed_pc2)
@@ -1430,9 +1402,6 @@ class PointCloudPair:
         else:
             raise ValueError(f"target_pc must be 'pc1' or 'pc2', got {target_pc!r}.")
     
-    # =========================================================================
-    # Alignment Methods (ICP via small_gicp)
-    # =========================================================================
     
     def align_point_clouds(
         self,
@@ -1546,9 +1515,7 @@ class PointCloudPair:
             print(f"\n--- Point Cloud Alignment (small_gicp) ---", file=sys.stderr)
             print(f"Method: {method.upper()}", file=sys.stderr)
 
-        # =========================================================================
-        # Step 1: Select source and target point clouds (PointCloudPair-specific)
-        # =========================================================================
+        # step 1: Select source and target point clouds (PointCloudPair-specific)
         source_pc, target_pc = self._select_alignment_clouds(
             source_cloud=source_cloud,
             target_cloud=target_cloud,
@@ -1557,9 +1524,7 @@ class PointCloudPair:
             verbose=verbose,
         )
 
-        # =========================================================================
-        # Step 2: Compute auto-downsample resolution if needed
-        # =========================================================================
+        # step 2: Compute auto-downsample resolution if needed
         if downsample_resolution is None and auto_downsample:
             downsample_resolution = self._compute_auto_downsample_resolution(
                 source_pc, target_pc, target_points, verbose
@@ -1567,46 +1532,42 @@ class PointCloudPair:
         elif downsample_resolution is None:
             downsample_resolution = 0.5  # Default
 
-        # =========================================================================
-        # Step 3: Compute crop bounds if alignment_box_size is specified
-        # =========================================================================
+        # step 3: Compute crop bounds if alignment_box_size is specified
         crop_bounds = None
         if alignment_box_size is not None:
             crop_bounds = self._compute_alignment_box_bounds(alignment_box_size, verbose)
 
-        # =========================================================================
-        # Step 4: Build RegistrationConfig and delegate to LandscapeAligner
-        # =========================================================================
+        # step 4: Build RegistrationConfig and delegate to LandscapeAligner
         config = RegistrationConfig(
             method=method.lower(),
             max_correspondence_distance=max_correspondence_distance,
             max_iterations=max_iterations,
             transformation_epsilon=transformation_epsilon,
             num_threads=num_threads,
-            # Centering
+            # centering
             center_to_origin=True,
-            # Crop bounds
+            # crop bounds
             crop_bounds=crop_bounds,
-            # Downsampling
+            # downsampling
             downsample=True,  # Enable fine registration downsampling
             voxel_size=downsample_resolution,
             initial_voxel_size=initial_voxel_size,
             auto_downsample=False,  # We already computed resolution above
             target_points=target_points,
             max_points=max_points,
-            # Point filtering - use "all" to skip LandscapeAligner's preprocessing
+            # point filtering - use "all" to skip LandscapeAligner's preprocessing
             # since we do our own filtering during point loading
             point_filter=point_filter if point_filter else "all",
             outlier_removal=False,  # Skip - we load filtered points directly
-            # Validation
+            # validation
             min_fitness_score=0.1,  # Accept most results
             enable_auto_retry=False,  # Handle retries at this level if needed
-            # Output
+            # output
             apply_transform=False,  # We handle output ourselves
             verbose=verbose,
         )
 
-        # Perform registration using LandscapeAligner
+        # perform registration using LandscapeAligner
         result = self._run_registration(
             source_pc=source_pc,
             target_pc=target_pc,
@@ -1616,15 +1577,11 @@ class PointCloudPair:
             verbose=verbose,
         )
 
-        # =========================================================================
-        # Step 5: Convert RegistrationResult to dict format (backward compatibility)
-        # =========================================================================
+        # step 5: Convert RegistrationResult to dict format (backward compatibility)
         alignment_result = self._result_to_dict(result, method, downsample_resolution,
                                                  max_correspondence_distance)
 
-        # =========================================================================
-        # Step 6: Apply transformation and update state if requested
-        # =========================================================================
+        # step 6: Apply transformation and update state if requested
         if apply_transform:
             self._apply_alignment_transform(
                 source_pc=source_pc,
@@ -1658,7 +1615,7 @@ class PointCloudPair:
         """
         import sys
 
-        # Select source cloud
+        # select source cloud
         if source_cloud is not None:
             source_pc = source_cloud
         elif self._pc1_cropped is not None:
@@ -1678,7 +1635,7 @@ class PointCloudPair:
         else:
             source_pc = self._pc1_transformed or self.pc1
 
-        # Select target cloud
+        # select target cloud
         if target_cloud is not None:
             target_pc = target_cloud
         elif self._pc2_cropped is not None:
@@ -1708,7 +1665,7 @@ class PointCloudPair:
         """Compute optimal voxel size for auto-downsampling."""
         import sys
 
-        # Get point counts
+        # get point counts
         source_count = getattr(source_pc, 'point_count', None)
         target_count = getattr(target_pc, 'point_count', None)
 
@@ -1726,7 +1683,7 @@ class PointCloudPair:
         total_points = source_count + target_count
 
         if total_points > target_points:
-            # Get area from overlap polygon for density estimation
+            # get area from overlap Polygon for density estimation
             overlap_info = self.compute_overlap_polygon(use_transformed=True)
             if overlap_info['has_overlap']:
                 area = overlap_info['overlap_area']
@@ -1797,10 +1754,10 @@ class PointCloudPair:
         require_small_gicp()
         import small_gicp
 
-        # Determine initial voxel size for memory-efficient loading.
-        # Use 4x the fine resolution by default — aggressive initial downsampling
+        # determine initial voxel size for memory-efficient loading.
+        # use 4x the fine resolution by default : aggressive initial downsampling
         # is safe because preprocess_points refines to the exact target resolution.
-        # This dramatically reduces I/O and memory for >1GB datasets.
+        # this dramatically reduces I/O and memory for >1GB datasets.
         if config.initial_voxel_size is None:
             load_voxel_size = config.voxel_size * 4.0 if config.voxel_size else 2.0
         elif config.initial_voxel_size == 0:
@@ -1819,8 +1776,8 @@ class PointCloudPair:
             if point_filter:
                 print(f"Point filter: {point_filter}", file=sys.stderr)
 
-        # Auto-crop to bounding box intersection if no explicit crop_bounds given.
-        # This avoids loading millions of non-overlapping points that contribute
+        # auto-crop to bounding box intersection if no explicit crop_bounds given.
+        # this avoids loading millions of non-overlapping points that contribute
         # nothing to alignment. The buffer ensures edge points are included.
         if crop_bounds is None:
             src_bounds = getattr(source_pc, 'bounds', None)
@@ -1830,13 +1787,13 @@ class PointCloudPair:
                     and all(v is not None for v in tgt_bounds)):
                 s_minx, s_miny, s_maxx, s_maxy = src_bounds
                 t_minx, t_miny, t_maxx, t_maxy = tgt_bounds
-                # Compute intersection
+                # compute intersection
                 i_minx = max(s_minx, t_minx)
                 i_miny = max(s_miny, t_miny)
                 i_maxx = min(s_maxx, t_maxx)
                 i_maxy = min(s_maxy, t_maxy)
                 if i_minx < i_maxx and i_miny < i_maxy:
-                    # Add buffer (10% of extent or max_correspondence_distance, whichever is larger)
+                    # add buffer (10% of extent or max_correspondence_distance, whichever is larger)
                     extent = max(i_maxx - i_minx, i_maxy - i_miny)
                     buffer = max(extent * 0.1, config.max_correspondence_distance * 5)
                     crop_bounds = (
@@ -1852,7 +1809,7 @@ class PointCloudPair:
                               f"({overlap_area:,.0f} m\u00b2) + {buffer:.1f}m buffer",
                               file=sys.stderr)
 
-        # Load source and target points in parallel (independent I/O operations)
+        # load source and target points in parallel (independent I/O operations)
         if verbose:
             print(f"\nLoading point clouds in parallel...", file=sys.stderr)
             print(f"  Source: {Path(source_pc.filename).name}", file=sys.stderr)
@@ -1879,7 +1836,7 @@ class PointCloudPair:
             print(f"Source points: {len(source_points):,}", file=sys.stderr)
             print(f"Target points: {len(target_points):,}", file=sys.stderr)
 
-        # Center point clouds
+        # center point clouds
         n_source = len(source_points)
         n_target = len(target_points)
         n_total = n_source + n_target
@@ -1906,14 +1863,14 @@ class PointCloudPair:
                   f"X={tgt_range[0]:.1f}, Y={tgt_range[1]:.1f}, Z={tgt_range[2]:.1f}",
                   file=sys.stderr)
 
-        # Validate method
+        # validate method
         method_upper = config.method.upper()
         if method_upper not in ["GICP", "VGICP", "ICP", "PLANE_ICP"]:
             raise ValueError(
                 f"Unknown method: {config.method}. Use 'gicp', 'vgicp', 'icp', or 'plane_icp'."
             )
 
-        # Run registration
+        # run registration
         if verbose:
             print(f"\nRunning {method_upper} registration...", file=sys.stderr)
 
@@ -1929,13 +1886,13 @@ class PointCloudPair:
                 if getattr(config, 'resolution_stages', None) is not None:
                     resolutions = sorted(config.resolution_stages, reverse=True)
                 else:
-                    # Default: 3 stages — 4×, 2×, 1× the target resolution
+                    # default: 3 stages : 4×, 2×, 1× the target resolution
                     resolutions = [
                         downsample_resolution * 4.0,
                         downsample_resolution * 2.0,
                         downsample_resolution,
                     ]
-                # Deduplicate stages that are too close together
+                # deduplicate stages that are too close together
                 resolutions = [r for i, r in enumerate(resolutions)
                                if i == 0 or r < resolutions[i - 1] * 0.9]
             else:
@@ -1958,7 +1915,7 @@ class PointCloudPair:
                     print(f"  [{label}] Preprocessing at resolution {stage_resolution:.3f}m...",
                           file=sys.stderr)
 
-                # Preprocess source and target in parallel
+                # preprocess source and target in parallel
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     target_future = executor.submit(
                         small_gicp.preprocess_points,
@@ -1979,7 +1936,7 @@ class PointCloudPair:
                     print(f"    Points: {source_cloud_gicp.size():,} source, "
                           f"{target_cloud_gicp.size():,} target", file=sys.stderr)
 
-                # Scale correspondence distance and iterations for coarser stages
+                # scale correspondence distance and iterations for coarser stages
                 if is_final:
                     stage_max_dist = config.max_correspondence_distance
                     stage_max_iters = config.max_iterations
@@ -2014,7 +1971,7 @@ class PointCloudPair:
                         **align_kwargs,
                     )
 
-                # Carry the transform forward as the initial guess for the next stage
+                # carry the transform forward as the initial guess for the next stage
                 init_T = gicp_result.T_target_source
 
                 if verbose and len(resolutions) > 1:
@@ -2022,7 +1979,7 @@ class PointCloudPair:
                     print(f"    Translation so far: [{t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f}] m",
                           file=sys.stderr)
 
-                # Compute Euclidean RMSE only at the finest resolution
+                # compute Euclidean RMSE only at the finest resolution
                 if is_final:
                     source_pts_pp = np.asarray(source_cloud_gicp.points())
                     target_pts_pp = np.asarray(target_cloud_gicp.points())
@@ -2048,7 +2005,7 @@ class PointCloudPair:
 
                     del source_pts_pp, target_pts_pp, source_h, source_transformed, _tree, distances
 
-                # Cleanup stage clouds
+                # cleanup stage clouds
                 del target_cloud_gicp, target_tree, source_cloud_gicp, source_tree
                 gc.collect()
 
@@ -2066,7 +2023,7 @@ class PointCloudPair:
                 num_threads=config.num_threads,
             )
 
-            # Compute proper Euclidean RMSE and fitness for ICP path
+            # compute proper Euclidean RMSE and fitness for ICP path
             from scipy.spatial import cKDTree as _cKDTree
             T = gicp_result.T_target_source
             source_h = np.hstack([source_points, np.ones((len(source_points), 1))])
@@ -2086,7 +2043,7 @@ class PointCloudPair:
             del source_points, target_points
             gc.collect()
 
-        # Build RegistrationResult
+        # build RegistrationResult
         result = RegistrationResult()
         result.transformation = gicp_result.T_target_source
         result.converged = getattr(gicp_result, 'converged', True)
@@ -2096,7 +2053,7 @@ class PointCloudPair:
         result.target_path = target_pc.filename
         result.method_used = config.method
 
-        # Use properly computed Euclidean metrics
+        # use properly computed Euclidean metrics
         result.num_inliers = metrics_num_inliers
         result.num_correspondences = metrics_num_inliers
         result.fitness = metrics_fitness
@@ -2154,7 +2111,7 @@ class PointCloudPair:
 
         if output_path is None:
             src_path = Path(source_pc.filename)
-            # Always add "_transformed" suffix to indicate this is a transformed point cloud
+            # always add "_transformed" suffix to indicate this is a transformed point cloud
             output_path = str(src_path.with_name(src_path.stem + "_aligned_transformed" + src_path.suffix))
 
         if os.path.exists(output_path) and not overwrite:
@@ -2163,7 +2120,7 @@ class PointCloudPair:
         if verbose:
             print(f"\nApplying transformation to: {output_path}", file=sys.stderr)
 
-        # Save transformed point cloud
+        # save transformed point cloud
         save_transformed_las(
             source_pc.filename,
             output_path,
@@ -2171,11 +2128,11 @@ class PointCloudPair:
             result.centroid,
         )
 
-        # Propagate metadata from source instead of re-running from_file()
-        # (avoids an expensive PDAL metadata pipeline on the file we just wrote)
+        # propagate metadata from source instead of re-running from_file()
+        # (avoids an expensive PDAL metadata Pipeline on the file we just wrote)
         aligned_pc = PointCloud(output_path)
         aligned_pc.total_points = getattr(source_pc, 'total_points', None)
-        # Bounds are preserved through rigid transformation (rotation + translation)
+        # bounds are preserved through rigid transformation (rotation + translation)
         aligned_pc.bounds = getattr(source_pc, 'bounds', None)
         aligned_pc.minx = getattr(source_pc, 'minx', None)
         aligned_pc.miny = getattr(source_pc, 'miny', None)
@@ -2196,12 +2153,12 @@ class PointCloudPair:
             epoch=source_pc.epoch,
         )
 
-        # Copy unit information
+        # copy unit information
         aligned_pc.horizontal_unit = source_pc.horizontal_unit
         aligned_pc.vertical_unit = source_pc.vertical_unit
         aligned_pc.horizontal_units = source_pc.horizontal_units
         aligned_pc.vertical_units = source_pc.vertical_units
-        # Copy remaining attributes needed by downstream consumers
+        # copy remaining attributes needed by downstream consumers
         aligned_pc.is_orthometric = getattr(source_pc, 'is_orthometric', None)
         aligned_pc.geoid_model = getattr(source_pc, 'geoid_model', None)
         for attr in ('gps_time_mean_raw', 'gps_time_min_raw', 'gps_time_max_raw',
@@ -2212,11 +2169,11 @@ class PointCloudPair:
                       'has_ground_class', 'creation_doy', 'creation_year'):
             setattr(aligned_pc, attr, getattr(source_pc, attr, None))
 
-        # Update result dict
+        # update result dict
         alignment_result['aligned_pc'] = aligned_pc
         alignment_result['output_file'] = output_path
 
-        # Update internal state
+        # update internal state
         if self._pc1_cropped is not None:
             self._pc1_cropped = aligned_pc
         self._pc1_transformed = aligned_pc
@@ -2286,11 +2243,11 @@ class PointCloudPair:
         if verbose:
             print(f"\n--- Computing Alignment Quality ---", file=sys.stderr)
 
-        # Get the aligned source and target clouds
+        # get the aligned source and target clouds
         aligned_pc = self._pc1_transformed or self.pc1
         target_pc = self.pc2
 
-        # Load points (with optional sampling for speed)
+        # load points (with optional sampling for speed)
         if verbose:
             print(f"Loading points for quality assessment...", file=sys.stderr)
 
@@ -2309,24 +2266,24 @@ class PointCloudPair:
             print(f"  Aligned cloud: {len(source_pts):,} points", file=sys.stderr)
             print(f"  Reference cloud: {len(target_pts):,} points", file=sys.stderr)
 
-        # Build KD-tree on target (reference) cloud
+        # build KD-tree on target (reference) cloud
         if verbose:
             print(f"Building KD-tree...", file=sys.stderr)
         tree = cKDTree(target_pts)
 
-        # Query nearest neighbors
+        # query nearest neighbors
         if verbose:
             print(f"Computing nearest neighbor distances...", file=sys.stderr)
         distances, _ = tree.query(source_pts, k=1, workers=-1)
 
-        # Compute statistics
+        # compute statistics
         inlier_mask = distances <= max_distance
         inlier_distances = distances[inlier_mask]
         inlier_count = int(np.sum(inlier_mask))
         total_count = len(distances)
         inlier_ratio = inlier_count / total_count if total_count > 0 else 0.0
 
-        # Core metrics (on inliers only for meaningful statistics)
+        # core metrics (on inliers only for meaningful statistics)
         if inlier_count > 0:
             rmse = float(np.sqrt(np.mean(inlier_distances ** 2)))
             mae = float(np.mean(inlier_distances))
@@ -2370,9 +2327,7 @@ class PointCloudPair:
 
         return quality_result
 
-    # =========================================================================
     # DEM Creation Methods
-    # =========================================================================
     
     def create_dem_pair(
         self,
@@ -2430,10 +2385,10 @@ class PointCloudPair:
             print(f"Resolution: {resolution} m", file=sys.stderr)
             print(f"Interpolation: {interpolation}", file=sys.stderr)
 
-        # Select source for pc1
+        # select source for pc1
         pc1_source = self._pc1_transformed if use_transformed and self._pc1_transformed else self.pc1
 
-        # Determine output paths
+        # determine output paths
         if output_dir is None:
             dir1 = Path(pc1_source.filename).parent
             dir2 = Path(self.pc2.filename).parent
@@ -2444,9 +2399,9 @@ class PointCloudPair:
         out1 = dir1 / f"{Path(pc1_source.filename).stem}_{dem_type}_{int(resolution)}m.tif"
         out2 = dir2 / f"{Path(self.pc2.filename).stem}_{dem_type}_{int(resolution)}m.tif"
 
-        # Prepare classification filters
-        # If "auto", pass dem_type and let create_dem handle it
-        # Otherwise pass the explicit classification list
+        # prepare classification filters
+        # if "auto", pass dem_type and let create_dem handle it
+        # otherwise pass the explicit classification list
         dem1_kwargs = dict(dem_kwargs)
         dem2_kwargs = dict(dem_kwargs)
 
@@ -2483,7 +2438,7 @@ class PointCloudPair:
             **dem2_kwargs,
         )
         
-        # Copy all metadata from point clouds to DEMs
+        # copy all metadata from point clouds to DEMs
         self._copy_pc_metadata_to_raster(dem1, pc1_source)
         self._copy_pc_metadata_to_raster(dem2, self.pc2)
 
@@ -2502,9 +2457,7 @@ class PointCloudPair:
         """Create DSM (surface) pair. Convenience wrapper for create_dem_pair()."""
         return self.create_dem_pair(dem_type="dsm", **kwargs)
     
-    # =========================================================================
     # 3D Differencing Methods
-    # =========================================================================
 
     def compute_3d_difference(
         self,
@@ -2561,9 +2514,7 @@ class PointCloudPair:
             print("Computing 3D Point Cloud Difference", file=sys.stderr)
             print(f"{'=' * 60}", file=sys.stderr)
 
-        # =====================================================================
-        # Step 1: Crop both clouds to overlap area (Area A)
-        # =====================================================================
+        # step 1: Crop both clouds to overlap area (Area A)
         if verbose:
             print(f"\nCropping clouds to overlap area (Area A)...", file=sys.stderr)
 
@@ -2574,9 +2525,7 @@ class PointCloudPair:
             verbose=verbose,
         )
 
-        # =====================================================================
-        # Step 2: Load points from cropped clouds
-        # =====================================================================
+        # step 2: Load points from cropped clouds
         if verbose:
             print(f"\nLoading points from cropped clouds...", file=sys.stderr)
             if voxel_size:
@@ -2599,9 +2548,7 @@ class PointCloudPair:
             print(f"  PC1 (compare): {len(points1):,} points", file=sys.stderr)
             print(f"  PC2 (reference): {len(points2):,} points", file=sys.stderr)
 
-        # =====================================================================
-        # Step 3: Build KD-tree and find correspondences
-        # =====================================================================
+        # step 3: Build KD-tree and find correspondences
         if verbose:
             print(f"\nBuilding KD-tree on reference cloud...", file=sys.stderr)
 
@@ -2612,20 +2559,16 @@ class PointCloudPair:
 
         distances_3d, indices = tree2.query(points1, k=1, workers=-1)
 
-        # =====================================================================
-        # Step 4: Compute Z differences (pc2 - pc1, positive = gain)
-        # =====================================================================
+        # step 4: Compute Z differences (pc2 - pc1, positive = gain)
         z1 = points1[:, 2]
         z2_nearest = points2[indices, 2]
         z_differences = z2_nearest - z1
 
-        # Apply distance filter
+        # apply distance filter
         valid_mask = distances_3d <= max_distance
         valid_differences = z_differences[valid_mask]
 
-        # =====================================================================
-        # Step 5: Compute statistics
-        # =====================================================================
+        # step 5: Compute statistics
         if len(valid_differences) > 0:
             median_val = float(np.median(valid_differences))
             statistics = {
@@ -2687,11 +2630,9 @@ class PointCloudPair:
             'pc2_cropped': pc2_cropped,
         }
     
-    # =========================================================================
     # 2D Differencing Methods (via RasterPair)
-    # =========================================================================
 
-    # Valid DEM source options for dem1 (compare/older)
+    # valid DEM source options for dem1 (compare/older)
     _DEM1_OPTIONS = {
         "dtm": "dtm",
         "dsm": "dsm",
@@ -2703,7 +2644,7 @@ class PointCloudPair:
         "dsm_transformed_aligned": "dsm",
     }
 
-    # Valid DEM source options for dem2 (reference/younger)
+    # valid DEM source options for dem2 (reference/younger)
     _DEM2_OPTIONS = {
         "dtm": "dtm",
         "dsm": "dsm",
@@ -2736,13 +2677,13 @@ class PointCloudPair:
         """
         src_path = Path(self.pc1.filename)
 
-        # Determine output directory
+        # determine output directory
         if output_dir is None:
             out_dir = src_path.parent
         else:
             out_dir = Path(output_dir)
 
-        # Get transformation info to build suffix
+        # get transformation info to build suffix
         comparison = self.check_all_match()
         target_epoch = getattr(self.pc2, 'epoch', None)
         target_is_ortho = getattr(self.pc2, 'is_orthometric', None)
@@ -2752,8 +2693,8 @@ class PointCloudPair:
         needs_vertical = 'vertical_datum' in comparison['transformations_needed']
         needs_epoch = 'epoch' in comparison['transformations_needed']
 
-        # Build suffix for full transformation (matches transform_compare_to_match_reference)
-        # Only include epoch in suffix if needed AND not skipped
+        # build suffix for full transformation (matches transform_compare_to_match_reference)
+        # only include epoch in suffix if needed AND not skipped
         suffix_parts = []
         if needs_epoch and target_epoch and not skip_epoch:
             suffix_parts.append(f"epoch{target_epoch:.2f}".replace(".", "p"))
@@ -2761,20 +2702,20 @@ class PointCloudPair:
             suffix_parts.append(target_vertical_kind)
         if needs_horizontal:
             suffix_parts.append("reproj")
-        # Always add "_transformed" suffix to indicate transformation
+        # always add "_transformed" suffix to indicate transformation
         full_transform_suffix = "_".join(suffix_parts) + "_transformed" if suffix_parts else "transformed"
 
         paths = {
-            # Horizontal-only transform
+            # horizontal-only transform
             'horizontal_only': out_dir / (src_path.stem + "_reproj_transformed" + src_path.suffix),
-            # Full transformation
+            # full transformation
             'transformed': out_dir / (src_path.stem + f"_{full_transform_suffix}" + src_path.suffix),
-            # Cropped (after transform) - with and without buffer
+            # cropped (after transform) - with and without buffer
             'cropped': out_dir / (src_path.stem + f"_{full_transform_suffix}_intersection" + src_path.suffix),
             'cropped_buffered': out_dir / (src_path.stem + f"_{full_transform_suffix}_intersection_buffered" + src_path.suffix),
-            # Aligned (note: alignment also adds _transformed suffix)
+            # aligned (note: alignment also adds _transformed suffix)
             'aligned': out_dir / (src_path.stem + f"_{full_transform_suffix}_intersection_buffered_aligned_transformed" + src_path.suffix),
-            # Reference cropped
+            # reference cropped
             'pc2_cropped': out_dir / (Path(self.pc2.filename).stem + "_intersection" + Path(self.pc2.filename).suffix),
         }
 
@@ -2829,28 +2770,26 @@ class PointCloudPair:
         is_transformed_tier = "transformed" in dem1 and not is_aligned_tier
         is_base_tier = not is_aligned_tier and not is_transformed_tier
 
-        # Predict output paths for existence checks (respecting skip_epoch for naming)
+        # predict output paths for existence checks (respecting skip_epoch for naming)
         predicted_paths = self._predict_output_paths(output_dir=output_dir, skip_epoch=skip_epoch)
 
-        # Check what transformations are needed
+        # check what transformations are needed
         comparison = self.check_all_match()
         needs_horizontal = 'horizontal_crs' in comparison['transformations_needed']
 
-        # =========================================================================
-        # Step 1: Transform compare cloud based on tier
-        # =========================================================================
+        # step 1: Transform compare cloud based on tier
         if is_base_tier:
-            # Tier 1: Horizontal-only transform
+            # tier 1: Horizontal-only transform
             if self._pc1_horizontal_only is None:
                 horizontal_path = predicted_paths['horizontal_only']
                 if not overwrite and horizontal_path.exists():
-                    # Load existing file
+                    # load existing file
                     if verbose:
                         print(f"\n--- Loading existing horizontal-only transform: {horizontal_path.name} ---", file=sys.stderr)
                     self._pc1_horizontal_only = PointCloud(str(horizontal_path))
                     self._pc1_horizontal_only.from_file(lightweight=True)  # hexbin needed for crop_to_overlap
                 elif needs_horizontal:
-                    # Run transformation
+                    # run transformation
                     if verbose:
                         print(f"\n--- Auto-preparing: Horizontal-only transform ---", file=sys.stderr)
                     target_horiz_crs = (
@@ -2863,22 +2802,22 @@ class PointCloudPair:
                         overwrite=overwrite,
                     )
                 else:
-                    # No horizontal transform needed - use original
+                    # no horizontal transform needed - use original
                     if verbose:
                         print(f"\n--- No horizontal transform needed, using original pc1 ---", file=sys.stderr)
                     self._pc1_horizontal_only = self.pc1
 
         elif is_transformed_tier or is_aligned_tier:
-            # Tier 2/3: Full transform
+            # tier 2/3: Full transform
             if self._pc1_transformed is None:
                 transformed_path = predicted_paths['transformed']
                 if not overwrite and transformed_path.exists():
-                    # Load existing file
+                    # load existing file
                     if verbose:
                         print(f"\n--- Loading existing full transform: {transformed_path.name} ---", file=sys.stderr)
                     self._pc1_transformed = PointCloud(str(transformed_path))
                     self._pc1_transformed.from_file(lightweight=True)  # hexbin needed for crop_to_overlap
-                    # Copy metadata from reference
+                    # copy metadata from reference
                     self._pc1_transformed.add_metadata(
                         horizontal_CRS=getattr(self.pc2, 'current_horizontal_crs', None) or getattr(self.pc2, 'original_horizontal_crs', None),
                         vertical_CRS=getattr(self.pc2, 'current_vertical_crs', None) or getattr(self.pc2, 'original_vertical_crs', None),
@@ -2886,7 +2825,7 @@ class PointCloudPair:
                         epoch=getattr(self.pc2, 'epoch', None),
                     )
                 else:
-                    # Run transformation
+                    # run transformation
                     if verbose:
                         print(f"\n--- Auto-preparing: Full transformation (skip_epoch={skip_epoch}) ---", file=sys.stderr)
                     self.transform_compare_to_match_reference(
@@ -2897,18 +2836,16 @@ class PointCloudPair:
                         verbose=verbose,
                     )
 
-        # =========================================================================
-        # Step 2: Crop to overlap (needed for all tiers)
-        # =========================================================================
+        # step 2: Crop to overlap (needed for all tiers)
         if self._pc1_cropped is None or self._pc2_cropped is None:
-            # Determine cropped path based on tier
+            # determine cropped path based on tier
             if is_aligned_tier and interior_buffer:
                 cropped_path = predicted_paths['cropped_buffered']
             else:
                 cropped_path = predicted_paths['cropped']
             pc2_cropped_path = predicted_paths['pc2_cropped']
 
-            # Check if both cropped files exist
+            # check if both cropped files exist
             if not overwrite and cropped_path.exists() and pc2_cropped_path.exists():
                 if verbose:
                     print(f"\n--- Loading existing cropped clouds ---", file=sys.stderr)
@@ -2916,8 +2853,8 @@ class PointCloudPair:
                     print(f"  PC2: {pc2_cropped_path.name}", file=sys.stderr)
                 self._pc1_cropped = PointCloud(str(cropped_path))
                 self._pc1_cropped.from_file(lightweight=True, bbox_only=True)
-                # Copy metadata from transformed source or reference
-                # For transformed/aligned tiers, epoch should match reference (coordinates are transformed)
+                # copy metadata from transformed source or reference
+                # for transformed/aligned tiers, epoch should match reference (coordinates are transformed)
                 if is_transformed_tier or is_aligned_tier:
                     self._pc1_cropped.add_metadata(
                         horizontal_CRS=getattr(self.pc2, 'current_horizontal_crs', None) or getattr(self.pc2, 'original_horizontal_crs', None),
@@ -2940,9 +2877,7 @@ class PointCloudPair:
                     verbose=verbose,
                 )
 
-        # =========================================================================
-        # Step 3: Align (only for aligned tier)
-        # =========================================================================
+        # step 3: Align (only for aligned tier)
         if is_aligned_tier and self._alignment_result is None:
             aligned_path = predicted_paths['aligned']
 
@@ -2951,23 +2886,23 @@ class PointCloudPair:
                     print(f"\n--- Loading existing aligned cloud: {aligned_path.name} ---", file=sys.stderr)
                 aligned_pc = PointCloud(str(aligned_path))
                 aligned_pc.from_file(lightweight=True, bbox_only=True)
-                # Copy metadata from reference (pc2) since aligned cloud coordinates are in reference frame
+                # copy metadata from reference (pc2) since aligned cloud coordinates are in reference frame
                 aligned_pc.add_metadata(
                     horizontal_CRS=getattr(self.pc2, 'current_horizontal_crs', None) or getattr(self.pc2, 'original_horizontal_crs', None),
                     vertical_CRS=getattr(self.pc2, 'current_vertical_crs', None) or getattr(self.pc2, 'original_vertical_crs', None),
                     geoid_model=getattr(self.pc2, 'geoid_model', None),
                     epoch=getattr(self.pc2, 'epoch', None),
                 )
-                # Update state
+                # update state
                 self._pc1_cropped = aligned_pc
                 self._pc1_transformed = aligned_pc
-                # Mark alignment as done (minimal dict to pass checks)
+                # mark alignment as done (minimal dict to pass checks)
                 self._alignment_result = {'loaded_from_file': str(aligned_path)}
             else:
                 if verbose:
                     print(f"\n--- Auto-preparing: ICP alignment ---", file=sys.stderr)
-                # Merge default alignment settings with any user-provided kwargs
-                # Defaults: gicp method, ground points, no downsampling, full area
+                # merge default alignment settings with any user-provided kwargs
+                # defaults: GICP method, ground points, no downsampling, full area
                 align_params = {
                     "method": "gicp",
                     "point_filter": "ground",
@@ -3013,11 +2948,11 @@ class PointCloudPair:
 
         dem_type = self._DEM1_OPTIONS[dem1_option]
 
-        # Tier 3: Transformed + Aligned
+        # tier 3: Transformed + Aligned
         if "aligned" in dem1_option:
-            # Use aligned cloud (stored in _pc1_cropped after alignment, or _pc1_transformed)
+            # use aligned cloud (stored in _pc1_cropped after alignment, or _pc1_transformed)
             if self._alignment_result is not None:
-                # Alignment was performed - use the aligned result
+                # alignment was performed - use the aligned result
                 if self._pc1_cropped is not None:
                     return self._pc1_cropped, dem_type
                 elif self._pc1_transformed is not None:
@@ -3027,13 +2962,13 @@ class PointCloudPair:
                 "Run align_point_clouds() first or use auto_prepare=True."
             )
 
-        # Tier 2: Fully Transformed (no alignment)
+        # tier 2: Fully Transformed (no alignment)
         elif "transformed" in dem1_option:
-            # Use fully transformed cloud (before alignment)
-            # Check if alignment was done - if so, we need the pre-alignment transformed version
+            # use fully transformed cloud (before alignment)
+            # check if alignment was done - if so, we need the pre-alignment transformed version
             if self._alignment_result is not None and self._pc1_cropped_original is not None:
-                # Alignment was done - use the preserved pre-alignment cropped version
-                # This is the transformed+cropped version before ICP was applied
+                # alignment was done - use the preserved pre-alignment cropped version
+                # this is the transformed+cropped version before ICP was applied
                 return self._pc1_cropped_original, dem_type
             elif self._pc1_transformed is not None:
                 return self._pc1_transformed, dem_type
@@ -3045,18 +2980,18 @@ class PointCloudPair:
                 "Run transform_compare_to_match_reference() first or use auto_prepare=True."
             )
 
-        # Tier 1: Horizontal-only (base dtm/dsm)
+        # tier 1: Horizontal-only (base dtm/dsm)
         else:
-            # Use horizontal-only transformed cloud
+            # use horizontal-only transformed cloud
             if self._pc1_horizontal_only is not None:
                 return self._pc1_horizontal_only, dem_type
-            # Fall back to cropped original (if no horizontal transform needed)
+            # fall back to cropped original (if no horizontal transform needed)
             elif self._pc1_cropped_original is not None:
                 return self._pc1_cropped_original, dem_type
             elif self._pc1_cropped is not None and self._alignment_result is None:
                 return self._pc1_cropped, dem_type
             elif self.pc1 is not None:
-                # Fall back to original pc1 (not cropped)
+                # fall back to original pc1 (not cropped)
                 import warnings
                 warnings.warn(
                     f"No cropped/transformed point cloud available for dem1='{dem1_option}'. "
@@ -3193,35 +3128,35 @@ class PointCloudPair:
 
         Examples
         --------
-        # Scenario 1: Horizontal-only transform (compare CRS-matched to reference)
+        # scenario 1: Horizontal-only transform (compare CRS-matched to reference)
         >>> result = pc_pair.compute_2d_difference(
         ...     dem1="dtm",
         ...     dem2="dtm",
         ...     resolution=1.0,
         ... )
 
-        # Scenario 2: Fully transformed (horizontal + vertical + epoch)
+        # scenario 2: Fully transformed (horizontal + vertical + epoch)
         >>> result = pc_pair.compute_2d_difference(
         ...     dem1="dtm_transformed",
         ...     dem2="dtm",
         ...     resolution=1.0,
         ... )
 
-        # Scenario 3: Fully transformed + ICP aligned
+        # scenario 3: Fully transformed + ICP aligned
         >>> result = pc_pair.compute_2d_difference(
         ...     dem1="dtm_transformed_aligned",
         ...     dem2="dtm",
         ...     resolution=1.0,
         ... )
 
-        # Reuse existing files from previous run (overwrite=False)
+        # reuse existing files from previous run (overwrite=False)
         >>> result = pc_pair.compute_2d_difference(
         ...     dem1="dtm_transformed_aligned",
         ...     dem2="dtm",
         ...     overwrite=False,  # Will load existing files if found
         ... )
 
-        # Colab/low-memory environment with custom alignment settings
+        # colab/low-memory environment with custom alignment settings
         >>> result = pc_pair.compute_2d_difference(
         ...     dem1="dtm_transformed_aligned",
         ...     dem2="dtm",
@@ -3231,7 +3166,7 @@ class PointCloudPair:
         ...     },
         ... )
 
-        # Legacy usage (deprecated but still supported)
+        # legacy usage (deprecated but still supported)
         >>> result = pc_pair.compute_2d_difference(
         ...     dem_type="dtm",
         ...     use_transformed=True,
@@ -3244,7 +3179,7 @@ class PointCloudPair:
             print("Computing 2D (DEM-based) Difference", file=sys.stderr)
             print(f"{'=' * 60}", file=sys.stderr)
 
-        # Auto-prepare point clouds based on dem1 tier
+        # auto-prepare point clouds based on dem1 tier
         if auto_prepare and dem1 is not None:
             self._auto_prepare_for_differencing(
                 dem1=dem1,
@@ -3256,13 +3191,13 @@ class PointCloudPair:
                 alignment_kwargs=alignment_kwargs,
             )
 
-        # Resolve dem1 and dem2 sources
+        # resolve dem1 and dem2 sources
         if dem1 is not None:
-            # New API: use explicit dem1 option
+            # new API: use explicit dem1 option
             pc1_source, dem1_type = self._resolve_pc1_source(dem1)
             dem1_source_desc = dem1
         else:
-            # Legacy API: use dem_type and use_transformed
+            # legacy API: use dem_type and use_transformed
             dem1_type = dem_type
             if use_transformed and self._pc1_transformed is not None:
                 pc1_source = self._pc1_transformed
@@ -3275,11 +3210,11 @@ class PointCloudPair:
                 dem1_source_desc = f"{dem_type}_original"
 
         if dem2 is not None:
-            # New API: use explicit dem2 option
+            # new API: use explicit dem2 option
             pc2_source, dem2_type = self._resolve_pc2_source(dem2)
             dem2_source_desc = dem2
         else:
-            # Legacy API: use dem_type
+            # legacy API: use dem_type
             dem2_type = dem_type
             if self._pc2_cropped is not None:
                 pc2_source = self._pc2_cropped
@@ -3294,7 +3229,7 @@ class PointCloudPair:
             print(f"DEM1 type: {dem1_type.upper()}", file=sys.stderr)
             print(f"DEM2 type: {dem2_type.upper()}", file=sys.stderr)
 
-        # Determine output paths
+        # determine output paths
         if output_dir is None:
             dir1 = Path(pc1_source.filename).parent
             dir2 = Path(pc2_source.filename).parent
@@ -3308,7 +3243,7 @@ class PointCloudPair:
         if verbose:
             print(f"\nCreating DEM from pc1: {Path(pc1_source.filename).name}", file=sys.stderr)
 
-        # Create DEMs
+        # create DEMs
         raster_dem1 = pc1_source.create_dem(
             output_path=str(out1),
             dem_type=dem1_type,
@@ -3330,7 +3265,7 @@ class PointCloudPair:
             **dem_kwargs,
         )
 
-        # Copy all metadata from source point clouds to rasters
+        # copy all metadata from source point clouds to rasters
         self._copy_pc_metadata_to_raster(raster_dem1, pc1_source)
         self._copy_pc_metadata_to_raster(raster_dem2, pc2_source)
 
@@ -3338,14 +3273,14 @@ class PointCloudPair:
             print(f"\nDEM1: {out1}", file=sys.stderr)
             print(f"DEM2: {out2}", file=sys.stderr)
 
-        # Create RasterPair (dem1 = compare, dem2 = reference)
+        # create RasterPair (dem1 = compare, dem2 = reference)
         raster_pair = RasterPair(raster_dem1, raster_dem2)
 
         if verbose:
             print("\nRasterPair comparison:", file=sys.stderr)
             raster_pair.print_summary()
 
-        # Compute difference using RasterPair
+        # compute difference using RasterPair
         result = raster_pair.compute_difference(
             transform_first=transform_first,
             skip_epoch=skip_epoch,
@@ -3356,7 +3291,7 @@ class PointCloudPair:
             verbose=verbose,
         )
 
-        # Add context to result
+        # add context to result
         result['dem1_raster'] = raster_dem1
         result['dem2_raster'] = raster_dem2
         result['dem1_source'] = dem1_source_desc
@@ -3378,9 +3313,7 @@ class PointCloudPair:
         """Compute DSM-based difference. Convenience wrapper."""
         return self.compute_2d_difference(dem_type="dsm", **kwargs)
 
-    # =========================================================================
-    # Full Pipeline Methods
-    # =========================================================================
+    # full Pipeline Methods
     
     def full_differencing_pipeline(
         self,
@@ -3448,7 +3381,7 @@ class PointCloudPair:
             'difference_result': None,
         }
         
-        # Step 1: Transform pc1 to match pc2
+        # step 1: Transform pc1 to match pc2
         if verbose:
             print("\n[Pipeline Step 1/4] CRS/Datum Transformation")
         
@@ -3463,7 +3396,7 @@ class PointCloudPair:
             if verbose:
                 print("  No transformations needed - point clouds already aligned")
         
-        # Step 2: ICP Alignment
+        # step 2: ICP Alignment
         if align_icp:
             if verbose:
                 print("\n[Pipeline Step 2/4] ICP Fine Alignment")
@@ -3484,7 +3417,7 @@ class PointCloudPair:
             if verbose:
                 print("\n[Pipeline Step 2/4] ICP Alignment - Skipped")
         
-        # Step 3 & 4: DEM creation and differencing
+        # step 3 & 4: DEM creation and differencing
         if verbose:
             print("\n[Pipeline Step 3-4/4] DEM Creation and Differencing")
         
@@ -3516,9 +3449,7 @@ class PointCloudPair:
         
         return results
     
-    # =========================================================================
-    # Utility Methods
-    # =========================================================================
+    # utility Methods
     
     def get_transformed_pc1(self) -> Optional[PointCloud]:
         """Get the transformed pc1, if available."""
@@ -3544,14 +3475,12 @@ class PointCloudPair:
 
     def process_point_cloud_pair(
         self,
-        # CRS/Transformation options
         warp_to_reference: bool = True,
         skip_epoch: bool = False,
         skip_vertical: bool = False,
-        # Cropping options
+        # cropping options
         crop_to_overlap: bool = True,
         alignment_buffer: float = 10.0,
-        # Alignment options
         align_icp: bool = True,
         icp_method: str = "vgicp",
         auto_downsample: bool = True,
@@ -3566,7 +3495,7 @@ class PointCloudPair:
         interpolation: str = "idw",
         classifications_pc1: Optional[Union[str, List[int], Set[int]]] = "auto",
         classifications_pc2: Optional[Union[str, List[int], Set[int]]] = "auto",
-        # Output options
+        # output options
         output_dir: Optional[str] = None,
         overwrite: bool = True,
         verbose: bool = True,
@@ -3661,9 +3590,7 @@ class PointCloudPair:
             'difference_result': None,
         }
 
-        # =====================================================================
-        # Step 1: Compare metadata
-        # =====================================================================
+        # step 1: Compare metadata
         if verbose:
             print(f"\n[Step 1/7] Comparing metadata...", file=sys.stderr)
 
@@ -3672,9 +3599,7 @@ class PointCloudPair:
         if verbose:
             self.print_comparison()
 
-        # =====================================================================
-        # Step 2: Warp CRS to match reference
-        # =====================================================================
+        # step 2: Warp CRS to match reference
         if warp_to_reference and results['comparison']['transformations_needed']:
             if verbose:
                 print(f"\n[Step 2/7] Warping compare cloud to reference frame...",
@@ -3694,9 +3619,7 @@ class PointCloudPair:
                     print("  (Point clouds already in same reference frame)",
                           file=sys.stderr)
 
-        # =====================================================================
-        # Step 3: Compute overlap and crop
-        # =====================================================================
+        # step 3: Compute overlap and crop
         if verbose:
             print(f"\n[Step 3/7] Computing overlap area...", file=sys.stderr)
 
@@ -3711,9 +3634,7 @@ class PointCloudPair:
             print(f"  PC1 coverage: {oi['overlap_fraction_pc1']:.1%}", file=sys.stderr)
             print(f"  PC2 coverage: {oi['overlap_fraction_pc2']:.1%}", file=sys.stderr)
 
-        # =====================================================================
-        # Step 4: ICP Alignment
-        # =====================================================================
+        # step 4: ICP Alignment
         if align_icp:
             if verbose:
                 print(f"\n[Step 4/7] ICP alignment ({icp_method.upper()})...",
@@ -3737,7 +3658,7 @@ class PointCloudPair:
                 )
                 results['alignment_result'] = alignment
 
-                # Step 5: Compute alignment quality
+                # step 5: Compute alignment quality
                 if compute_quality:
                     if verbose:
                         print(f"\n[Step 5/7] Computing alignment quality...",
@@ -3755,19 +3676,17 @@ class PointCloudPair:
                 print(f"\n[Step 4/7] ICP alignment - Skipped", file=sys.stderr)
                 print(f"\n[Step 5/7] Alignment quality - Skipped", file=sys.stderr)
 
-        # =====================================================================
-        # Step 6: Create DEMs
-        # =====================================================================
+        # step 6: Create DEMs
         if verbose:
             print(f"\n[Step 6/7] Creating DEMs...", file=sys.stderr)
 
-        # Determine DEM types
+        # determine DEM types
         dt_pc1 = dem_type_pc1 if dem_type_pc1 is not None else dem_type
         dt_pc2 = dem_type_pc2 if dem_type_pc2 is not None else dem_type
         is_mixed = (dt_pc1 != dt_pc2)
 
         if is_mixed:
-            # Use mixed method (different DEM types)
+            # use mixed method (different DEM types)
             if verbose:
                 print(f"  Mixed mode: PC1={dt_pc1.upper()}, PC2={dt_pc2.upper()}",
                       file=sys.stderr)
@@ -3787,7 +3706,7 @@ class PointCloudPair:
             classifications_pc2=classifications_pc2,
         )
 
-        # If mixed, recreate dem2 with different type
+        # if mixed, recreate dem2 with different type
         if is_mixed:
             if verbose:
                 print(f"  Recreating PC2 DEM as {dt_pc2.upper()}...", file=sys.stderr)
@@ -3816,9 +3735,7 @@ class PointCloudPair:
         results['dem1'] = dem1
         results['dem2'] = dem2
 
-        # =====================================================================
-        # Step 7: Compute 2D difference
-        # =====================================================================
+        # step 7: Compute 2D difference
         if verbose:
             print(f"\n[Step 7/7] Computing 2D difference...", file=sys.stderr)
 
@@ -3831,7 +3748,7 @@ class PointCloudPair:
             verbose=verbose,
         )
 
-        # Add metadata
+        # add metadata
         diff_result['dem_type_pc1'] = dt_pc1
         diff_result['dem_type_pc2'] = dt_pc2
         diff_result['dem_resolution'] = resolution
@@ -3840,9 +3757,7 @@ class PointCloudPair:
 
         results['difference_result'] = diff_result
 
-        # =====================================================================
-        # Summary
-        # =====================================================================
+        # summary
         if verbose:
             print(f"\n{'#' * 70}", file=sys.stderr)
             print("# Workflow Complete", file=sys.stderr)

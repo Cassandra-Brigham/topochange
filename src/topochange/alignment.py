@@ -1,21 +1,8 @@
-"""
-Automatic Point Cloud Registration for Landscape Data
+"""point cloud registration using ICP-based methods.
 
-This module provides classes for aligning point clouds using ICP-based
-registration methods. It integrates with PointCloud and PointCloudPair classes
-and uses small_gicp for registration and PDAL for I/O and filtering.
-
-The main classes are:
-- RegistrationConfig: Configuration dataclass for all alignment parameters
-- RegistrationResult: Container for registration results
-- LandscapeAligner: Main alignment class with preprocessing and retry logic
-
-For shared utilities (loading, saving, preprocessing), see alignment_utils.py.
-
-References
-----------
-- Besl, P.J. and McKay, N.D. (1992). A Method for Registration of 3-D Shapes.
-- Koide, K. et al. (2021). Voxelized GICP for Fast and Accurate 3D Point Cloud Registration.
+references:
+- Besl & McKay (1992). A Method for Registration of 3-D Shapes.
+- Koide et al. (2021). Voxelized GICP for Fast and Accurate 3D Point Cloud Registration.
 """
 
 import json
@@ -40,13 +27,13 @@ except ImportError:
     small_gicp = None
     _HAS_SMALL_GICP = False
 
-# Use pdal_wrapper for Colab compatibility (falls back to native pdal locally)
+# use pdal_wrapper for Colab compatibility (falls back to native PDAL locally)
 try:
     from .pdal_wrapper import pdal
 except ImportError:
     import pdal
 
-# Import shared utilities (these can also be used by pointcloudpair.py)
+# import shared utilities (these can also be used by pointcloudpair.py)
 from .alignment_utils import (
     run_pdal_pipeline,
     load_points_from_las,
@@ -71,7 +58,7 @@ def _require_small_gicp():
 if TYPE_CHECKING:
     from .pointcloud import PointCloud
 
-# Set up logging
+# set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -90,7 +77,7 @@ def _run_pdal_pipeline(steps, arrays=None, need_arrays=None):
     Returns:
         Executed pipeline object
     """
-    # Filters that don't support PDAL streaming mode
+    # filters that don't support PDAL streaming mode
     NON_STREAMING_FILTERS = {
         "filters.outlier",
         "filters.smrf",
@@ -124,26 +111,26 @@ def _run_pdal_pipeline(steps, arrays=None, need_arrays=None):
     else:
         pipeline = pdal.Pipeline(pipeline_json)
 
-    # Auto-detect if we need arrays returned or must use standard execute
+    # auto-detect if we need arrays returned or must use standard execute
     if need_arrays is None:
-        # If pipeline ends with a writer, we don't need arrays back
+        # if Pipeline ends with a writer, we don't need arrays back
         has_writer = any(
             step.get("type", "").startswith("writers.")
             for step in steps
         )
         need_arrays = not has_writer
 
-    # Check if any filter doesn't support streaming
+    # check if any filter doesn't support streaming
     has_non_streaming_filter = any(
         step.get("type", "") in NON_STREAMING_FILTERS
         for step in steps
     )
 
     if need_arrays or has_non_streaming_filter:
-        # Must use standard execute
+        # must use standard execute
         pipeline.execute()
     else:
-        # Use streaming for file-to-file operations (memory efficient)
+        # use streaming for file-to-file operations (memory efficient)
         pipeline.execute_streaming(chunk_size=1000000)
 
     return pipeline
@@ -242,13 +229,13 @@ class RegistrationConfig:
 
     def __post_init__(self):
         """Validate and normalize configuration."""
-        # Normalize point_filter
+        # normalize point_filter
         if isinstance(self.point_filter, str):
             self.point_filter = self.point_filter.lower()
             if self.point_filter not in ("ground", "all"):
                 raise ValueError(f"Invalid point_filter string: {self.point_filter}")
 
-        # Handle legacy classification_filter
+        # handle legacy classification_filter
         if self.classification_filter is not None and self.point_filter == "ground":
             logger.warning(
                 "classification_filter is deprecated, use point_filter instead. "
@@ -301,20 +288,20 @@ class PointCloudProcessor:
         if total_points <= target_points:
             return 0.0  # No downsampling needed
         
-        # Estimate point cloud extent
+        # estimate point cloud extent
         minx, miny, maxx, maxy = bounds
         area = (maxx - minx) * (maxy - miny)
         
         if area <= 0:
             return 1.0  # Default voxel size
         
-        # Points per square meter
+        # points per square meter
         density = total_points / area
         
-        # Target density
+        # target density
         target_density = target_points / area
         
-        # Voxel size to achieve target density
+        # voxel size to achieve target density
         voxel_size = np.sqrt(1.0 / target_density) if target_density > 0 else 1.0
         
         return float(voxel_size)
@@ -447,11 +434,11 @@ class PointCloudProcessor:
         arr = arrays[0]
         points = np.column_stack([arr["X"], arr["Y"], arr["Z"]])
 
-        # Check for color channels
+        # check for color channels
         colors = None
         field_names = arr.dtype.names or ()
         if all(field in field_names for field in ["Red", "Green", "Blue"]):
-            # Normalize colors to 0-1 range (assuming 16-bit color)
+            # normalize colors to 0-1 range (assuming 16-bit color)
             colors = np.column_stack([
                 arr["Red"] / 65535.0,
                 arr["Green"] / 65535.0,
@@ -505,33 +492,32 @@ class RegistrationResult:
     """
 
     def __init__(self):
-        # Core transformation
         self.transformation: np.ndarray = np.eye(4)
 
-        # Quality metrics
+        # quality metrics
         self.rmse: float = np.inf
         self.fitness: float = 0.0
         self.num_inliers: int = 0  # Renamed from num_correspondences for clarity
         self.num_correspondences: int = 0  # Legacy alias
 
-        # Convergence info
+        # convergence info
         self.converged: bool = False
         self.iterations: int = 0
         self.scale: float = 1.0
         self.method_used: str = ""
         self.retry_count: int = 0
 
-        # Transformation components (computed on access)
+        # transformation components (computed on access)
         self._translation: Optional[np.ndarray] = None
         self._rotation_angle_deg: Optional[float] = None
 
-        # Context for proper transformation application
+        # context for proper transformation application
         self.centroid: Optional[np.ndarray] = None
         self.source_path: Optional[str] = None
         self.target_path: Optional[str] = None
         self.output_path: Optional[str] = None
 
-        # Additional metadata
+        # additional metadata
         self.metadata: Dict[str, Any] = {}
 
     @property
@@ -641,21 +627,21 @@ class LandscapeAligner:
         Returns:
             Registration result (with output_path set if apply_transform=True)
         """
-        # Use config.method if method not specified
+        # use config.method if method not specified
         if method is None:
             method = RegistrationMethod(self.config.method)
 
-        # Extract paths and metadata
+        # extract paths and metadata
         source_path, source_meta = self._extract_path_and_metadata(source)
         target_path, target_meta = self._extract_path_and_metadata(target)
         
         logger.info(f"Starting registration: {source_meta['name']} -> {target_meta['name']}")
         
-        # Auto-compute max correspondence distance if needed
+        # auto-compute max correspondence distance if needed
         if self.config.max_correspondence_distance is None:
             self._auto_compute_correspondence_distance(source_meta, target_meta)
         
-        # Main registration with retry logic
+        # main registration with retry logic
         if self.config.enable_auto_retry:
             result = self._align_with_retry(
                 source_path, target_path,
@@ -669,11 +655,11 @@ class LandscapeAligner:
                 method, initial_transform
             )
 
-        # Apply transformation and save if requested
+        # apply transformation and save if requested
         if apply_transform and result.converged:
             from .alignment_utils import save_transformed_las
 
-            # Generate output path if not provided
+            # generate output path if not provided
             if output_path is None:
                 src_path = Path(source_path)
                 output_path = src_path.with_name(
@@ -682,7 +668,7 @@ class LandscapeAligner:
             else:
                 output_path = Path(output_path)
 
-            # Save transformed point cloud
+            # save transformed point cloud
             save_transformed_las(
                 source_filename=source_path,
                 output_filename=output_path,
@@ -708,11 +694,11 @@ class LandscapeAligner:
         }
         
         if isinstance(data, str):
-            # Direct file path
+            # direct file path
             path = data
             metadata["name"] = Path(path).stem
 
-            # Quick metadata extraction with PDAL
+            # quick metadata extraction with PDAL
             pipeline = _run_pdal_pipeline([
                 {"type": "readers.las", "filename": path, "count": 0}
             ])
@@ -737,11 +723,11 @@ class LandscapeAligner:
             metadata["epoch"] = getattr(data, 'epoch', None)
             
         elif isinstance(data, np.ndarray):
-            # NumPy array - need to save to temp file
+            # numPy array - need to save to temp file
             with tempfile.NamedTemporaryFile(suffix='.las', delete=False) as tmp:
                 path = tmp.name
 
-            # Write array to LAS using PDAL
+            # write array to LAS using PDAL
             structured_array = np.zeros(len(data), dtype=[('X', 'f8'), ('Y', 'f8'), ('Z', 'f8')])
             structured_array['X'] = data[:, 0]
             structured_array['Y'] = data[:, 1]
@@ -773,18 +759,18 @@ class LandscapeAligner:
                 bounds_list.append(meta["bounds"])
         
         if not bounds_list:
-            # Default for landscape data in meters
+            # default for landscape data in meters
             self.config.max_correspondence_distance = 10.0
             return
         
-        # Compute based on extent
+        # compute based on extent
         max_extent = 0
         for bounds in bounds_list:
             minx, miny, maxx, maxy = bounds
             extent = max(maxx - minx, maxy - miny)
             max_extent = max(max_extent, extent)
         
-        # Adjust for units (assume meters unless specified otherwise)
+        # adjust for units (assume meters unless specified otherwise)
         unit_scale = 1.0
         for meta in [source_meta, target_meta]:
             if meta["units"] and "foot" in meta["units"].lower():
@@ -793,7 +779,7 @@ class LandscapeAligner:
         
         max_extent *= unit_scale
         
-        # Set to 1% of max extent, clamped between 0.5 and 50 meters
+        # set to 1% of max extent, clamped between 0.5 and 50 meters
         self.config.max_correspondence_distance = np.clip(
             max_extent * 0.01, 0.5, 50.0
         )
@@ -814,13 +800,13 @@ class LandscapeAligner:
         original_method = method
         
         for retry in range(self.config.max_retries):
-            # Adjust config based on retry strategy
+            # adjust config based on retry strategy
             if retry > 0:
                 strategy = self.config.retry_strategies[min(retry - 1, len(self.config.retry_strategies) - 1)]
                 self._apply_retry_strategy(strategy, retry)
                 strategies_tried.append(strategy)
                 
-                # Try different methods on retry
+                # try different methods on retry
                 if retry == 1 and method == RegistrationMethod.VGICP:
                     method = RegistrationMethod.GICP
                     logger.info("Switching from VGICP to GICP for retry")
@@ -861,21 +847,21 @@ class LandscapeAligner:
     def _apply_retry_strategy(self, strategy: str, retry_num: int) -> None:
         """Apply a retry strategy by modifying config"""
         if strategy == "increase_correspondence":
-            # Increase correspondence distance
+            # increase correspondence distance
             self.config.max_correspondence_distance *= 1.5
             logger.info(f"Increased max correspondence distance to {self.config.max_correspondence_distance:.2f}")
             
         elif strategy == "change_method":
-            # Method change handled in calling function
+            # method change handled in calling function
             pass
             
         elif strategy == "adjust_filtering":
-            # Relax filtering parameters
+            # relax filtering parameters
             if self.config.outlier_removal:
                 self.config.outlier_std_multiplier *= 1.5
                 logger.info(f"Relaxed outlier threshold to {self.config.outlier_std_multiplier:.1f} std")
             
-            # Increase target points for better coverage
+            # increase target points for better coverage
             self.config.target_points = int(self.config.target_points * 1.5)
             logger.info(f"Increased target points to {self.config.target_points}")
     
@@ -890,20 +876,20 @@ class LandscapeAligner:
         Single registration attempt with preprocessing
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Preprocessing pipeline
+            # preprocessing Pipeline
             processed_source = self._preprocess_pointcloud(source_path, tmpdir, "source", source_meta)
             processed_target = self._preprocess_pointcloud(target_path, tmpdir, "target", target_meta)
 
-            # Load processed points
+            # load processed points
             source_points, _ = self.processor.extract_points_and_colors(processed_source)
             target_points, _ = self.processor.extract_points_and_colors(processed_target)
 
             logger.info(f"After preprocessing: {len(source_points)} source, {len(target_points)} target points")
 
-            # Center both point clouds to common origin if requested
+            # center both point clouds to common origin if requested
             centroid = None
             if self.config.center_to_origin:
-                # Compute shared centroid (weighted average)
+                # compute shared centroid (weighted average)
                 n_source = len(source_points)
                 n_target = len(target_points)
                 n_total = n_source + n_target
@@ -914,23 +900,23 @@ class LandscapeAligner:
 
                 logger.info(f"Centering to origin (centroid: [{centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f}])")
 
-                # Center both point clouds in-place
+                # center both point clouds in-place
                 source_points -= centroid
                 target_points -= centroid
 
-            # Crop to rectangular extent centered on origin if requested
+            # crop to rectangular extent centered on origin if requested
             if self.config.crop_dimensions is not None:
                 crop_x, crop_y = self.config.crop_dimensions
                 half_x, half_y = crop_x / 2.0, crop_y / 2.0
 
-                # Filter source points
+                # filter source points
                 source_mask = (
                     (source_points[:, 0] >= -half_x) & (source_points[:, 0] <= half_x) &
                     (source_points[:, 1] >= -half_y) & (source_points[:, 1] <= half_y)
                 )
                 source_points = source_points[source_mask]
 
-                # Filter target points
+                # filter target points
                 target_mask = (
                     (target_points[:, 0] >= -half_x) & (target_points[:, 0] <= half_x) &
                     (target_points[:, 1] >= -half_y) & (target_points[:, 1] <= half_y)
@@ -940,12 +926,12 @@ class LandscapeAligner:
                 logger.info(f"Cropped to {crop_x}x{crop_y}m rectangle: "
                            f"{len(source_points)} source, {len(target_points)} target points")
 
-            # Coarse alignment if requested
+            # coarse alignment if requested
             if self.config.perform_coarse_alignment and initial_transform is None:
                 initial_transform = self._coarse_alignment(source_points, target_points)
                 logger.info("Coarse alignment completed")
 
-            # Fine registration
+            # fine registration
             result = self._fine_registration(
                 source_points, target_points, method, initial_transform
             )
@@ -1008,7 +994,7 @@ class LandscapeAligner:
         # 4. Downsampling (only if enabled)
         if self.config.downsample:
             if self.config.voxel_size is None and metadata["bounds"] and metadata["total_points"]:
-                # Auto-compute voxel size
+                # auto-compute voxel size
                 voxel_size = self.processor.estimate_optimal_voxel_size(
                     metadata["bounds"],
                     metadata["total_points"],
@@ -1033,35 +1019,35 @@ class LandscapeAligner:
         """
         Perform coarse alignment using centroids and PCA
         """
-        # Centroid alignment
+        # centroid alignment
         source_centroid = source.mean(axis=0)
         target_centroid = target.mean(axis=0)
         
         initial_transform = np.eye(4)
         initial_transform[:3, 3] = target_centroid - source_centroid
         
-        # Optional: PCA alignment for rotation (for landscapes, often not needed)
+        # optional: PCA alignment for rotation (for landscapes, often not needed)
         if self.config.use_ground_plane_constraint:
-            # For landscapes, we typically don't want to rotate around vertical axis
-            # Just use translation
+            # for landscapes, we typically don't want to rotate around vertical axis
+            # just use translation
             pass
         elif len(source) > 1000 and len(target) > 1000:
-            # Use subset for PCA
+            # use subset for PCA
             source_subset = source[::max(1, len(source)//1000)]
             target_subset = target[::max(1, len(target)//1000)]
             
-            # Center points
+            # center points
             source_centered = source_subset - source_centroid
             target_centered = target_subset - target_centroid
             
-            # Compute principal axes
+            # compute principal axes
             _, _, source_axes = np.linalg.svd(source_centered.T @ source_centered)
             _, _, target_axes = np.linalg.svd(target_centered.T @ target_centered)
             
-            # Compute rotation to align principal axes
+            # compute rotation to align principal axes
             rotation = target_axes.T @ source_axes
             
-            # Check for reflection
+            # check for reflection
             if np.linalg.det(rotation) < 0:
                 target_axes[-1] *= -1
                 rotation = target_axes.T @ source_axes
@@ -1081,18 +1067,18 @@ class LandscapeAligner:
         _require_small_gicp()
         result = RegistrationResult()
 
-        # Set initial transformation
+        # set initial transformation
         if initial_transform is None:
             initial_transform = np.eye(4)
 
         try:
-            # Perform registration
+            # perform registration
             logger.info(f"Running {method.value} registration...")
 
             max_corr_dist = self.config.max_correspondence_distance or 1.0
             num_threads = self.config.num_threads
 
-            # Methods requiring preprocessing (normals/covariances)
+            # methods requiring preprocessing (normals/covariances)
             needs_preprocessing = method in [
                 RegistrationMethod.PLANE_ICP,
                 RegistrationMethod.GICP,
@@ -1100,20 +1086,20 @@ class LandscapeAligner:
             ]
 
             if needs_preprocessing:
-                # PLANE_ICP, GICP, VGICP require preprocessing for normals/covariances
-                # See: https://github.com/koide3/small_gicp
+                # pLANE_ICP, GICP, VGICP require preprocessing for normals/covariances
+                # see: https://github.com/koide3/small_gicp
 
-                # Build preprocessing kwargs
+                # build preprocessing kwargs
                 # NOTE: Do NOT pass downsampling_resolution here.
                 # PDAL already downsampled the data in _preprocess_pointcloud(),
                 # so downsampling again would shrink the cloud further than intended.
-                # We only need preprocess_points for covariance/normal estimation.
+                # we only need preprocess_points for covariance/normal estimation.
                 preprocess_kwargs = {"num_threads": num_threads}
                 logger.info(
                     "Preprocessing (covariance estimation, data already downsampled by PDAL)..."
                 )
 
-                # Preprocess source and target in parallel (independent operations)
+                # preprocess source and target in parallel (independent operations)
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     target_future = executor.submit(
                         small_gicp.preprocess_points, target, **preprocess_kwargs
@@ -1157,7 +1143,7 @@ class LandscapeAligner:
                         **align_kwargs,
                     )
 
-                # Extract preprocessed numpy arrays for metric computation
+                # extract preprocessed numpy arrays for metric computation
                 # (these are the actual points the alignment operated on)
                 source_for_metrics = np.asarray(source_cloud.points())
                 target_for_metrics = np.asarray(target_cloud.points())
@@ -1166,7 +1152,7 @@ class LandscapeAligner:
                 if target_for_metrics.shape[1] > 3:
                     target_for_metrics = target_for_metrics[:, :3]
             else:
-                # Plain ICP can use raw numpy arrays directly
+                # plain ICP can use raw numpy arrays directly
                 align_kwargs = {
                     "init_T_target_source": initial_transform,
                     "registration_type": "ICP",
@@ -1181,16 +1167,16 @@ class LandscapeAligner:
 
                 reg_result = small_gicp.align(target, source, **align_kwargs)
 
-                # Use raw arrays for metric computation (ICP path)
+                # use raw arrays for metric computation (ICP path)
                 source_for_metrics = source
                 target_for_metrics = target
 
-            # Extract results - use T_target_source attribute
+            # extract results - use T_target_source attribute
             result.transformation = reg_result.T_target_source
             result.converged = getattr(reg_result, 'converged', True)
             result.iterations = getattr(reg_result, 'iterations', 0)
 
-            # Compute fitness metrics using the actual points the alignment operated on
+            # compute fitness metrics using the actual points the alignment operated on
             result.rmse, result.fitness, result.num_correspondences = \
                 self._compute_fitness(source_for_metrics, target_for_metrics, result.transformation)
             
@@ -1207,15 +1193,15 @@ class LandscapeAligner:
         """
         Compute registration fitness metrics
         """
-        # Transform source points
+        # transform source points
         source_h = np.hstack([source, np.ones((len(source), 1))])
         source_transformed = (source_h @ transformation.T)[:, :3]
         
-        # Find correspondences
+        # find correspondences
         tree = cKDTree(target)
         distances, _ = tree.query(source_transformed)
         
-        # Filter by max correspondence distance
+        # filter by max correspondence distance
         max_dist = self.config.max_correspondence_distance or 10.0
         mask = distances < max_dist
         valid_distances = distances[mask]
@@ -1223,9 +1209,10 @@ class LandscapeAligner:
         if len(valid_distances) == 0:
             return np.inf, 0.0, 0
         
-        # Compute metrics
+        # compute metrics
         rmse = np.sqrt(np.mean(valid_distances ** 2))
         fitness = len(valid_distances) / len(source)
         num_correspondences = len(valid_distances)
         
         return rmse, fitness, num_correspondences
+
