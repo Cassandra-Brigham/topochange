@@ -89,6 +89,27 @@ def _cached_transformer(src_auth: str, dst_auth: str):
     return Transformer.from_crs(src_auth, dst_auth, always_xy=True)
 
 
+def _get_transformer(src_crs, dst_crs):
+    """Get a Transformer, using the LRU cache when both CRS resolve to authority codes.
+
+    Falls back to a fresh Transformer.from_crs() when a CRS cannot be
+    expressed as an authority string (e.g. custom WKT without an EPSG code).
+    """
+    def _auth_string(crs):
+        if isinstance(crs, str):
+            return crs  # already "EPSG:4326" etc.
+        auth = crs.to_authority()
+        if auth:
+            return f"{auth[0]}:{auth[1]}"
+        return None
+
+    src_auth = _auth_string(src_crs)
+    dst_auth = _auth_string(dst_crs)
+    if src_auth and dst_auth:
+        return _cached_transformer(src_auth, dst_auth)
+    return Transformer.from_crs(src_crs, dst_crs, always_xy=True)
+
+
 def has_rasterio() -> bool:
     try:
         import rasterio  # noqa: F401
@@ -146,7 +167,7 @@ def _reproject_poly(poly: Polygon, src_epsg: Union[str, int], dst_epsg: Union[st
     shapely.geometry.Polygon
         The polygon transformed into the target CRS.
     """
-    tf = Transformer.from_crs(f"EPSG:{src_epsg}", f"EPSG:{dst_epsg}", always_xy=True)
+    tf = _get_transformer(f"EPSG:{src_epsg}", f"EPSG:{dst_epsg}")
     return transform(lambda x, y, z=None: tf.transform(x, y), poly)
 
 
@@ -242,7 +263,7 @@ def get_true_extent(pc: "PointCloud", edge_size: float = 5.0) -> Tuple[int, Poly
             if src_crs_wkt:
                 src_crs = CRS_.from_user_input(src_crs_wkt)
                 dst_crs = CRS_.from_epsg(4326)
-                tf = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
+                tf = _get_transformer(src_crs, dst_crs)
                 poly_4326 = transform(lambda x, y, z=None: tf.transform(x, y), poly_native_shrunk)
             else:
                 poly_4326 = poly_native_shrunk
@@ -442,7 +463,7 @@ class PointCloud:
                     if src_crs_wkt:
                         src_crs = CRS_.from_user_input(src_crs_wkt)
                         dst_crs = CRS_.from_epsg(4326)
-                        tf = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
+                        tf = _get_transformer(src_crs, dst_crs)
                         poly_4326 = transform(lambda x, y, z=None: tf.transform(x, y), poly_native)
                     else:
                         # Assume already in 4326 if no CRS info
@@ -517,7 +538,7 @@ class PointCloud:
                 src_crs = CRS_.from_epsg(4326)
 
             dst_crs = CRS_.from_epsg(4326)
-            tf = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
+            tf = _get_transformer(src_crs, dst_crs)
 
             xs = [minx, maxx, maxx, minx, minx]
             ys = [miny, miny, maxy, maxy, miny]
@@ -558,7 +579,7 @@ class PointCloud:
                     src_crs = CRS_.from_epsg(4326)
 
                 dst_crs = CRS_.from_epsg(4326)
-                tf = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
+                tf = _get_transformer(src_crs, dst_crs)
 
                 xs = [self.minx, self.maxx, self.maxx, self.minx, self.minx]
                 ys = [self.miny, self.miny, self.maxy, self.maxy, self.miny]
