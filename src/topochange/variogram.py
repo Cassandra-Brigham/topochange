@@ -333,9 +333,7 @@ class VariogramModelSelector:
         # guard against division by zero at lags where γ̂ ≈ 0
         gamma_sq = np.where(gamma_sq < np.finfo(float).eps, np.finfo(float).eps, gamma_sq)
         return counts / gamma_sq
-        
-        self._registry = MODEL_REGISTRY
-    
+
     def generate_candidates(
         self,
         max_components: int = 2,
@@ -806,27 +804,33 @@ class VariogramModelSelector:
         seed: Optional[int] = None,
     ) -> np.ndarray:
         """Bootstrap parameter uncertainty for best model.
-        
+
+        Generates synthetic variograms by adding noise to the empirical
+        variogram and re-fitting the best model.  The bootstrap refit
+        uses the same WLS weighting scheme as the original fit so that
+        the uncertainty samples faithfully reflect the fitted model.
+
         Parameters
         ----------
         n_boot : int
             Number of bootstrap samples.
         seed : int, optional
             Random seed.
-        
+
         Returns
         -------
         param_samples : ndarray
-            Bootstrap samples, shape (n_boot, n_params).
+            Bootstrap samples, shape (n_valid, n_params).  Rows where
+            fitting failed are removed.
         """
         if self.best_model is None:
             raise ValueError("No best model selected. Call select_best() first.")
-        
+
         rng = np.random.default_rng(seed)
         model = self.best_model.composite_model
         p0 = self.best_model.params
         bounds = model.bounds(self.lags, self.empirical_variogram)
-        
+
         # generate synthetic variograms
         if self.sigma is not None:
             noise = rng.normal(
@@ -839,13 +843,24 @@ class VariogramModelSelector:
             fitted = self.best_model.predict(self.lags)
             residuals = self.empirical_variogram - fitted
             noise = fitted + rng.choice(residuals, size=(n_boot, len(self.lags)))
-        
+
+        # Construct per-bin sigma for bootstrap refits.
+        # Must match the weighting used by the original fit so bootstrap
+        # samples come from the same optimization landscape.
+        # For WLS with weights w_i, curve_fit sigma = 1/sqrt(w_i).
+        boot_sigma = None
+        if self.weights is not None:
+            safe_weights = np.where(
+                self.weights > 0, self.weights, np.finfo(float).eps
+            )
+            boot_sigma = 1.0 / np.sqrt(safe_weights)
+
         param_samples = []
-        
+
         def model_func(h, *params):
             model.set_params(np.array(params))
             return model(h)
-        
+
         for i in range(n_boot):
             try:
                 popt, _ = curve_fit(
@@ -853,19 +868,21 @@ class VariogramModelSelector:
                     self.lags,
                     noise[i],
                     p0=p0,
+                    sigma=boot_sigma,
+                    absolute_sigma=False,
                     bounds=bounds,
                     maxfev=5000,
                 )
                 param_samples.append(popt)
             except RuntimeError:
                 param_samples.append([np.nan] * model.n_params)
-        
+
         param_samples = np.array(param_samples)
-        
+
         # remove failed fits
         valid = ~np.isnan(param_samples).any(axis=1)
         param_samples = param_samples[valid]
-        
+
         self.best_model.param_samples = param_samples
         return param_samples
     
@@ -915,46 +932,47 @@ class VariogramModelSelector:
         
         return bma_mean, within_var, between_var
 
-def summary(self) -> str:
-    """Generate summary of fitted models."""
-    if not self.fitted_models:
-        return "No models fitted yet."
-    
-    lines = ["=" * 70]
-    lines.append("VARIOGRAM MODEL SELECTION SUMMARY")
-    lines.append("=" * 70)
-    lines.append(f"{'Model':<30} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10} {'Weight':>8}")
-    lines.append("-" * 70)
-    
-    # sort by AIC
-    sorted_models = sorted(
-        zip(self.fitted_models, self.model_weights or [0] * len(self.fitted_models)),
-        key=lambda x: x[0].aic
-    )
-    
-    for model, weight in sorted_models:
-        name = "+".join(model.composite_model.component_names)
-        if model.composite_model.include_nugget:
-            name += "+nugget"
-        
-        cv_str = f"{model.cv_rmse:.4f}" if model.cv_rmse else "N/A"
-        lines.append(
-            f"{name:<30} {model.aic:>10.2f} {model.bic:>10.2f} "
-            f"{cv_str:>10} {weight:>8.3f}"
+    def summary(self) -> str:
+        """Generate summary of fitted models."""
+        if not self.fitted_models:
+            return "No models fitted yet."
+
+        lines = ["=" * 70]
+        lines.append("VARIOGRAM MODEL SELECTION SUMMARY")
+        lines.append("=" * 70)
+        lines.append(f"{'Model':<30} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10} {'Weight':>8}")
+        lines.append("-" * 70)
+
+        # sort by AIC
+        sorted_models = sorted(
+            zip(self.fitted_models, self.model_weights or [0] * len(self.fitted_models)),
+            key=lambda x: x[0].aic
         )
-    
-    lines.append("=" * 70)
-    
-    if self.best_model:
-        lines.append("\nBEST MODEL DETAILS:")
-        lines.append(self.best_model.composite_model.description())
-        
-        if not self.best_model.composite_model.is_stationary:
-            lines.append("\nWARNING: Selected model is NON-STATIONARY.")
-            lines.append("The process has no finite variance.")
-            lines.append("Results are scale-dependent. Consider detrending.")
-    
-    return "\n".join(lines)
+
+        for model, weight in sorted_models:
+            name = "+".join(model.composite_model.component_names)
+            if model.composite_model.include_nugget:
+                name += "+nugget"
+
+            cv_str = f"{model.cv_rmse:.4f}" if model.cv_rmse else "N/A"
+            lines.append(
+                f"{name:<30} {model.aic:>10.2f} {model.bic:>10.2f} "
+                f"{cv_str:>10} {weight:>8.3f}"
+            )
+
+        lines.append("=" * 70)
+
+        if self.best_model:
+            lines.append("\nBEST MODEL DETAILS:")
+            lines.append(self.best_model.composite_model.description())
+
+            if not self.best_model.composite_model.is_stationary:
+                lines.append("\nWARNING: Selected model is NON-STATIONARY.")
+                lines.append("The process has no finite variance.")
+                lines.append("Results are scale-dependent. Consider detrending.")
+
+        return "\n".join(lines)
+
 
 class RasterDataHandler:
     """
@@ -2019,9 +2037,11 @@ class VariogramAnalysis:
             maxfev=20000,
             seed=seed,
         )
-        # include optimal parameters in bootstrap samples to ensure they fall within bounds
+        # Store bootstrap samples without appending the optimal point
+        # estimate — appending it biases percentile estimates toward
+        # the MLE (the bias is small for n_boot=500 but unnecessary).
         if samples.size:
-            self.param_samples = np.vstack([samples, self.best_params])
+            self.param_samples = samples
         else:
             self.param_samples = np.array([self.best_params])
 
@@ -2383,9 +2403,10 @@ class VariogramAnalysis:
             'model_types': model.component_names,
         }
 
-        # bootstrap percentiles - include optimal params to ensure they fall within bounds
+        # Store bootstrap samples without appending the optimal point
+        # estimate — appending it biases percentile estimates.
         if fitted.param_samples is not None and len(fitted.param_samples) > 0:
-            self.param_samples = np.vstack([fitted.param_samples, params])
+            self.param_samples = fitted.param_samples
         else:
             self.param_samples = np.array([params])
 

@@ -332,8 +332,11 @@ class RegionalUncertaintyEstimator:
             raise ValueError("No bootstrap samples. Fit model with bootstrap first.")
 
         samples = self._bootstrap_samples
-        model = self._bootstrap_model
+        model = self._bootstrap_model  # None for legacy path
         central_params = self._bootstrap_central_params
+
+        # Legacy path uses a plain function, not a CompositeVariogramModel
+        is_legacy = model is None and hasattr(self, '_legacy_model_func')
 
         # Subsample bootstrap ensemble if large
         rng = np.random.default_rng(seed)
@@ -353,16 +356,26 @@ class RegionalUncertaintyEstimator:
         sigma_a_values = np.empty(n_boot_eval)
         for k, bi in enumerate(boot_idx):
             params_k = samples[bi]
-            model.set_params(params_k)
 
-            # Compute sigma2 for this sample
-            sigma2_k = model.get_total_sill()
-            if sigma2_k is None or sigma2_k <= 0:
-                sigma_a_values[k] = np.nan
-                continue
-
-            # Evaluate gamma at pair distances
-            gamma_k = model(h_pairs)
+            if is_legacy:
+                # Legacy path: model_func(h, *params), sigma2 = sum(sills) + nugget
+                n_comp = self._legacy_n_components
+                sills_k = params_k[:n_comp]
+                sigma2_k = float(np.sum(sills_k))
+                if self._legacy_has_nugget:
+                    sigma2_k += float(params_k[-1])
+                if sigma2_k <= 0:
+                    sigma_a_values[k] = np.nan
+                    continue
+                gamma_k = self._legacy_model_func(h_pairs, *params_k)
+            else:
+                # New path: CompositeVariogramModel
+                model.set_params(params_k)
+                sigma2_k = model.get_total_sill()
+                if sigma2_k is None or sigma2_k <= 0:
+                    sigma_a_values[k] = np.nan
+                    continue
+                gamma_k = model(h_pairs)
 
             # C(h) = sigma2 - gamma(h)
             cov_k = sigma2_k - gamma_k
@@ -370,8 +383,9 @@ class RegionalUncertaintyEstimator:
 
             sigma_a_values[k] = math.sqrt(max(var_mean_k, 0.0))
 
-        # Restore central params
-        model.set_params(central_params)
+        # Restore central params (new path only)
+        if model is not None:
+            model.set_params(central_params)
 
         # Remove failed evaluations
         valid = np.isfinite(sigma_a_values)
@@ -425,26 +439,24 @@ class RegionalUncertaintyEstimator:
         return np.linalg.norm(X - Y, axis=1)
 
     def _setup_legacy_gamma(self, va: VariogramAnalysis) -> None:
-        """Setup gamma functions from legacy spherical model."""
+        """Setup gamma functions from legacy spherical model.
+
+        When bootstrap ``param_samples`` are available on the
+        VariogramAnalysis object, stores them for propagation-time
+        evaluation (same approach as ``_setup_minmax_from_bootstrap``).
+        sigma2_min/max are computed from the joint bootstrap samples
+        rather than from independent marginal percentiles, which avoids
+        the same class of bug as the one fixed in the new path.
+        """
         # central estimates
         self.sills = np.array(va.sills, dtype=float)
         self.ranges = np.array(va.ranges, dtype=float)
         self.nugget = getattr(va, 'best_nugget', 0.0) or 0.0
         self.sigma2 = self.nugget + float(np.sum(self.sills))
 
-        # min/max estimates
-        self.sills_min = np.array(getattr(va, 'sills_min', self.sills), dtype=float)
-        self.sills_max = np.array(getattr(va, 'sills_max', self.sills), dtype=float)
-        self.ranges_min = np.array(getattr(va, 'ranges_min', self.ranges), dtype=float)
-        self.ranges_max = np.array(getattr(va, 'ranges_max', self.ranges), dtype=float)
-        self.nugget_min = getattr(va, 'min_nugget', self.nugget) or 0.0
-        self.nugget_max = getattr(va, 'max_nugget', self.nugget) or 0.0
-
-        self.sigma2_min = self.nugget_min + float(np.sum(self.sills_min))
-        self.sigma2_max = self.nugget_max + float(np.sum(self.sills_max))
-
         has_nugget = va.best_model_config.get('nugget', False)
         model_func = va.best_model_func
+        n_components = len(self.sills)
 
         # central gamma function
         params = list(self.sills) + list(self.ranges)
@@ -452,37 +464,75 @@ class RegionalUncertaintyEstimator:
             params.append(self.nugget)
         self.gamma_func = lambda h, p=params: model_func(np.asarray(h, dtype=float), *p)
 
-        # min gamma function
-        params_min = list(self.sills_min) + list(self.ranges_min)
+        # Store bootstrap samples for propagation-time evaluation
+        legacy_samples = getattr(va, 'param_samples', None)
+        if legacy_samples is not None and len(legacy_samples) > 1:
+            # Compute sigma2 from joint bootstrap samples (not marginal pctiles).
+            # Legacy param layout: [sill_1, ..., sill_n, range_1, ..., range_n, nugget?]
+            sill_cols = legacy_samples[:, :n_components]
+            total_sills = np.sum(sill_cols, axis=1)
+            if has_nugget:
+                nugget_col = legacy_samples[:, -1]
+                sigma2_samples = total_sills + nugget_col
+            else:
+                sigma2_samples = total_sills
+            self.sigma2_min = float(np.percentile(sigma2_samples, 16))
+            self.sigma2_max = float(np.percentile(sigma2_samples, 84))
+
+            # Store for _propagate_bootstrap_uncertainty
+            self._legacy_bootstrap_samples = legacy_samples
+            self._legacy_model_func = model_func
+            self._legacy_has_nugget = has_nugget
+            self._legacy_n_components = n_components
+            # Mark bootstrap as available so propagation uses it
+            self._bootstrap_samples = legacy_samples
+            self._bootstrap_model = None  # signal legacy mode
+            self._bootstrap_central_params = np.array(params)
+        else:
+            # No bootstrap — fall back to marginal percentiles (best we can do)
+            sills_min = np.array(getattr(va, 'sills_min', self.sills), dtype=float)
+            sills_max = np.array(getattr(va, 'sills_max', self.sills), dtype=float)
+            nugget_min = getattr(va, 'min_nugget', self.nugget) or 0.0
+            nugget_max = getattr(va, 'max_nugget', self.nugget) or 0.0
+            self.sigma2_min = nugget_min + float(np.sum(sills_min))
+            self.sigma2_max = nugget_max + float(np.sum(sills_max))
+
+        # min/max gamma functions (used for component-wise and as legacy fallbacks)
+        sills_min = np.array(getattr(va, 'sills_min', self.sills), dtype=float)
+        sills_max = np.array(getattr(va, 'sills_max', self.sills), dtype=float)
+        ranges_min = np.array(getattr(va, 'ranges_min', self.ranges), dtype=float)
+        ranges_max = np.array(getattr(va, 'ranges_max', self.ranges), dtype=float)
+        nugget_min = getattr(va, 'min_nugget', self.nugget) or 0.0
+        nugget_max = getattr(va, 'max_nugget', self.nugget) or 0.0
+
+        params_min = list(sills_min) + list(ranges_min)
         if has_nugget:
-            params_min.append(self.nugget_min)
+            params_min.append(nugget_min)
         self.gamma_func_min = lambda h, p=params_min: model_func(np.asarray(h, dtype=float), *p)
 
-        # max gamma function
-        params_max = list(self.sills_max) + list(self.ranges_max)
+        params_max = list(sills_max) + list(ranges_max)
         if has_nugget:
-            params_max.append(self.nugget_max)
+            params_max.append(nugget_max)
         self.gamma_func_max = lambda h, p=params_max: model_func(np.asarray(h, dtype=float), *p)
 
         # component-wise gamma functions (for multi-component models)
-        n_components = len(self.sills)
         for i in range(min(n_components, 3)):
             # central
             p = [self.sills[i], self.ranges[i]]
             if has_nugget:
                 p.append(self.nugget)
             self.gamma_funcs_components[i] = lambda h, p=p: model_func(np.asarray(h, dtype=float), *p)
-            
+
             # min
-            p_min = [self.sills_min[i], self.ranges_min[i]]
+            p_min = [sills_min[i], ranges_min[i]]
             if has_nugget:
-                p_min.append(self.nugget_min)
+                p_min.append(nugget_min)
             self.gamma_funcs_components_min[i] = lambda h, p=p_min: model_func(np.asarray(h, dtype=float), *p)
-            
+
             # max
-            p_max = [self.sills_max[i], self.ranges_max[i]]
+            p_max = [sills_max[i], ranges_max[i]]
             if has_nugget:
-                p_max.append(self.nugget_max)
+                p_max.append(nugget_max)
             self.gamma_funcs_components_max[i] = lambda h, p=p_max: model_func(np.asarray(h, dtype=float), *p)
 
     def _init_result_storage(self) -> None:
