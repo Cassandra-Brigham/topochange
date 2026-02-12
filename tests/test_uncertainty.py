@@ -641,6 +641,242 @@ class TestIntegration:
         assert results["exponential"] > 0.0
 
 
+class TestBootstrapUncertaintyPropagation:
+    """Tests for the corrected bootstrap uncertainty propagation.
+
+    These tests verify the fix for three interacting bugs in
+    _setup_minmax_from_bootstrap:
+
+    Bug 1: Independent marginal percentiles — taking p16/p84 of each
+        parameter independently ignores correlations (especially
+        sill-nugget anti-correlation), creating physically impossible
+        parameter combinations.
+
+    Bug 2: Hard-coded sigma2 multipliers (0.8/1.2) instead of
+        computing sigma2 from the bootstrap ensemble.
+
+    Bug 3: Shared mutable model state in make_gamma closures.
+
+    The fix propagates each joint bootstrap sample through the full
+    Monte Carlo integral and takes percentiles of the output.
+
+    References
+    ----------
+    Diggle, P.J. & Ribeiro, P.J. (2007). Model-based Geostatistics.
+        Springer.  Section 6.4.
+    """
+
+    @staticmethod
+    def _make_fitted_model_with_bootstrap(
+        sill=0.5, range_=200.0, nugget_val=0.05, n_boot=200, seed=42
+    ):
+        """Create a FittedVariogramModel with realistic bootstrap samples."""
+        from topochange.composite_variogram import CompositeVariogramModel
+        from topochange.variogram import FittedVariogramModel, VariogramModelSelector
+
+        model = CompositeVariogramModel(['spherical'], include_nugget=True)
+        model.set_params(np.array([sill, range_, nugget_val]))
+
+        lags = np.linspace(10, 500, 25)
+        rng = np.random.default_rng(seed)
+        emp_vario = model(lags) + rng.normal(0, 0.02, len(lags))
+        sigma = np.full_like(lags, 0.02)
+
+        selector = VariogramModelSelector(lags, emp_vario, sigma=sigma)
+        selector.fit_all_candidates(
+            max_components=1, include_nugget=True, seed=seed
+        )
+        best = selector.select_best('aic')
+        selector.bootstrap_best_model(n_boot=n_boot, seed=seed)
+        return best
+
+    def test_sigma2_from_bootstrap_not_hardcoded(self):
+        """sigma2_min/max should come from bootstrap, not 0.8/1.2 multipliers."""
+        from topochange.uncertainty import RegionalUncertaintyEstimator
+
+        fitted = self._make_fitted_model_with_bootstrap()
+        sigma2_central = fitted.composite_model.get_total_sill()
+
+        # Create a minimal estimator just to test _setup_minmax_from_bootstrap
+        est = object.__new__(RegionalUncertaintyEstimator)
+        est.gamma_func = fitted.predict
+        est.sigma2 = sigma2_central
+        est._setup_minmax_from_bootstrap(fitted)
+
+        # sigma2_min/max should NOT be exactly 0.8/1.2 * central
+        assert est.sigma2_min != pytest.approx(sigma2_central * 0.8, rel=0.01)
+        assert est.sigma2_max != pytest.approx(sigma2_central * 1.2, rel=0.01)
+
+        # They should be close to central (within ~10%, not 20%)
+        assert abs(est.sigma2_min - sigma2_central) / sigma2_central < 0.10
+        assert abs(est.sigma2_max - sigma2_central) / sigma2_central < 0.10
+
+        # min < central < max
+        assert est.sigma2_min < sigma2_central
+        assert est.sigma2_max > sigma2_central
+
+    def test_bootstrap_samples_stored(self):
+        """Bootstrap samples and model should be stored for propagation."""
+        from topochange.uncertainty import RegionalUncertaintyEstimator
+
+        fitted = self._make_fitted_model_with_bootstrap()
+
+        est = object.__new__(RegionalUncertaintyEstimator)
+        est.gamma_func = fitted.predict
+        est.sigma2 = fitted.composite_model.get_total_sill()
+        est._setup_minmax_from_bootstrap(fitted)
+
+        assert est._bootstrap_samples is not None
+        assert len(est._bootstrap_samples) == 200
+        assert est._bootstrap_model is fitted.composite_model
+        assert np.allclose(est._bootstrap_central_params, fitted.params)
+
+    def test_compute_sigma2_from_samples(self):
+        """_compute_sigma2_from_samples should sum sills + nugget correctly."""
+        from topochange.uncertainty import RegionalUncertaintyEstimator
+
+        fitted = self._make_fitted_model_with_bootstrap()
+        model = fitted.composite_model
+        samples = fitted.param_samples
+
+        sigma2_arr = RegionalUncertaintyEstimator._compute_sigma2_from_samples(
+            model, samples
+        )
+
+        # Each sigma2 should equal sill + nugget for that sample
+        for i in range(min(10, len(samples))):
+            expected = samples[i, 0] + samples[i, -1]  # sill + nugget
+            assert sigma2_arr[i] == pytest.approx(expected, rel=1e-10)
+
+    def test_propagate_bootstrap_gives_nonzero_min(self):
+        """The min bound should be strictly positive (the original bug)."""
+        from topochange.uncertainty import RegionalUncertaintyEstimator
+
+        fitted = self._make_fitted_model_with_bootstrap()
+
+        est = object.__new__(RegionalUncertaintyEstimator)
+        est.gamma_func = fitted.predict
+        est.sigma2 = fitted.composite_model.get_total_sill()
+        est._setup_minmax_from_bootstrap(fitted)
+
+        domain = box(0, 0, 500, 500)
+        p16, p84 = est._propagate_bootstrap_uncertainty(
+            domain, n_pairs=20_000, seed=42, n_boot_eval=50
+        )
+
+        # KEY TEST: min must be > 0 (was always 0 before the fix)
+        assert p16 > 0.0, f"p16 should be > 0, got {p16}"
+        assert p84 > 0.0, f"p84 should be > 0, got {p84}"
+        assert p16 < p84, f"p16 ({p16}) should be < p84 ({p84})"
+
+    def test_propagated_bounds_bracket_central(self):
+        """Bootstrap bounds should bracket the central estimate."""
+        from topochange.uncertainty import RegionalUncertaintyEstimator
+
+        fitted = self._make_fitted_model_with_bootstrap()
+        sigma2 = fitted.composite_model.get_total_sill()
+
+        est = object.__new__(RegionalUncertaintyEstimator)
+        est.gamma_func = fitted.predict
+        est.sigma2 = sigma2
+        est._setup_minmax_from_bootstrap(fitted)
+
+        domain = box(0, 0, 500, 500)
+
+        # Central estimate
+        central = est.estimate_std_mean_monte_carlo(
+            domain, fitted.predict, sigma2, n_pairs=50_000, seed=42
+        )
+
+        # Bootstrap bounds
+        p16, p84 = est._propagate_bootstrap_uncertainty(
+            domain, n_pairs=50_000, seed=42, n_boot_eval=80
+        )
+
+        # Central should fall within [p16, p84] (approximately)
+        # Allow some MC noise tolerance
+        assert p16 <= central * 1.15, (
+            f"p16 ({p16:.6f}) should be <= central ({central:.6f}) + tolerance"
+        )
+        assert p84 >= central * 0.85, (
+            f"p84 ({p84:.6f}) should be >= central ({central:.6f}) - tolerance"
+        )
+
+    def test_propagated_bounds_are_narrow(self):
+        """Bounds should be reasonably narrow (not absurdly wide)."""
+        from topochange.uncertainty import RegionalUncertaintyEstimator
+
+        fitted = self._make_fitted_model_with_bootstrap()
+        sigma2 = fitted.composite_model.get_total_sill()
+
+        est = object.__new__(RegionalUncertaintyEstimator)
+        est.gamma_func = fitted.predict
+        est.sigma2 = sigma2
+        est._setup_minmax_from_bootstrap(fitted)
+
+        domain = box(0, 0, 500, 500)
+        central = est.estimate_std_mean_monte_carlo(
+            domain, fitted.predict, sigma2, n_pairs=50_000, seed=42
+        )
+
+        p16, p84 = est._propagate_bootstrap_uncertainty(
+            domain, n_pairs=50_000, seed=42, n_boot_eval=80
+        )
+
+        # Width should be a modest fraction of central (< 30% relative)
+        width = p84 - p16
+        assert width / central < 0.30, (
+            f"Relative width {width/central:.2%} too large "
+            f"(p16={p16:.6f}, p84={p84:.6f}, central={central:.6f})"
+        )
+
+    def test_model_state_restored_after_propagation(self):
+        """Model params should be restored to central after propagation."""
+        from topochange.uncertainty import RegionalUncertaintyEstimator
+
+        fitted = self._make_fitted_model_with_bootstrap()
+        central_params = fitted.params.copy()
+        sigma2 = fitted.composite_model.get_total_sill()
+
+        est = object.__new__(RegionalUncertaintyEstimator)
+        est.gamma_func = fitted.predict
+        est.sigma2 = sigma2
+        est._setup_minmax_from_bootstrap(fitted)
+
+        domain = box(0, 0, 100, 100)
+        est._propagate_bootstrap_uncertainty(
+            domain, n_pairs=5_000, seed=42, n_boot_eval=20
+        )
+
+        # Model state should be restored
+        np.testing.assert_allclose(
+            fitted.composite_model.params, central_params,
+            err_msg="Model params not restored after propagation"
+        )
+
+    def test_sample_pair_distances_reproducible(self):
+        """_sample_pair_distances should be deterministic with same seed."""
+        from topochange.uncertainty import RegionalUncertaintyEstimator
+
+        est = object.__new__(RegionalUncertaintyEstimator)
+        domain = box(0, 0, 100, 100)
+
+        h1 = est._sample_pair_distances(domain, n_pairs=1000, seed=42)
+        h2 = est._sample_pair_distances(domain, n_pairs=1000, seed=42)
+
+        np.testing.assert_array_equal(h1, h2)
+
+    def test_no_bootstrap_raises(self):
+        """_propagate_bootstrap_uncertainty should raise without samples."""
+        from topochange.uncertainty import RegionalUncertaintyEstimator
+
+        est = object.__new__(RegionalUncertaintyEstimator)
+        domain = box(0, 0, 100, 100)
+
+        with pytest.raises(ValueError, match="No bootstrap samples"):
+            est._propagate_bootstrap_uncertainty(domain)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 

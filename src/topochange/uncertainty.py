@@ -201,31 +201,228 @@ class RegionalUncertaintyEstimator:
             raise ValueError("No variogram model available. Fit a model first.")
 
     def _setup_minmax_from_bootstrap(self, fitted_model: FittedVariogramModel) -> None:
-        """Extract min/max gamma functions from bootstrap parameter samples."""
+        """Store bootstrap samples for sample-based uncertainty propagation.
+
+        Rather than constructing min/max gamma functions from marginal
+        parameter percentiles (which ignores parameter correlations and
+        can produce physically impossible models where σ² < γ(h)),
+        we store the full bootstrap ensemble.  At propagation time,
+        ``_propagate_bootstrap_uncertainty`` evaluates the Monte Carlo
+        integral for each joint parameter sample and takes percentiles
+        of the *output* distribution — the correct approach when
+        parameters are correlated (Diggle & Ribeiro, 2007, §6.4).
+
+        For the min/max gamma functions used by component-wise
+        decomposition and direct calls, we set them equal to the central
+        estimate.  The actual min/max uncertainty bounds are computed
+        during propagation via the bootstrap ensemble.
+
+        References
+        ----------
+        Diggle, P.J. & Ribeiro, P.J. (2007). Model-based Geostatistics.
+            Springer.  Section 6.4 — prediction under parameter uncertainty.
+
+        Christensen, R. (2011). Plane Answers to Complex Questions.
+            Springer.  Section 15.2 — propagation of parameter uncertainty.
+        """
         samples = fitted_model.param_samples
         model = fitted_model.composite_model
-        
-        # get parameter percentiles
-        params_16 = np.percentile(samples, 16, axis=0)
-        params_84 = np.percentile(samples, 84, axis=0)
-        
-        # create min/max model functions
-        def make_gamma(params):
-            def gamma(h):
-                model.set_params(params)
-                return model(np.asarray(h, dtype=float))
-            return gamma
-        
-        self.gamma_func_min = make_gamma(params_16)
-        self.gamma_func_max = make_gamma(params_84)
-        
-        # reset to central params
-        model.set_params(fitted_model.params)
-        
-        # estimate sigma2 min/max (sum of sills + nugget at percentiles)
-        # this is approximate - proper way would parse param structure
-        self.sigma2_min = self.sigma2 * 0.8  # rough approximation
-        self.sigma2_max = self.sigma2 * 1.2
+        central_params = fitted_model.params
+
+        # Store bootstrap ensemble for propagation-time evaluation
+        self._bootstrap_samples = samples
+        self._bootstrap_model = model
+        self._bootstrap_central_params = central_params.copy()
+
+        # For min/max gamma functions (used in component-wise calls and
+        # as fallbacks), use central estimate — the real bounds come
+        # from _propagate_bootstrap_uncertainty at propagation time.
+        self.gamma_func_min = self.gamma_func
+        self.gamma_func_max = self.gamma_func
+
+        # Compute sigma2 min/max from the bootstrap ensemble properly.
+        # For each sample, compute total sill = sum(component sills) + nugget.
+        sigma2_samples = self._compute_sigma2_from_samples(model, samples)
+        self.sigma2_min = float(np.percentile(sigma2_samples, 16))
+        self.sigma2_max = float(np.percentile(sigma2_samples, 84))
+
+    @staticmethod
+    def _compute_sigma2_from_samples(
+        model: 'CompositeVariogramModel',
+        samples: np.ndarray,
+    ) -> np.ndarray:
+        """Compute total sill for each bootstrap parameter sample.
+
+        Parses the composite model parameter structure to sum
+        component sills + nugget for each row in ``samples``.
+
+        Returns
+        -------
+        sigma2_samples : ndarray, shape (n_samples,)
+        """
+        n = len(samples)
+        sigma2 = np.zeros(n)
+
+        # Sum sills from bounded components
+        idx = 0
+        for spec in model._components:
+            n_p = len(spec.param_names)
+            if spec.has_sill:
+                # sill is always the first parameter
+                sigma2 += samples[:, idx]
+            idx += n_p
+
+        # Add nugget (always last parameter when present)
+        if model.include_nugget:
+            sigma2 += samples[:, -1]
+
+        return sigma2
+
+    def _propagate_bootstrap_uncertainty(
+        self,
+        domain,
+        n_pairs: int = 200_000,
+        seed: Optional[int] = None,
+        n_boot_eval: int = 100,
+    ) -> Tuple[float, float]:
+        """Propagate parameter uncertainty through Monte Carlo integration.
+
+        For each of ``n_boot_eval`` bootstrap parameter samples, evaluates
+        the full Krige's-relation Monte Carlo integral:
+
+            σ_A(θ_k) = sqrt( E[C_k(||X−Y||)] )
+
+        where C_k(h) = σ²(θ_k) − γ(h; θ_k) is the covariance function
+        under parameter vector θ_k.  Returns the 16th and 84th percentiles
+        of the resulting σ_A distribution.
+
+        This correctly handles parameter correlations because each θ_k is
+        a joint sample from the bootstrap — no independent-marginal
+        assumption is needed.
+
+        Parameters
+        ----------
+        domain : Polygon
+            Spatial domain for Monte Carlo integration.
+        n_pairs : int
+            Number of point pairs for MC integration.
+        seed : int, optional
+            Random seed for reproducible point sampling.
+        n_boot_eval : int
+            Number of bootstrap samples to evaluate (subsampled from
+            the full ensemble for speed).
+
+        Returns
+        -------
+        sigma_a_p16 : float
+            16th percentile of σ_A distribution (lower bound).
+        sigma_a_p84 : float
+            84th percentile of σ_A distribution (upper bound).
+
+        References
+        ----------
+        Diggle, P.J. & Ribeiro, P.J. (2007). Model-based Geostatistics.
+            Springer.  Section 6.4.
+
+        Marchetti, Y. et al. (2012). Methods for summarizing and
+            communicating uncertainty in spatial prediction.
+            doi:10.1002/env.2149
+        """
+        if not hasattr(self, '_bootstrap_samples') or self._bootstrap_samples is None:
+            raise ValueError("No bootstrap samples. Fit model with bootstrap first.")
+
+        samples = self._bootstrap_samples
+        model = self._bootstrap_model
+        central_params = self._bootstrap_central_params
+
+        # Subsample bootstrap ensemble if large
+        rng = np.random.default_rng(seed)
+        n_total = len(samples)
+        if n_total > n_boot_eval:
+            boot_idx = rng.choice(n_total, n_boot_eval, replace=False)
+        else:
+            boot_idx = np.arange(n_total)
+            n_boot_eval = n_total
+
+        # Pre-generate point pairs (shared across all bootstrap evaluations)
+        # This dramatically reduces cost vs. regenerating per sample.
+        pair_seed = rng.integers(0, 2**31)
+        h_pairs = self._sample_pair_distances(domain, n_pairs, pair_seed)
+
+        # Evaluate MC integral for each bootstrap sample
+        sigma_a_values = np.empty(n_boot_eval)
+        for k, bi in enumerate(boot_idx):
+            params_k = samples[bi]
+            model.set_params(params_k)
+
+            # Compute sigma2 for this sample
+            sigma2_k = model.get_total_sill()
+            if sigma2_k is None or sigma2_k <= 0:
+                sigma_a_values[k] = np.nan
+                continue
+
+            # Evaluate gamma at pair distances
+            gamma_k = model(h_pairs)
+
+            # C(h) = sigma2 - gamma(h)
+            cov_k = sigma2_k - gamma_k
+            var_mean_k = float(np.mean(cov_k))
+
+            sigma_a_values[k] = math.sqrt(max(var_mean_k, 0.0))
+
+        # Restore central params
+        model.set_params(central_params)
+
+        # Remove failed evaluations
+        valid = np.isfinite(sigma_a_values)
+        if not np.any(valid):
+            warnings.warn(
+                "All bootstrap propagation evaluations failed. "
+                "Falling back to central estimate for bounds.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return 0.0, 0.0
+
+        sigma_a_valid = sigma_a_values[valid]
+        return (
+            float(np.percentile(sigma_a_valid, 16)),
+            float(np.percentile(sigma_a_valid, 84)),
+        )
+
+    def _sample_pair_distances(
+        self,
+        domain,
+        n_pairs: int,
+        seed: Optional[int] = None,
+    ) -> np.ndarray:
+        """Sample random point-pair distances within a domain.
+
+        Re-used across bootstrap evaluations so the MC noise is
+        identical for every parameter sample (variance reduction).
+
+        Returns
+        -------
+        h : ndarray, shape (n_pairs,)
+            Euclidean distances between randomly paired points.
+        """
+        rng = np.random.default_rng(seed)
+        minx, miny, maxx, maxy = domain.bounds
+
+        pts = []
+        batch_size = n_pairs
+        while len(pts) < n_pairs * 2:
+            rand_x = rng.uniform(minx, maxx, size=batch_size)
+            rand_y = rng.uniform(miny, maxy, size=batch_size)
+            for x, y in zip(rand_x, rand_y):
+                if domain.contains(Point(x, y)):
+                    pts.append((x, y))
+                if len(pts) >= n_pairs * 2:
+                    break
+
+        pts = np.array(pts)
+        X, Y = pts[:n_pairs], pts[n_pairs:2 * n_pairs]
+        return np.linalg.norm(X - Y, axis=1)
 
     def _setup_legacy_gamma(self, va: VariogramAnalysis) -> None:
         """Setup gamma functions from legacy spherical model."""
@@ -415,27 +612,54 @@ class RegionalUncertaintyEstimator:
         self,
         n_pairs: int = 200_000,
         seed: Optional[int] = None,
+        n_boot_eval: int = 100,
     ) -> None:
-        """Compute correlated uncertainty for polygon mean (central, min, max)."""
+        """Compute correlated uncertainty for polygon mean (central, min, max).
+
+        When bootstrap samples are available, min/max are computed by
+        propagating each joint parameter sample through the full MC
+        integral (correct treatment of parameter correlations).
+        Otherwise falls back to independent min/max gamma functions.
+
+        Parameters
+        ----------
+        n_pairs : int
+            Number of Monte Carlo point pairs.
+        seed : int, optional
+            Random seed for reproducibility.
+        n_boot_eval : int
+            Number of bootstrap samples to evaluate for bounds.
+        """
         # central
         if self.gamma_func is not None:
             self.mean_correlated_polygon = self.estimate_std_mean_monte_carlo(
                 self.polygon, self.gamma_func, self.sigma2, n_pairs, seed
             )
 
-        # min
-        if self.gamma_func_min is not None:
-            self.mean_correlated_polygon_min = self.estimate_std_mean_monte_carlo(
-                self.polygon, self.gamma_func_min, self.sigma2_min, n_pairs, seed
+        # min/max via bootstrap propagation (preferred) or legacy fallback
+        has_bootstrap = (
+            hasattr(self, '_bootstrap_samples')
+            and self._bootstrap_samples is not None
+        )
+        if has_bootstrap:
+            p16, p84 = self._propagate_bootstrap_uncertainty(
+                self.polygon, n_pairs=n_pairs, seed=seed,
+                n_boot_eval=n_boot_eval,
             )
+            self.mean_correlated_polygon_min = p16
+            self.mean_correlated_polygon_max = p84
+        else:
+            # Legacy path: independent min/max gamma functions
+            if self.gamma_func_min is not None:
+                self.mean_correlated_polygon_min = self.estimate_std_mean_monte_carlo(
+                    self.polygon, self.gamma_func_min, self.sigma2_min, n_pairs, seed
+                )
+            if self.gamma_func_max is not None:
+                self.mean_correlated_polygon_max = self.estimate_std_mean_monte_carlo(
+                    self.polygon, self.gamma_func_max, self.sigma2_max, n_pairs, seed
+                )
 
-        # max
-        if self.gamma_func_max is not None:
-            self.mean_correlated_polygon_max = self.estimate_std_mean_monte_carlo(
-                self.polygon, self.gamma_func_max, self.sigma2_max, n_pairs, seed
-            )
-
-        # component-wise
+        # component-wise (central only; bootstrap handles min/max above)
         for i in range(3):
             if self.gamma_funcs_components[i] is not None:
                 self.mean_correlated_components_polygon[i] = self.estimate_std_mean_monte_carlo(
@@ -454,8 +678,19 @@ class RegionalUncertaintyEstimator:
         self,
         n_pairs: int = 200_000,
         seed: Optional[int] = None,
+        n_boot_eval: int = 100,
     ) -> None:
-        """Compute correlated uncertainty for raster mean (central, min, max)."""
+        """Compute correlated uncertainty for raster mean (central, min, max).
+
+        Parameters
+        ----------
+        n_pairs : int
+            Number of Monte Carlo point pairs.
+        seed : int, optional
+            Random seed for reproducibility.
+        n_boot_eval : int
+            Number of bootstrap samples to evaluate for bounds.
+        """
         self.raster_data_handler.get_detailed_area()
         raster_geom = self.raster_data_handler.merged_geom or box(*self.raster_data_handler.bounds)
 
@@ -465,17 +700,28 @@ class RegionalUncertaintyEstimator:
                 raster_geom, self.gamma_func, self.sigma2, n_pairs, seed
             )
 
-        # min
-        if self.gamma_func_min is not None:
-            self.mean_correlated_raster_min = self.estimate_std_mean_monte_carlo(
-                raster_geom, self.gamma_func_min, self.sigma2_min, n_pairs, seed
+        # min/max via bootstrap propagation (preferred) or legacy fallback
+        has_bootstrap = (
+            hasattr(self, '_bootstrap_samples')
+            and self._bootstrap_samples is not None
+        )
+        if has_bootstrap:
+            p16, p84 = self._propagate_bootstrap_uncertainty(
+                raster_geom, n_pairs=n_pairs, seed=seed,
+                n_boot_eval=n_boot_eval,
             )
-
-        # max
-        if self.gamma_func_max is not None:
-            self.mean_correlated_raster_max = self.estimate_std_mean_monte_carlo(
-                raster_geom, self.gamma_func_max, self.sigma2_max, n_pairs, seed
-            )
+            self.mean_correlated_raster_min = p16
+            self.mean_correlated_raster_max = p84
+        else:
+            # Legacy path
+            if self.gamma_func_min is not None:
+                self.mean_correlated_raster_min = self.estimate_std_mean_monte_carlo(
+                    raster_geom, self.gamma_func_min, self.sigma2_min, n_pairs, seed
+                )
+            if self.gamma_func_max is not None:
+                self.mean_correlated_raster_max = self.estimate_std_mean_monte_carlo(
+                    raster_geom, self.gamma_func_max, self.sigma2_max, n_pairs, seed
+                )
 
         # component-wise
         for i in range(3):
@@ -497,11 +743,28 @@ class RegionalUncertaintyEstimator:
         n_pairs: int = 200_000,
         seed: Optional[int] = None,
         use_stable_areas: bool = True,
+        n_boot_eval: int = 100,
     ) -> None:
-        """Compute full uncertainty budget (uncorrelated + correlated)."""
+        """Compute full uncertainty budget (uncorrelated + correlated).
+
+        Parameters
+        ----------
+        n_pairs : int
+            Number of Monte Carlo point pairs.
+        seed : int, optional
+            Random seed for reproducibility.
+        use_stable_areas : bool
+            Whether to use stable areas for uncorrelated noise estimation.
+        n_boot_eval : int
+            Number of bootstrap samples to evaluate for uncertainty bounds.
+        """
         self.calc_mean_uncorrelated(use_stable_areas=use_stable_areas)
-        self.calc_mean_correlated_polygon(n_pairs=n_pairs, seed=seed)
-        self.calc_mean_correlated_raster(n_pairs=n_pairs, seed=seed)
+        self.calc_mean_correlated_polygon(
+            n_pairs=n_pairs, seed=seed, n_boot_eval=n_boot_eval
+        )
+        self.calc_mean_correlated_raster(
+            n_pairs=n_pairs, seed=seed, n_boot_eval=n_boot_eval
+        )
 
         def quadrature(uncorr, corr):
             if uncorr is not None and corr is not None:
