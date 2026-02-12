@@ -111,6 +111,55 @@ class FittedVariogramModel:
         return result
 
 
+@dataclass
+class KrigingLOOCVResult:
+    """Results from leave-one-out kriging cross-validation.
+
+    The primary diagnostic is ``msspe`` (Mean Standardized Squared
+    Prediction Error), which should be ≈ 1.0 for a well-calibrated
+    variogram model.  Think of it like a χ² / df ratio — values near
+    1.0 mean the variogram correctly captures the spatial uncertainty;
+    MSSPE >> 1 means the model underestimates uncertainty; MSSPE << 1
+    means it overestimates.
+
+    Attributes
+    ----------
+    msspe : float
+        Mean Standardized Squared Prediction Error:
+        (1/n) Σ (z_i − ẑ₋ᵢ)² / σ²₋ᵢ.   Target: ≈ 1.0.
+    mean_error : float
+        Mean prediction error (bias):  (1/n) Σ (z_i − ẑ₋ᵢ).
+        Target: ≈ 0.0.
+    rmse : float
+        Root mean squared prediction error.
+    mean_standardized_error : float
+        Mean of (z_i − ẑ₋ᵢ) / σ₋ᵢ.   Target: ≈ 0.0.
+    n_points : int
+        Number of points used (after subsampling and excluding failures).
+    n_failed : int
+        Number of LOO iterations that failed (singular matrix, etc.).
+
+    References
+    ----------
+    Cressie, N. (1993). Statistics for Spatial Data, rev. ed., Wiley.
+        Section 5.6 — kriging cross-validation.
+
+    Webster, R. & Oliver, M.A. (2007). Geostatistics for Environmental
+        Scientists, 2nd ed., Wiley.  Section 8.3.
+
+    Lark, R.M. (2000). A comparison of some robust estimators of the
+        variogram for use in soil survey.  Eur. J. Soil Sci., 51,
+        137–157.  Uses MSSPE ≈ 1.0 as acceptance criterion.
+    """
+
+    msspe: float
+    mean_error: float
+    rmse: float
+    mean_standardized_error: float
+    n_points: int
+    n_failed: int
+
+
 class VariogramModelSelector:
     """Select and fit optimal variogram model from candidates.
     
@@ -2444,6 +2493,182 @@ class VariogramAnalysis:
 
         return self.model_selector.get_bma_variogram()
     
+    # ── kriging-based cross-validation ──────────────────────────────
+
+    @staticmethod
+    def kriging_loocv(
+        coords: np.ndarray,
+        values: np.ndarray,
+        variogram_func: Callable,
+        n_subset: int = 500,
+        seed: Optional[int] = None,
+    ) -> 'KrigingLOOCVResult':
+        """Leave-one-out cross-validation using ordinary kriging.
+
+        For each point, removes it from the dataset, predicts its value
+        via ordinary kriging using the remaining points and the supplied
+        variogram model, then compares the prediction with the observed
+        value.  The key diagnostic is the MSSPE — like a reduced-χ²
+        statistic for spatial predictions.
+
+        Parameters
+        ----------
+        coords : ndarray, shape (n, 2)
+            Spatial coordinates of observed locations.
+        values : ndarray, shape (n,)
+            Observed values (e.g. elevation differences).
+        variogram_func : callable
+            Fitted variogram model γ(h).  Must accept an ndarray of
+            distances and return semivariances.  A
+            ``CompositeVariogramModel`` instance works directly.
+        n_subset : int, default 500
+            Maximum number of points for the CV.  If ``len(values)``
+            exceeds this, a random subsample is drawn.  Keeps runtime
+            manageable (≈ seconds rather than minutes).
+        seed : int, optional
+            Random seed for reproducible subsampling.
+
+        Returns
+        -------
+        KrigingLOOCVResult
+            Dataclass with ``msspe``, ``mean_error``, ``rmse``,
+            ``mean_standardized_error``, ``n_points``, ``n_failed``.
+
+        Notes
+        -----
+        The ordinary kriging system for *n* data points is the
+        (n+1) × (n+1) augmented matrix problem::
+
+            ⎡ Γ   𝟏 ⎤ ⎡ λ ⎤   ⎡ γ₀ ⎤
+            ⎣ 𝟏ᵀ  0 ⎦ ⎣ μ ⎦ = ⎣  1 ⎦
+
+        where Γ is the *n × n* semivariance matrix between data
+        locations, γ₀ is the semivariance from each data location to
+        the prediction point, λ are the kriging weights, and μ is the
+        Lagrange multiplier enforcing unbiasedness.
+
+        For each LOO iteration the prediction point is removed from the
+        data, giving an (*n*−1+1) × (*n*−1+1) system.  At
+        ``n_subset=500`` this takes ≈ 1 s on typical hardware.
+
+        References
+        ----------
+        Cressie, N. (1993). *Statistics for Spatial Data*, rev. ed.,
+        Wiley, Section 5.6.
+
+        Webster, R. & Oliver, M.A. (2007). *Geostatistics for
+        Environmental Scientists*, 2nd ed., Wiley, Section 8.3.
+
+        Pang, Y. et al. (2023). Enhanced Kriging leave-one-out cross-
+        validation in improving model estimation and optimization.
+        *Comput. Methods Appl. Mech. Engrg.*, 414, 116194.
+        doi:10.1016/j.cma.2023.116194
+        — confirms that using global (pre-fitted) hyperparameters for
+        all LOO iterations ("enhanced-LOOCV") is both more accurate
+        and more efficient than re-optimising per iteration.
+        """
+        coords = np.asarray(coords, dtype=float)
+        values = np.asarray(values, dtype=float)
+
+        if coords.ndim != 2 or coords.shape[1] != 2:
+            raise ValueError(
+                f"coords must be shape (n, 2), got {coords.shape}"
+            )
+        if len(coords) != len(values):
+            raise ValueError(
+                f"coords ({len(coords)}) and values ({len(values)}) "
+                f"must have the same length."
+            )
+
+        n = len(values)
+        rng = np.random.default_rng(seed)
+
+        # ── subsample if too many points ──
+        if n > n_subset:
+            idx = rng.choice(n, n_subset, replace=False)
+            coords = coords[idx]
+            values = values[idx]
+            n = n_subset
+
+        # ── pairwise distance matrix (n × n) ──
+        dx = coords[:, 0:1] - coords[:, 0:1].T
+        dy = coords[:, 1:2] - coords[:, 1:2].T
+        dist_matrix = np.sqrt(dx**2 + dy**2)
+
+        # ── semivariance matrix ──
+        # The variogram model handles γ(0) = 0 correctly via the
+        # nugget function (which returns 0 at h=0, c₀ at h>0).
+        gamma_matrix = variogram_func(dist_matrix)
+
+        # ── leave-one-out loop ──
+        errors = np.empty(n)
+        variances = np.empty(n)
+        n_failed = 0
+
+        for i in range(n):
+            mask = np.ones(n, dtype=bool)
+            mask[i] = False
+
+            # semivariance sub-matrix for remaining n-1 points
+            gamma_sub = gamma_matrix[np.ix_(mask, mask)]  # (n-1, n-1)
+            n_sub = n - 1
+
+            # build augmented ordinary-kriging system
+            A = np.empty((n_sub + 1, n_sub + 1))
+            A[:n_sub, :n_sub] = gamma_sub
+            A[:n_sub, n_sub] = 1.0
+            A[n_sub, :n_sub] = 1.0
+            A[n_sub, n_sub] = 0.0
+
+            # RHS: semivariances from remaining points to prediction point
+            gamma_rhs = gamma_matrix[mask, i]
+            b = np.empty(n_sub + 1)
+            b[:n_sub] = gamma_rhs
+            b[n_sub] = 1.0
+
+            try:
+                x = np.linalg.solve(A, b)
+            except np.linalg.LinAlgError:
+                errors[i] = np.nan
+                variances[i] = np.nan
+                n_failed += 1
+                continue
+
+            # kriging prediction:  ẑ = λᵀ z_{-i}
+            z_pred = np.dot(x[:n_sub], values[mask])
+
+            # kriging variance:  σ² = λ̃ᵀ b  (includes Lagrange term)
+            sigma2 = np.dot(x, b)
+
+            errors[i] = values[i] - z_pred
+            variances[i] = max(sigma2, np.finfo(float).eps)
+
+        # ── aggregate diagnostics ──
+        valid = np.isfinite(errors) & np.isfinite(variances) & (variances > 0)
+        e = errors[valid]
+        v = variances[valid]
+        n_valid = int(np.sum(valid))
+
+        if n_valid == 0:
+            return KrigingLOOCVResult(
+                msspe=np.nan,
+                mean_error=np.nan,
+                rmse=np.nan,
+                mean_standardized_error=np.nan,
+                n_points=0,
+                n_failed=n_failed,
+            )
+
+        sigma = np.sqrt(v)
+        return KrigingLOOCVResult(
+            msspe=float(np.mean(e**2 / v)),
+            mean_error=float(np.mean(e)),
+            rmse=float(np.sqrt(np.mean(e**2))),
+            mean_standardized_error=float(np.mean(e / sigma)),
+            n_points=n_valid,
+            n_failed=n_failed,
+        )
+
     def plot_best_model(self):
         """
         Plot mean variogram ± spread and fitted model; also show bar plot of mean pair counts.

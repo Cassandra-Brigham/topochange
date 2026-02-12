@@ -1239,6 +1239,198 @@ class TestIntegration:
         assert min(individual_preds) <= bma_pred <= max(individual_preds)
 
 
+# test Suite 14: Kriging Leave-One-Out Cross-Validation
+
+
+def _generate_spatial_field(n, sill, range_, nugget, mean=0.0, seed=42):
+    """Generate a spatially correlated random field using Cholesky decomposition.
+
+    Returns coords (n, 2), values (n,), and a CompositeVariogramModel
+    set with the true parameters.
+    """
+    rng = np.random.default_rng(seed)
+    coords = rng.uniform(0, 100, size=(n, 2))
+
+    # pairwise distance matrix
+    dx = coords[:, 0:1] - coords[:, 0:1].T
+    dy = coords[:, 1:2] - coords[:, 1:2].T
+    dist = np.sqrt(dx**2 + dy**2)
+
+    # spherical covariance: C(h) = sill·(1 − spherical_corr(h/a)) + nugget·I
+    h_ratio = np.clip(dist / range_, 0, 1)
+    sph_corr = 1.0 - (1.5 * h_ratio - 0.5 * h_ratio**3)
+    sph_corr[dist >= range_] = 0.0
+
+    C = sill * sph_corr + nugget * np.eye(n)
+    # small regularisation for numerical stability
+    C += 1e-10 * np.eye(n)
+
+    L = np.linalg.cholesky(C)
+    values = mean + L @ rng.standard_normal(n)
+
+    model = CompositeVariogramModel(['spherical'], include_nugget=True)
+    model.set_params(np.array([sill, range_, nugget]))
+
+    return coords, values, model
+
+
+class TestKrigingLOOCV:
+    """Test VariogramAnalysis.kriging_loocv() — kriging-based cross-validation.
+
+    Uses synthetic Gaussian random fields generated via Cholesky
+    decomposition of the covariance matrix, so the true variogram is
+    known exactly.
+    """
+
+    def test_msspe_near_one_for_correct_model(self):
+        """MSSPE ≈ 1.0 when the fitted variogram matches the true one.
+
+        The analogy: MSSPE is to kriging what reduced-χ² is to least-
+        squares fitting.  A value near 1.0 means the model correctly
+        characterises the spatial uncertainty.
+        """
+        coords, values, true_model = _generate_spatial_field(
+            n=200, sill=2.0, range_=30.0, nugget=0.5, seed=42
+        )
+
+        result = VariogramAnalysis.kriging_loocv(
+            coords, values, true_model, n_subset=200, seed=42
+        )
+
+        assert 0.6 < result.msspe < 1.6, (
+            f"MSSPE = {result.msspe:.3f}, expected ≈ 1.0 for correct model"
+        )
+        assert result.n_failed == 0
+
+    def test_mean_error_near_zero(self):
+        """Mean prediction error (bias) should be ≈ 0.0 for unbiased kriging."""
+        coords, values, true_model = _generate_spatial_field(
+            n=200, sill=2.0, range_=30.0, nugget=0.5, seed=123
+        )
+
+        result = VariogramAnalysis.kriging_loocv(
+            coords, values, true_model, n_subset=200, seed=123
+        )
+
+        # allow ±0.3 for finite-sample noise
+        assert abs(result.mean_error) < 0.5, (
+            f"Mean error = {result.mean_error:.3f}, expected ≈ 0.0"
+        )
+
+    def test_wrong_model_msspe_deviates(self):
+        """MSSPE should deviate from 1.0 when using a wrong variogram.
+
+        An overestimated sill means the model thinks there's more
+        spatial variability than reality — kriging variances will be
+        too large and MSSPE << 1.0.
+        """
+        coords, values, _ = _generate_spatial_field(
+            n=200, sill=2.0, range_=30.0, nugget=0.5, seed=42
+        )
+
+        # wrong model: sill 10× too large → variances inflated → MSSPE < 1.0
+        wrong_model = CompositeVariogramModel(['spherical'], include_nugget=True)
+        wrong_model.set_params(np.array([20.0, 30.0, 5.0]))
+
+        result = VariogramAnalysis.kriging_loocv(
+            coords, values, wrong_model, n_subset=200, seed=42
+        )
+
+        assert result.msspe < 0.5, (
+            f"MSSPE = {result.msspe:.3f}; expected << 1.0 for "
+            f"overestimated variogram"
+        )
+
+    def test_subsampling(self):
+        """n_subset should reduce the number of points used."""
+        coords, values, true_model = _generate_spatial_field(
+            n=300, sill=2.0, range_=30.0, nugget=0.5, seed=42
+        )
+
+        result_full = VariogramAnalysis.kriging_loocv(
+            coords, values, true_model, n_subset=300, seed=42
+        )
+        result_sub = VariogramAnalysis.kriging_loocv(
+            coords, values, true_model, n_subset=100, seed=42
+        )
+
+        assert result_full.n_points == 300
+        assert result_sub.n_points == 100
+
+    def test_result_fields_finite(self):
+        """All result fields should be finite for valid input."""
+        coords, values, true_model = _generate_spatial_field(
+            n=100, sill=2.0, range_=30.0, nugget=0.5, seed=42
+        )
+
+        result = VariogramAnalysis.kriging_loocv(
+            coords, values, true_model, n_subset=100, seed=42
+        )
+
+        assert np.isfinite(result.msspe)
+        assert np.isfinite(result.mean_error)
+        assert np.isfinite(result.rmse)
+        assert np.isfinite(result.mean_standardized_error)
+        assert result.rmse > 0
+
+    def test_input_validation_coords_shape(self):
+        """Should raise ValueError for bad coords shape."""
+        with pytest.raises(ValueError, match="shape"):
+            VariogramAnalysis.kriging_loocv(
+                np.array([1, 2, 3]),       # 1D, not (n,2)
+                np.array([1, 2, 3]),
+                lambda h: h,
+            )
+
+    def test_input_validation_length_mismatch(self):
+        """Should raise ValueError when coords and values have different lengths."""
+        with pytest.raises(ValueError, match="same length"):
+            VariogramAnalysis.kriging_loocv(
+                np.array([[0, 0], [1, 1]]),
+                np.array([1, 2, 3]),  # 3 values, 2 coords
+                lambda h: h,
+            )
+
+    def test_reproducibility_with_seed(self):
+        """Same seed should give identical results."""
+        coords, values, true_model = _generate_spatial_field(
+            n=200, sill=2.0, range_=30.0, nugget=0.5, seed=42
+        )
+
+        r1 = VariogramAnalysis.kriging_loocv(
+            coords, values, true_model, n_subset=100, seed=99
+        )
+        r2 = VariogramAnalysis.kriging_loocv(
+            coords, values, true_model, n_subset=100, seed=99
+        )
+
+        assert_allclose(r1.msspe, r2.msspe)
+        assert_allclose(r1.rmse, r2.rmse)
+
+    def test_pure_nugget_process(self):
+        """For a pure nugget process (no spatial correlation), MSSPE ≈ 1.0
+        with the correct nugget-only variogram."""
+        rng = np.random.default_rng(77)
+        n = 150
+        coords = rng.uniform(0, 100, size=(n, 2))
+        nugget_var = 3.0
+        values = rng.normal(0, np.sqrt(nugget_var), n)
+
+        # correct model: nugget only (sill≈0, nugget=3.0)
+        model = CompositeVariogramModel(['spherical'], include_nugget=True)
+        model.set_params(np.array([1e-6, 50.0, nugget_var]))
+
+        result = VariogramAnalysis.kriging_loocv(
+            coords, values, model, n_subset=150, seed=77
+        )
+
+        # for a pure nugget process, kriging reduces to the mean
+        # MSSPE should be roughly 1.0 (each prediction ≈ mean, variance ≈ nugget)
+        assert 0.5 < result.msspe < 2.0, (
+            f"MSSPE = {result.msspe:.3f} for pure nugget; expected ≈ 1.0"
+        )
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
 
