@@ -138,6 +138,87 @@ class TestMatheronEstimator:
         assert_allclose(gamma_est[0], 50.0 / (2.0 * 100))
 
 
+# test Suite 1b: Cressie–Hawkins Estimator
+
+
+class TestCressieHawkinsEstimator:
+    """Test VariogramAnalysis.compute_cressie_hawkins static method."""
+
+    def test_compute_ch_basic(self):
+        """Test Cressie–Hawkins: γ̂ = [mean(|ΔZ|^0.5)]⁴ / (2·(0.457 + 0.494/N))."""
+        # construct known inputs: N=100 pairs, all with |ΔZ|=1.0
+        # |ΔZ|^0.5 = 1.0 for each pair, so sum = 100
+        bin_counts = np.array([100])
+        sum_sqrt_abs_diff = np.array([100.0])  # each pair contributes 1.0
+
+        gamma = VariogramAnalysis.compute_cressie_hawkins(
+            bin_counts, sum_sqrt_abs_diff, min_pairs=10
+        )
+
+        # mean(|ΔZ|^0.5) = 100/100 = 1.0
+        # [1.0]^4 = 1.0
+        # correction = 0.457 + 0.494/100 = 0.46194
+        # γ̂ = 0.5 * 1.0 / 0.46194 ≈ 1.0824
+        expected = 0.5 * 1.0 / (0.457 + 0.494 / 100)
+        assert_allclose(gamma[0], expected, rtol=1e-10)
+
+    def test_compute_ch_pure_nugget(self):
+        """For a pure nugget (constant variance), Cressie–Hawkins
+        should agree with Matheron asymptotically."""
+        rng = np.random.default_rng(42)
+        n_pairs = 10000
+        sigma = 2.0
+        # simulate squared differences from a pure-nugget process
+        # ΔZ ~ N(0, 2σ²)  so |ΔZ|^0.5 needs to be accumulated
+        dz = rng.normal(0, np.sqrt(2) * sigma, n_pairs)
+        ssd = np.array([np.sum(dz**2)])
+        ssad = np.array([np.sum(np.abs(dz) ** 0.5)])
+        counts = np.array([n_pairs])
+
+        matheron = VariogramAnalysis.compute_matheron(counts, ssd, min_pairs=10)
+        ch = VariogramAnalysis.compute_cressie_hawkins(counts, ssad, min_pairs=10)
+
+        # both should estimate γ ≈ σ² = 4.0; allow 10% tolerance for finite sample
+        assert_allclose(matheron[0], sigma**2, rtol=0.1)
+        assert_allclose(ch[0], sigma**2, rtol=0.15)
+
+    def test_compute_ch_min_pairs_filter(self):
+        """Bins with fewer than min_pairs should return NaN."""
+        bin_counts = np.array([100, 5, 50])
+        ssad = np.array([50.0, 3.0, 30.0])
+
+        gamma = VariogramAnalysis.compute_cressie_hawkins(
+            bin_counts, ssad, min_pairs=10
+        )
+        assert np.isfinite(gamma[0])
+        assert np.isnan(gamma[1])   # only 5 pairs
+        assert np.isfinite(gamma[2])
+
+    def test_compute_ch_outlier_robustness(self):
+        """Cressie–Hawkins should be more resistant to outliers than Matheron."""
+        rng = np.random.default_rng(99)
+        n_pairs = 500
+        sigma = 1.0
+        dz = rng.normal(0, np.sqrt(2) * sigma, n_pairs)
+
+        # inject 5 extreme outliers (10× the std)
+        dz[:5] = 10.0 * np.sqrt(2) * sigma
+
+        ssd = np.array([np.sum(dz**2)])
+        ssad = np.array([np.sum(np.abs(dz) ** 0.5)])
+        counts = np.array([n_pairs])
+
+        matheron = VariogramAnalysis.compute_matheron(counts, ssd, min_pairs=10)
+        ch = VariogramAnalysis.compute_cressie_hawkins(counts, ssad, min_pairs=10)
+
+        # Matheron will be inflated by the outliers, Cressie–Hawkins less so.
+        # True value is σ²=1.0; Matheron will be >> 1.0; CH closer to 1.0.
+        assert ch[0] < matheron[0], (
+            f"Cressie–Hawkins ({ch[0]:.3f}) should be closer to true value "
+            f"than Matheron ({matheron[0]:.3f}) in the presence of outliers"
+        )
+
+
 # test Suite 2: VariogramModelSelector Construction
 
 

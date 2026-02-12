@@ -416,10 +416,12 @@ class VariogramModelRegistry:
             max_gamma = np.nanmax(variogram)
             max_lag = np.nanmax(lags)
             return [max_gamma * 0.9, max_lag / 3]
-        
+
         def _bounded_bounds(lags, variogram):
-            max_gamma = np.nanmax(variogram) * 10
-            max_lag = np.nanmax(lags) * 2
+            # sill: 3× max semivariance 
+            max_gamma = np.nanmax(variogram) * 3
+            # range: constrain to the observed lag domain
+            max_lag = np.nanmax(lags)
             return ([0, 1e-6], [max_gamma, max_lag])
         
         # spherical
@@ -474,8 +476,8 @@ class VariogramModelRegistry:
             return [max_gamma * 0.9, max_lag / 3, 1.5]  # Default nu=1.5
         
         def _matern_bounds(lags, variogram):
-            max_gamma = np.nanmax(variogram) * 10
-            max_lag = np.nanmax(lags) * 2
+            max_gamma = np.nanmax(variogram) * 3
+            max_lag = np.nanmax(lags)
             return ([0, 1e-6, 0.1], [max_gamma, max_lag, 5.0])
         
         matern_spec = VariogramModelSpec(
@@ -501,8 +503,8 @@ class VariogramModelRegistry:
             return [max_gamma * 0.9, max_lag / 4, max_lag / 3]
 
         def _damped_hole_bounds(lags, variogram):
-            max_gamma = np.nanmax(variogram) * 5
-            max_lag = np.nanmax(lags) * 2
+            max_gamma = np.nanmax(variogram) * 3
+            max_lag = np.nanmax(lags)
             return ([0, 1e-6, 1e-6], [max_gamma, max_lag, max_lag])
 
         def _damped_hole_validate(params):

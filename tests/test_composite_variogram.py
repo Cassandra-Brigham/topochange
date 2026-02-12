@@ -635,8 +635,11 @@ class TestDefaultGuessAndBounds:
         guess = model.default_guess(lags, variogram)
 
         assert len(guess) == 5  # sill1, range1, sill2, range2, nugget
-        # ranges should be spread differently for multi-component
-        assert guess[1] < guess[3]  # range1 < range2
+        # practical ranges should be spread (native range params may differ
+        # because of practical_range_factor; exponential has factor=3)
+        practical_r1 = guess[1] * 1.0   # spherical: factor = 1
+        practical_r2 = guess[3] * 3.0   # exponential: factor = 3
+        assert practical_r1 < practical_r2
 
     def test_bounds_spherical(self):
         """Test parameter bounds for spherical model."""

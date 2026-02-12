@@ -28,7 +28,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 @dataclass
 class FittedVariogramModel:
     """Container for a fitted variogram model with diagnostics.
-    
+
     Attributes
     ----------
     composite_model : CompositeVariogramModel
@@ -47,6 +47,8 @@ class FittedVariogramModel:
         Cross-validation RMSE.
     param_samples : ndarray or None
         Bootstrap parameter samples (n_boot × n_params).
+    warnings : list of str
+        Diagnostic warnings (e.g. range exceeds half max lag).
     """
     composite_model: CompositeVariogramModel
     params: np.ndarray
@@ -56,17 +58,44 @@ class FittedVariogramModel:
     bic: float
     cv_rmse: Optional[float] = None
     param_samples: Optional[np.ndarray] = None
-    
+    warnings: List[str] = field(default_factory=list)
+
     def predict(self, h: np.ndarray) -> np.ndarray:
         """Evaluate fitted model at lag distances."""
         return self.composite_model(h)
-    
+
+    def check_half_lag(self, max_lag: float) -> None:
+        """Check whether any fitted range exceeds half the maximum lag.
+
+        Appends a diagnostic warning if so.  The half-lag heuristic
+        (Journel & Huijbregts, 1978) holds that variogram parameters
+        estimated from lags beyond half the domain may be unreliable
+        because few point pairs constrain the fit there.
+        """
+        half_lag = max_lag / 2.0
+        model = self.composite_model
+        for i, spec in enumerate(model._components):
+            if 'range' in spec.param_names:
+                range_idx = spec.param_names.index('range')
+                comp_params = model.get_component_params(i)
+                fitted_range = comp_params[range_idx]
+                if fitted_range > half_lag:
+                    name = model.component_names[i]
+                    msg = (
+                        f"WARNING: {name} range ({fitted_range:.1f}) exceeds "
+                        f"half the maximum lag ({half_lag:.1f}).  The variogram "
+                        f"is poorly constrained beyond this distance — consider "
+                        f"increasing max_lag or treating this range estimate "
+                        f"with caution."
+                    )
+                    self.warnings.append(msg)
+
     def get_param_percentiles(
-        self, 
+        self,
         percentiles: List[float] = [16, 50, 84]
     ) -> Dict[str, np.ndarray]:
         """Get parameter percentiles from bootstrap samples.
-        
+
         Returns
         -------
         percentiles_dict : dict
@@ -74,11 +103,11 @@ class FittedVariogramModel:
         """
         if self.param_samples is None:
             raise ValueError("No bootstrap samples available.")
-        
+
         result = {}
         for i, name in enumerate(self.composite_model.param_names):
             result[name] = np.percentile(self.param_samples[:, i], percentiles)
-        
+
         return result
 
 
@@ -218,14 +247,108 @@ class VariogramModelSelector:
         
         return candidates
     
+    # ── nugget pre-estimation (two-stage approach) ──────────────────
+
+    @staticmethod
+    def _estimate_nugget_from_short_lags(
+        lags: np.ndarray,
+        variogram: np.ndarray,
+        n_lags: int = 5,
+    ) -> float:
+        """Pre-estimate nugget by extrapolating short-lag bins to h=0.
+
+        Fits γ(h) ≈ C₀ + bh to the first few lags and returns the
+        y-intercept clamped to [0, 0.5 × max(γ)].  This is the "Stage 1"
+        of two-stage fitting and prevents the optimizer from trading sill
+        for nugget inappropriately.
+
+        References
+        ----------
+        Cressie, N. (1985). Fitting variogram models by weighted least
+        squares.  J. Int. Assoc. Math. Geol., 17(5), 563–586.
+        """
+        max_gamma = float(np.nanmax(variogram))
+        n_fit = min(n_lags, max(2, len(lags) // 4))
+        if n_fit < 2:
+            return max_gamma * 0.1
+
+        short_lags = lags[:n_fit]
+        short_gamma = variogram[:n_fit]
+
+        try:
+            _slope, intercept = np.polyfit(short_lags, short_gamma, 1)
+            return float(np.clip(intercept, 0.0, max_gamma * 0.5))
+        except (np.linalg.LinAlgError, ValueError):
+            return max_gamma * 0.1
+
+    # ── multi-start initial guesses ──────────────────────────────
+
+    @staticmethod
+    def _generate_multistart_guesses(
+        p0_base: np.ndarray,
+        bounds: tuple,
+        n_restarts: int,
+        rng: np.random.Generator,
+    ) -> list:
+        """Generate diverse starting points using Latin-Hypercube-like sampling.
+
+        Restart 0:  use the default guess unchanged.
+        Restart 1:  halve all range parameters (explore short-range basin).
+        Restart 2:  double all range parameters (explore long-range basin).
+        Remaining:  random uniform samples in [lower, upper] for each param.
+        """
+        lb = np.asarray(bounds[0], dtype=float)
+        ub = np.asarray(bounds[1], dtype=float)
+        guesses = [p0_base.copy()]
+
+        if n_restarts >= 2:
+            # short-range variant
+            short = p0_base.copy()
+            short = np.clip(short * 0.5, lb, ub)
+            guesses.append(short)
+
+        if n_restarts >= 3:
+            # long-range variant
+            long_ = p0_base.copy()
+            long_ = np.clip(long_ * 2.0, lb, ub)
+            guesses.append(long_)
+
+        # fill remaining restarts with random samples in the feasible region
+        for _ in range(max(0, n_restarts - len(guesses))):
+            # uniform random between lb and ub (log-scale for wide bounds)
+            rand = rng.random(len(p0_base))
+            # use log-uniform for strictly positive params with wide range
+            sample = np.empty_like(p0_base)
+            for j in range(len(p0_base)):
+                lo, hi = max(lb[j], 1e-12), ub[j]
+                if hi / lo > 50:
+                    # log-uniform sampling for wide-range params
+                    sample[j] = np.exp(
+                        np.log(lo) + rand[j] * (np.log(hi) - np.log(lo))
+                    )
+                else:
+                    sample[j] = lo + rand[j] * (hi - lo)
+            guesses.append(np.clip(sample, lb, ub))
+
+        return guesses[:n_restarts]
+
+    # ── core model fitting ───────────────────────────────────────
+
     def fit_model(
         self,
         model: CompositeVariogramModel,
         maxfev: int = 10000,
-        n_restarts: int = 5,
+        n_restarts: int = 8,
     ) -> Optional[FittedVariogramModel]:
         """Fit a single composite model to the empirical variogram.
-        
+
+        When the model includes a nugget, a two-stage approach is used:
+        the nugget is first pre-estimated from short-lag extrapolation,
+        then the full optimisation is run with the nugget constrained
+        in an asymmetric window around the pre-estimate (−50% / +80%,
+        with a floor of 15% of max semivariance).  This prevents the
+        common failure mode where the optimizer trades sill for nugget.
+
         Parameters
         ----------
         model : CompositeVariogramModel
@@ -234,7 +357,7 @@ class VariogramModelSelector:
             Maximum function evaluations for optimizer.
         n_restarts : int
             Number of random restarts to avoid local minima.
-        
+
         Returns
         -------
         fitted : FittedVariogramModel or None
@@ -243,24 +366,48 @@ class VariogramModelSelector:
         # get initial guess and bounds
         p0_base = model.default_guess(self.lags, self.empirical_variogram)
         bounds = model.bounds(self.lags, self.empirical_variogram)
-        
+
+        # ── two-stage nugget constraint ──
+        # Pre-estimate the nugget from short-lag extrapolation and constrain
+        # the optimisation window around it.  The tolerance is asymmetric:
+        # tighter below (we're fairly confident the nugget isn't negative)
+        # and wider above (the linear extrapolation tends to underestimate
+        # the nugget for high-nugget data because the first few lags still
+        # contain spatial structure).
+        if model.include_nugget:
+            nugget_pre = self._estimate_nugget_from_short_lags(
+                self.lags, self.empirical_variogram
+            )
+            nugget_idx = model.n_params - 1  # nugget is always last
+            max_gamma = float(np.nanmax(self.empirical_variogram))
+            nug_lb = max(0.0, nugget_pre * 0.5)          # −50 %
+            # upper: allow up to +80% or at least 15% of max_gamma
+            nug_ub = max(nugget_pre * 1.8, max_gamma * 0.15)
+            # keep within the overall bounds (which cap at 50% of max_gamma)
+            bounds_lower = list(bounds[0])
+            bounds_upper = list(bounds[1])
+            bounds_lower[nugget_idx] = max(bounds_lower[nugget_idx], nug_lb)
+            bounds_upper[nugget_idx] = min(bounds_upper[nugget_idx], nug_ub)
+            bounds = (bounds_lower, bounds_upper)
+            # update initial guess to match
+            p0_base[nugget_idx] = np.clip(
+                nugget_pre, bounds_lower[nugget_idx], bounds_upper[nugget_idx]
+            )
+
         # prepare fitting function
         def model_func(h, *params):
             model.set_params(np.array(params))
             return model(h)
-        
+
+        rng = np.random.default_rng()
+        guesses = self._generate_multistart_guesses(
+            p0_base, bounds, n_restarts, rng
+        )
+
         best_result = None
         best_rss = np.inf
-        rng = np.random.default_rng()
-        
-        for restart in range(n_restarts):
-            # perturb initial guess
-            if restart == 0:
-                p0 = p0_base
-            else:
-                perturbation = 1 + (rng.random(len(p0_base)) - 0.5) * 0.5
-                p0 = np.clip(p0_base * perturbation, bounds[0], bounds[1])
-            
+
+        for p0 in guesses:
             try:
                 popt, pcov = curve_fit(
                     model_func,
@@ -272,40 +419,37 @@ class VariogramModelSelector:
                     bounds=bounds,
                     maxfev=maxfev,
                 )
-                
+
                 # compute RSS
                 model.set_params(popt)
                 residuals = self.empirical_variogram - model(self.lags)
                 rss = np.sum(self.weights * residuals**2)
-                
+
                 if rss < best_rss:
                     best_rss = rss
                     best_result = (popt, pcov, rss)
-                    
-            except RuntimeError:
+
+            except (RuntimeError, ValueError):
                 continue
-        
+
         if best_result is None:
             return None
-        
+
         popt, pcov, rss = best_result
         model.set_params(popt)
-        
+
         # compute information criteria
         n = len(self.lags)
         k = model.n_params
-        
-        # aIC and BIC
+
         if self.sigma is not None:
-            # log-likelihood based
             ll = self._log_likelihood(model, popt)
             aic = 2 * k - 2 * ll
             bic = k * np.log(n) - 2 * ll
         else:
-            # rSS-based approximation
             aic = n * np.log(rss / n) + 2 * k
             bic = n * np.log(rss / n) + k * np.log(n)
-        
+
         return FittedVariogramModel(
             composite_model=model,
             params=popt,
@@ -436,14 +580,17 @@ class VariogramModelSelector:
         )
         
         self.fitted_models = []
-        
+        max_lag = float(np.nanmax(self.lags))
+
         for model in candidates:
             fitted = self.fit_model(model)
             if fitted is not None:
                 if compute_cv:
                     fitted.cv_rmse = self.cross_validate(fitted, k=cv_folds, seed=seed)
+                # check half-lag heuristic
+                fitted.check_half_lag(max_lag)
                 self.fitted_models.append(fitted)
-        
+
         # compute Akaike weights
         if self.fitted_models:
             self._compute_akaike_weights()
@@ -485,6 +632,12 @@ class VariogramModelSelector:
         
         best_idx = np.argmin(scores)
         self.best_model = self.fitted_models[best_idx]
+
+        # emit any diagnostic warnings from the selected model
+        import warnings as _warnings
+        for w in self.best_model.warnings:
+            _warnings.warn(w, UserWarning, stacklevel=2)
+
         return self.best_model
     
     def bootstrap_best_model(
@@ -984,47 +1137,66 @@ class VariogramAnalysis:
         self.best_bounds = None
         self.all_variograms = None
         self.all_counts = None
+        self.estimator = None
 
     
     @staticmethod
     @njit(parallel=True)
     def bin_distances_and_squared_differences(coords, values, bin_width, max_lag_multiplier, x_extent, y_extent):
         """
-        Compute and bin pairwise distances and squared differences for Matheron estimation.
+        Compute and bin pairwise distances, squared differences, and
+        fourth-root absolute differences in a single pass.
 
-        Parameters:
-        -----------
+        The squared differences feed the Matheron estimator;
+        the fourth-root absolute differences feed the Cressie–Hawkins
+        robust estimator.  Both are accumulated with O(n_bins) memory.
+
+        Parameters
+        ----------
         coords : np.ndarray
             Array of coordinates of shape (M, 2).
         values : np.ndarray
             Array of values of shape (M,).
-        bin_edges : np.ndarray
-            Array of bin edges for distance binning.
+        bin_width : float
+            Lag bin width.
+        max_lag_multiplier : float or str
+            Controls maximum lag distance.
+        x_extent, y_extent : float
+            Spatial extent of the domain.
 
-        Returns:
-        --------
+        Returns
+        -------
+        n_bins : int
+            Number of lag bins.
         bin_counts : np.ndarray
             Counts of pairs in each bin.
         binned_sum_squared_diff : np.ndarray
-            Sum of squared differences for each bin.
+            Sum of squared differences per bin (for Matheron).
+        binned_sum_sqrt_abs_diff : np.ndarray
+            Sum of |ΔZ|^0.5 per bin (for Cressie–Hawkins).
+        max_distance : float
+            Maximum observed pairwise distance.
+        max_lag : float
+            Maximum lag used for binning.
         """
         approx_max_distance = np.sqrt(x_extent**2 + y_extent**2)
-        
+
         if max_lag_multiplier == "max":
             max_lag = approx_max_distance
         elif max_lag_multiplier == "median":
             max_lag = 0.5 * approx_max_distance  # simple heuristic
         else:
             max_lag = float(approx_max_distance * max_lag_multiplier)
-        
+
         # determine bin edges using diagonal distance as maximum lag
         n_bins = int(np.ceil(max_lag / bin_width)) + 1
         bin_edges = np.arange(0, n_bins * bin_width, bin_width)
-        
+
         M = coords.shape[0]
         max_distance = 0.0
         bin_counts = np.zeros(n_bins, dtype=np.int64)
         binned_sum_squared_diff = np.zeros(n_bins, dtype=np.float64)
+        binned_sum_sqrt_abs_diff = np.zeros(n_bins, dtype=np.float64)
 
         for i in prange(M):
             for j in range(i + 1, M):
@@ -1035,25 +1207,30 @@ class VariogramAnalysis:
                     d += tmp * tmp
                 dist = np.sqrt(d)
                 max_distance = max(max_distance, dist)
-                
+
                 # compute the difference
                 diff = values[i] - values[j]
-                
-                # compute the squared difference
-                diff_squared = (diff) ** 2
+
+                # Matheron accumulator: squared difference
+                diff_squared = diff ** 2
+
+                # Cressie–Hawkins accumulator: |diff|^0.5
+                sqrt_abs_diff = np.sqrt(np.abs(diff))
 
                 # find the bin for this distance
                 bin_idx = int(dist / bin_width)
                 if 0 <= bin_idx < n_bins:
                     bin_counts[bin_idx] += 1
                     binned_sum_squared_diff[bin_idx] += diff_squared
-        
-        
+                    binned_sum_sqrt_abs_diff[bin_idx] += sqrt_abs_diff
+
+
         bin_edges = bin_edges[:n_bins]
         bin_counts = bin_counts[:n_bins]
         binned_sum_squared_diff = binned_sum_squared_diff[:n_bins]
+        binned_sum_sqrt_abs_diff = binned_sum_sqrt_abs_diff[:n_bins]
 
-        return n_bins, bin_counts, binned_sum_squared_diff, max_distance, max_lag
+        return n_bins, bin_counts, binned_sum_squared_diff, binned_sum_sqrt_abs_diff, max_distance, max_lag
 
     @staticmethod
     def compute_matheron(bin_counts, ssd, min_pairs: int = 10) -> np.ndarray:
@@ -1066,6 +1243,52 @@ class VariogramAnalysis:
                 gamma_est[i] = sum_sq / (2.0 * cnt)
         return gamma_est
 
+    @staticmethod
+    def compute_cressie_hawkins(
+        bin_counts, sum_sqrt_abs_diff, min_pairs: int = 10
+    ) -> np.ndarray:
+        """
+        Compute the Cressie–Hawkins robust semivariance estimator.
+
+        γ̂(h) = [mean(|ΔZ|^0.5)]⁴ / (2 · (0.457 + 0.494 / N(h)))
+
+        This estimator downweights large squared differences by operating
+        on fourth-root-transformed absolute differences, making it resistant
+        to outliers while remaining a consistent estimator of the variogram.
+
+        Parameters
+        ----------
+        bin_counts : np.ndarray
+            Number of pairs per lag bin.
+        sum_sqrt_abs_diff : np.ndarray
+            Sum of |Z(x+h) − Z(x)|^0.5 per lag bin.
+        min_pairs : int
+            Minimum pair count for a bin to be considered valid.
+
+        Returns
+        -------
+        gamma_est : np.ndarray
+            Robust semivariance estimates; NaN for bins with < min_pairs.
+
+        References
+        ----------
+        Cressie, N. (1985). Fitting variogram models by weighted least
+        squares. J. Int. Assoc. Math. Geol., 17(5), 563–586.
+
+        Cressie, N. & Hawkins, D.M. (1980). Robust estimation of the
+        variogram: I. J. Int. Assoc. Math. Geol., 12(2), 115–125.
+        """
+        gamma_est = np.full_like(bin_counts, np.nan, dtype=float)
+        for i, (cnt, s) in enumerate(zip(bin_counts, sum_sqrt_abs_diff)):
+            if cnt >= min_pairs:
+                mean_fourth = (s / cnt) ** 4
+                correction = 0.457 + 0.494 / cnt
+                gamma_est[i] = 0.5 * mean_fourth / correction
+        return gamma_est
+
+    # valid estimator names ------------------------------------------------
+    ESTIMATORS = ('matheron', 'cressie_hawkins')
+
     def numba_variogram(
         self,
         area_side: float,
@@ -1074,21 +1297,37 @@ class VariogramAnalysis:
         bin_width: float,
         max_lag_multiplier,
         *,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        estimator: str = 'matheron',
     ):
         """
-        Compute one empirical variogram by sampling the raster and binning pairwise
-        squared differences of values by distance.
+        Compute one empirical variogram by sampling the raster and binning
+        pairwise differences by distance.
+
+        Parameters
+        ----------
+        area_side, samples_per_area, max_samples : see ``sample_raster``
+        bin_width : float
+        max_lag_multiplier : {"max", "median"} or float
+        seed : int | None
+        estimator : {'matheron', 'cressie_hawkins'}
+            Which semivariance estimator to apply.
 
         Returns
         -------
         bin_counts : np.ndarray
-        variogram_matheron : np.ndarray
+        variogram : np.ndarray
         n_bins : int
         min_distance : float
         max_distance : float
         max_lag : float
         """
+        if estimator not in self.ESTIMATORS:
+            raise ValueError(
+                f"Unknown estimator '{estimator}'. "
+                f"Choose from {self.ESTIMATORS}."
+            )
+
         self.raster_data_handler.sample_raster(area_side, samples_per_area, max_samples, seed=seed)
 
         min_distance = 0.0  # retained for compatibility
@@ -1097,16 +1336,26 @@ class VariogramAnalysis:
         x_extent = float(np.max(xs) - np.min(xs))
         y_extent = float(np.max(ys) - np.min(ys))
 
-        n_bins, bin_counts, bssd, max_distance, max_lag = self.bin_distances_and_squared_differences(
+        (n_bins, bin_counts, bssd, bssad,
+         max_distance, max_lag) = self.bin_distances_and_squared_differences(
             self.raster_data_handler.coords,
             self.raster_data_handler.samples,
             bin_width,
             max_lag_multiplier,
             x_extent,
-            y_extent
+            y_extent,
         )
-        matheron_estimates = self.compute_matheron(bin_counts, bssd, min_pairs=self.MIN_PAIRS)
-        return bin_counts, matheron_estimates, n_bins, min_distance, max_distance, max_lag
+
+        if estimator == 'cressie_hawkins':
+            estimates = self.compute_cressie_hawkins(
+                bin_counts, bssad, min_pairs=self.MIN_PAIRS
+            )
+        else:
+            estimates = self.compute_matheron(
+                bin_counts, bssd, min_pairs=self.MIN_PAIRS
+            )
+
+        return bin_counts, estimates, n_bins, min_distance, max_distance, max_lag
 
     def calculate_mean_variogram_numba(
         self,
@@ -1118,7 +1367,8 @@ class VariogramAnalysis:
         n_runs: int,
         max_lag_multiplier=1 / 3,
         *,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        estimator: str = 'matheron',
     ) -> None:
         """
         Run multiple variogram realizations and compute the mean semivariogram
@@ -1133,6 +1383,11 @@ class VariogramAnalysis:
         max_lag_multiplier : {"max","median"} or float
         seed : int | None
             Base seed; each run uses a child seed for reproducibility.
+        estimator : {'matheron', 'cressie_hawkins'}
+            Empirical variogram estimator to use.  ``'matheron'`` is the
+            classical method-of-moments estimator.  ``'cressie_hawkins'``
+            is a robust estimator that downweights outlying squared
+            differences (Cressie & Hawkins, 1980; Cressie, 1985).
         """
         # child seeds for each run to keep realizations independent but reproducible.
         ss = np.random.SeedSequence(seed)
@@ -1145,7 +1400,8 @@ class VariogramAnalysis:
         for run in range(n_runs):
             count, variogram, n_bins, _, _, _ = self.numba_variogram(
                 area_side, samples_per_area, max_samples, bin_width, max_lag_multiplier,
-                seed=int(child_seeds[run].generate_state(1)[0])
+                seed=int(child_seeds[run].generate_state(1)[0]),
+                estimator=estimator,
             )
             all_variograms.loc[run, :variogram.size - 1] = variogram
             counts.loc[run, :count.size - 1] = count
@@ -1178,6 +1434,7 @@ class VariogramAnalysis:
         self.all_variograms = vario_arr
         self.all_counts = count_arr
         self.n_bins = int(np.nanmean(all_n_bins))
+        self.estimator = estimator
 
     @staticmethod
     def get_base_initial_guess(n: int, mean_variogram, lags, nugget: bool = False) -> np.ndarray:

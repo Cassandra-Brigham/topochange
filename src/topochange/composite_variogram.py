@@ -208,49 +208,93 @@ class CompositeVariogramModel:
     
     def default_guess(self, lags: np.ndarray, variogram: np.ndarray) -> np.ndarray:
         """Generate default initial parameter guess.
-        
-        For multi-component models, spreads initial ranges across the lag span.
+
+        For multi-component models, spreads initial *practical* ranges across
+        the lag span, then converts back to the model's native range parameter
+        using ``practical_range_factor``.  For example, if the target practical
+        range is 250 and the model is exponential (factor = 3), the range
+        parameter guess becomes 250 / 3 ≈ 83.
         """
         guess = []
         n_bounded = len(self.bounded_components)
         max_gamma = np.nanmax(variogram)
         max_lag = np.nanmax(lags)
-        
+
         for i, spec in enumerate(self._components):
             base_guess = spec.default_guess(lags, variogram)
-            
+
             # adjust sill to share variance among components
             if spec.has_sill and n_bounded > 0:
                 base_guess[0] = max_gamma * 0.8 / max(n_bounded, 1)
-            
+
             # spread ranges for multi-component bounded models
             if spec.is_bounded and 'range' in spec.param_names:
                 range_idx = spec.param_names.index('range')
-                # distribute ranges: 1/4, 1/2, 3/4 of max lag
+                # target practical range distributed across the lag span
                 range_factor = (i + 1) / (len(self._components) + 1)
-                base_guess[range_idx] = max_lag * range_factor
-            
+                practical_range_target = max_lag * range_factor
+                # convert from practical range to native range parameter
+                prf = spec.practical_range_factor
+                if prf is not None and prf > 0:
+                    base_guess[range_idx] = practical_range_target / prf
+                else:
+                    base_guess[range_idx] = practical_range_target
+
             guess.extend(base_guess)
-        
+
         if self.include_nugget:
-            guess.append(max_gamma * 0.1)  # Start with 10% nugget
-        
+            # estimate nugget from short-lag extrapolation rather than
+            # a fixed fraction of the sill (more physically meaningful)
+            nugget_guess = self._estimate_nugget_from_lags(lags, variogram)
+            guess.append(nugget_guess)
+
         return np.array(guess)
+
+    @staticmethod
+    def _estimate_nugget_from_lags(
+        lags: np.ndarray, variogram: np.ndarray
+    ) -> float:
+        """Estimate nugget from short-lag linear extrapolation to h=0.
+
+        Uses the first few lag bins to fit γ(h) ≈ C₀ + bh and extrapolates
+        the y-intercept as a nugget estimate.  Falls back to 10% of the max
+        semivariance if there are too few points.
+        """
+        max_gamma = np.nanmax(variogram)
+        n_extrap = min(5, max(2, len(lags) // 4))
+        if n_extrap >= 2:
+            short_lags = lags[:n_extrap]
+            short_gamma = variogram[:n_extrap]
+            try:
+                _slope, intercept = np.polyfit(short_lags, short_gamma, 1)
+                nugget_est = float(np.clip(intercept, 0, max_gamma * 0.5))
+            except (np.linalg.LinAlgError, ValueError):
+                nugget_est = max_gamma * 0.1
+        else:
+            nugget_est = max_gamma * 0.1
+        return nugget_est
     
     def bounds(self, lags: np.ndarray, variogram: np.ndarray) -> Tuple[List[float], List[float]]:
-        """Generate parameter bounds."""
+        """Generate parameter bounds.
+
+        Nugget is capped at 50% of the maximum observed semivariance.
+        A nugget exceeding half the total sill is unusual in practice and
+        often indicates fitting artefacts rather than genuine micro-scale
+        variation (Cressie, 1993, §2.4).
+        """
         lower, upper = [], []
-        
+
         for spec in self._components:
             lb, ub = spec.bounds(lags, variogram)
             lower.extend(lb)
             upper.extend(ub)
-        
+
         if self.include_nugget:
-            max_gamma = np.nanmax(variogram) * 10
+            max_gamma = np.nanmax(variogram)
+            # cap nugget at 50% of observed max semivariance
             lower.append(0)
-            upper.append(max_gamma)
-        
+            upper.append(max_gamma * 0.5)
+
         return (lower, upper)
     
     def get_total_sill(self) -> Optional[float]:

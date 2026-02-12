@@ -23,7 +23,7 @@ except ImportError:
     import pdal
 import pyproj
 import rasterio
-import scipy  # noqa: F401  (needed if scipy is installed, used via has_scipy / generic_filter)
+import scipy  
 import shapely.geometry
 from pyproj import CRS as CRS_
 from pyproj import Proj, Transformer
@@ -111,7 +111,7 @@ def _get_transformer(src_crs, dst_crs):
 
 def has_rasterio() -> bool:
     try:
-        import rasterio  # noqa: F401
+        import rasterio  
         return True
     except Exception:
         return False
@@ -119,7 +119,7 @@ def has_rasterio() -> bool:
 
 def has_scipy() -> bool:
     try:
-        import scipy  # noqa: F401
+        import scipy  
         return True
     except Exception:
         return False
