@@ -108,8 +108,8 @@ def run_stress_test(
     selector = VariogramModelSelector(
         lags=lags,
         empirical_variogram=mean_v,
-        weights=np.ones_like(lags),
         sigma=sigma_v,
+        weighting='uniform',
     )
 
     selector.fit_all_candidates(

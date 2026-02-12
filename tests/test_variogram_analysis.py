@@ -231,18 +231,25 @@ class TestVariogramModelSelectorConstruction:
         empirical = synthetic_variogram_data['empirical']
         bin_counts = synthetic_variogram_data['bin_counts']
 
-        selector = VariogramModelSelector(lags, empirical, weights=bin_counts)
+        selector = VariogramModelSelector(
+            lags, empirical,
+            pair_counts=bin_counts, weighting='pair_count',
+        )
 
         assert_array_almost_equal(selector.lags, lags)
         assert_array_almost_equal(selector.empirical_variogram, empirical)
+        assert_array_almost_equal(selector.pair_counts, bin_counts)
+        # with pair_count weighting, weights should equal the raw counts
         assert_array_almost_equal(selector.weights, bin_counts)
 
     def test_constructor_default_weights(self, synthetic_variogram_data):
-        """Test that default weights are ones."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical']
-        )
+        """Test that default weights are ones when no pair counts supplied."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            selector = VariogramModelSelector(
+                synthetic_variogram_data['lags'],
+                synthetic_variogram_data['empirical'],
+            )
 
         assert_array_almost_equal(selector.weights, np.ones_like(selector.lags))
 
@@ -253,7 +260,7 @@ class TestVariogramModelSelectorConstruction:
         sigma = np.full_like(empirical, 0.05)
 
         selector = VariogramModelSelector(
-            lags, empirical, sigma=sigma
+            lags, empirical, sigma=sigma, weighting='uniform',
         )
 
         assert_array_almost_equal(selector.sigma, sigma)
@@ -264,13 +271,124 @@ class TestVariogramModelSelectorConstruction:
         empirical = np.array([0.5, 0.8, 1.0])
         sigma = np.array([0.1, 0, -0.05])
 
-        selector = VariogramModelSelector(lags, empirical, sigma=sigma)
+        selector = VariogramModelSelector(
+            lags, empirical, sigma=sigma, weighting='uniform',
+        )
 
         # first should be unchanged
         assert selector.sigma[0] == 0.1
         # others should be >= eps
         assert selector.sigma[1] > 0
         assert selector.sigma[2] > 0
+
+
+# test Suite 2b: Weighting Schemes
+
+
+class TestWeightingSchemes:
+    """Test VariogramModelSelector weighting schemes."""
+
+    def test_cressie_weights_formula(self, synthetic_variogram_data):
+        """Test that Cressie weights = N(h) / γ̂(h)²."""
+        lags = synthetic_variogram_data['lags']
+        empirical = synthetic_variogram_data['empirical']
+        counts = synthetic_variogram_data['bin_counts'].astype(float)
+
+        selector = VariogramModelSelector(
+            lags, empirical,
+            pair_counts=counts,
+            weighting='cressie',
+        )
+
+        expected = counts / np.maximum(empirical**2, np.finfo(float).eps)
+        assert_allclose(selector.weights, expected, rtol=1e-10)
+
+    def test_cressie_weights_short_lag_dominance(self, synthetic_variogram_data):
+        """Cressie weights should be much larger at short lags than long lags."""
+        lags = synthetic_variogram_data['lags']
+        empirical = synthetic_variogram_data['empirical']
+        counts = synthetic_variogram_data['bin_counts'].astype(float)
+
+        selector = VariogramModelSelector(
+            lags, empirical,
+            pair_counts=counts,
+            weighting='cressie',
+        )
+
+        # first-quartile weights should be >> last-quartile weights
+        n = len(lags)
+        q1 = n // 4
+        short_mean = np.mean(selector.weights[:q1])
+        long_mean = np.mean(selector.weights[-q1:])
+        assert short_mean > 10 * long_mean, (
+            f"Cressie weights should strongly upweight short lags; "
+            f"short mean={short_mean:.1f}, long mean={long_mean:.1f}"
+        )
+
+    def test_pair_count_weights(self, synthetic_variogram_data):
+        """pair_count weighting should return raw counts."""
+        counts = synthetic_variogram_data['bin_counts'].astype(float)
+
+        selector = VariogramModelSelector(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            pair_counts=counts,
+            weighting='pair_count',
+        )
+        assert_allclose(selector.weights, counts)
+
+    def test_uniform_weights(self, synthetic_variogram_data):
+        """uniform weighting should return ones."""
+        selector = VariogramModelSelector(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            weighting='uniform',
+        )
+        assert_allclose(selector.weights, np.ones(len(synthetic_variogram_data['lags'])))
+
+    def test_cressie_fallback_warns_without_counts(self, synthetic_variogram_data):
+        """Requesting Cressie without pair_counts should warn and fall back."""
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            selector = VariogramModelSelector(
+                synthetic_variogram_data['lags'],
+                synthetic_variogram_data['empirical'],
+                weighting='cressie',
+            )
+            # should have issued a warning
+            assert any("pair_counts" in str(warning.message) for warning in w)
+            # should fall back to uniform
+            assert_allclose(selector.weights, np.ones(len(synthetic_variogram_data['lags'])))
+
+    def test_invalid_weighting_raises(self, synthetic_variogram_data):
+        """Unknown weighting scheme should raise ValueError."""
+        with pytest.raises(ValueError, match="Unknown weighting"):
+            VariogramModelSelector(
+                synthetic_variogram_data['lags'],
+                synthetic_variogram_data['empirical'],
+                weighting='invalid_scheme',
+            )
+
+    def test_cressie_default_in_fit_best_model_auto(self, synthetic_variogram_data):
+        """fit_best_model_auto should use Cressie weights by default
+        when pair counts are available."""
+        lags = synthetic_variogram_data['lags']
+        empirical = synthetic_variogram_data['empirical']
+        counts = synthetic_variogram_data['bin_counts'].astype(float)
+
+        # manually build what fit_best_model_auto would create
+        selector = VariogramModelSelector(
+            lags, empirical,
+            pair_counts=counts,
+        )
+
+        # default weighting should be 'cressie'
+        assert selector.weighting == 'cressie'
+        # weights should NOT be equal to raw counts
+        assert not np.allclose(selector.weights, counts)
+        # weights should be N(h) / γ̂(h)²
+        expected = counts / np.maximum(empirical**2, np.finfo(float).eps)
+        assert_allclose(selector.weights, expected, rtol=1e-10)
 
 
 # test Suite 3: Candidate Generation
@@ -283,7 +401,8 @@ class TestCandidateGeneration:
         """Test that generate_candidates returns non-empty list."""
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical']
+            synthetic_variogram_data['empirical'],
+            weighting='uniform',
         )
 
         candidates = selector.generate_candidates(max_components=2)
@@ -295,7 +414,8 @@ class TestCandidateGeneration:
         """Test that candidates respect max_components limit."""
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical']
+            synthetic_variogram_data['empirical'],
+            weighting='uniform',
         )
 
         cand1 = selector.generate_candidates(max_components=1)
@@ -315,7 +435,8 @@ class TestCandidateGeneration:
         """Test nugget inclusion flag."""
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical']
+            synthetic_variogram_data['empirical'],
+            weighting='uniform',
         )
 
         cand_with_nugget = selector.generate_candidates(include_nugget=True)
@@ -329,7 +450,8 @@ class TestCandidateGeneration:
         """Test unbounded model inclusion flag."""
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical']
+            synthetic_variogram_data['empirical'],
+            weighting='uniform',
         )
 
         cand_with_unbounded = selector.generate_candidates(include_unbounded=True)
@@ -370,7 +492,7 @@ class TestModelFitting:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         # create single spherical model
@@ -386,7 +508,7 @@ class TestModelFitting:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         model = CompositeVariogramModel(['spherical'], include_nugget=False)
@@ -408,7 +530,7 @@ class TestModelFitting:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         model = CompositeVariogramModel(['spherical'], include_nugget=True)
@@ -422,7 +544,7 @@ class TestModelFitting:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         model = CompositeVariogramModel(['spherical'], include_nugget=False)
@@ -444,7 +566,7 @@ class TestInformationCriteria:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         model = CompositeVariogramModel(['spherical'], include_nugget=False)
@@ -458,7 +580,7 @@ class TestInformationCriteria:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         # fit two models: spherical and spherical+exponential
@@ -489,7 +611,7 @@ class TestModelSelection:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         selector.fit_all_candidates(max_components=2, include_nugget=True, compute_cv=False)
@@ -503,7 +625,7 @@ class TestModelSelection:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         selector.fit_all_candidates(max_components=2, include_nugget=True, compute_cv=False)
@@ -515,7 +637,8 @@ class TestModelSelection:
         """Test that select_best raises if no models fitted."""
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical']
+            synthetic_variogram_data['empirical'],
+            weighting='uniform',
         )
 
         with pytest.raises(ValueError, match="No fitted models"):
@@ -526,7 +649,7 @@ class TestModelSelection:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)
@@ -546,7 +669,7 @@ class TestCrossValidation:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         model = CompositeVariogramModel(['spherical'], include_nugget=False)
@@ -562,7 +685,7 @@ class TestCrossValidation:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         model = CompositeVariogramModel(['spherical'], include_nugget=False)
@@ -587,7 +710,7 @@ class TestAkaikeWeights:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         selector.fit_all_candidates(max_components=2, include_nugget=True, compute_cv=False)
@@ -600,7 +723,7 @@ class TestAkaikeWeights:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         selector.fit_all_candidates(max_components=2, include_nugget=False, compute_cv=False)
@@ -612,7 +735,7 @@ class TestAkaikeWeights:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         selector.fit_all_candidates(max_components=2, include_nugget=False, compute_cv=False)
@@ -635,7 +758,7 @@ class TestBMAVariogram:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)
@@ -648,7 +771,7 @@ class TestBMAVariogram:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)
@@ -664,7 +787,8 @@ class TestBMAVariogram:
         """Test that get_bma_variogram raises if fit_all_candidates not called."""
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical']
+            synthetic_variogram_data['empirical'],
+            weighting='uniform',
         )
 
         with pytest.raises(ValueError, match="No model weights"):
@@ -682,7 +806,7 @@ class TestBootstrapUncertainty:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts'],
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count',
             sigma=np.full_like(synthetic_variogram_data['empirical'], 0.05)
         )
 
@@ -700,7 +824,7 @@ class TestBootstrapUncertainty:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts'],
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count',
             sigma=np.full_like(synthetic_variogram_data['empirical'], 0.05)
         )
 
@@ -723,7 +847,7 @@ class TestFittedVariogramModel:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         model = CompositeVariogramModel(['spherical'], include_nugget=False)
@@ -742,7 +866,7 @@ class TestFittedVariogramModel:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         model = CompositeVariogramModel(['spherical'], include_nugget=False)
@@ -757,7 +881,7 @@ class TestFittedVariogramModel:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts'],
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count',
             sigma=np.full_like(synthetic_variogram_data['empirical'], 0.05)
         )
 
@@ -857,7 +981,7 @@ class TestFitAllCandidates:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         selector.fit_all_candidates(max_components=1, include_nugget=False)
@@ -870,7 +994,7 @@ class TestFitAllCandidates:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=True)
@@ -884,7 +1008,7 @@ class TestFitAllCandidates:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)
@@ -904,7 +1028,7 @@ class TestIntegration:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts'],
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count',
             sigma=np.full_like(synthetic_variogram_data['empirical'], 0.05)
         )
 
@@ -934,7 +1058,7 @@ class TestIntegration:
         selector = VariogramModelSelector(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weights=synthetic_variogram_data['bin_counts']
+            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
         )
 
         selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)

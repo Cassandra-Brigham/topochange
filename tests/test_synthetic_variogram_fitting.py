@@ -350,8 +350,8 @@ def fit_scenario(
     selector = VariogramModelSelector(
         lags=lags,
         empirical_variogram=mean_vario,
-        weights=np.ones_like(lags),  # uniform weights
         sigma=sigma_vario,
+        weighting='uniform',
     )
 
     # fit all candidates

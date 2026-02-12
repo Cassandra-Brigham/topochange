@@ -127,12 +127,19 @@ class VariogramModelSelector:
         Lag distances from empirical variogram.
     empirical_variogram : ndarray
         Empirical semivariance values.
-    weights : ndarray, optional
-        Weights for fitting (e.g., number of pairs per bin).
+    pair_counts : ndarray, optional
+        Number of point pairs per lag bin.  Required for ``'cressie'``
+        and ``'pair_count'`` weighting schemes.
+    sigma : ndarray, optional
+        Per-bin standard deviations for likelihood-based AIC/BIC.
+    weighting : {'cressie', 'pair_count', 'uniform'}, default ``'cressie'``
+        WLS weighting scheme.  ``'cressie'`` computes w_i = N(h)/γ̂(h)²
+        (Cressie, 1985).  ``'pair_count'`` uses raw pair counts.
+        ``'uniform'`` sets all weights to 1.
     
     Examples
     --------
-    >>> selector = VariogramModelSelector(lags, gamma, weights=counts)
+    >>> selector = VariogramModelSelector(lags, gamma, pair_counts=counts)
     >>> selector.fit_all_candidates(max_components=2, include_nugget=True)
     >>> best = selector.select_best(criterion='aic')
     >>> print(best.composite_model.description())
@@ -147,32 +154,99 @@ class VariogramModelSelector:
     BOUNDED_MODELS = ['spherical', 'exponential', 'gaussian', 'matern']
     UNBOUNDED_MODELS = ['power', 'linear']
     
+    # supported weighting schemes for WLS fitting
+    WEIGHTING_SCHEMES = ('cressie', 'pair_count', 'uniform')
+
     def __init__(
         self,
         lags: np.ndarray,
         empirical_variogram: np.ndarray,
-        weights: Optional[np.ndarray] = None,
+        pair_counts: Optional[np.ndarray] = None,
         sigma: Optional[np.ndarray] = None,
+        weighting: str = 'cressie',
     ):
         self.lags = np.asarray(lags, dtype=float)
         self.empirical_variogram = np.asarray(empirical_variogram, dtype=float)
-        
-        # weights for WLS fitting
-        if weights is not None:
-            self.weights = np.asarray(weights, dtype=float)
+
+        if pair_counts is not None:
+            self.pair_counts = np.asarray(pair_counts, dtype=float)
         else:
-            self.weights = np.ones_like(self.lags)
-        
+            self.pair_counts = None
+
+        if weighting not in self.WEIGHTING_SCHEMES:
+            raise ValueError(
+                f"Unknown weighting scheme '{weighting}'. "
+                f"Choose from {self.WEIGHTING_SCHEMES}."
+            )
+        self.weighting = weighting
+
+        # compute WLS weights
+        self.weights = self._compute_weights(
+            self.empirical_variogram, self.pair_counts, weighting
+        )
+
         # standard deviation per bin (for likelihood-based criteria)
         if sigma is not None:
             self.sigma = np.asarray(sigma, dtype=float)
             self.sigma = np.where(self.sigma <= 0, np.finfo(float).eps, self.sigma)
         else:
             self.sigma = None
-        
+
         self.fitted_models: List[FittedVariogramModel] = []
         self.best_model: Optional[FittedVariogramModel] = None
         self.model_weights: Optional[np.ndarray] = None  # Akaike weights
+
+    @staticmethod
+    def _compute_weights(
+        empirical_variogram: np.ndarray,
+        pair_counts: Optional[np.ndarray],
+        weighting: str,
+    ) -> np.ndarray:
+        """Compute WLS weights for variogram fitting.
+
+        Parameters
+        ----------
+        empirical_variogram : ndarray
+            Empirical semivariance values.
+        pair_counts : ndarray or None
+            Number of point pairs per lag bin.
+        weighting : str
+            ``'cressie'``  – N(h) / γ̂(h)²  (Cressie, 1985).
+            ``'pair_count'`` – N(h) only.
+            ``'uniform'``  – all weights equal to 1.
+
+        Returns
+        -------
+        weights : ndarray
+
+        References
+        ----------
+        Cressie, N. (1985). Fitting variogram models by weighted least
+        squares. J. Int. Assoc. Math. Geol., 17(5), 563–586.
+        """
+        n = len(empirical_variogram)
+
+        if weighting == 'uniform' or pair_counts is None:
+            if weighting == 'cressie' and pair_counts is None:
+                import warnings as _w
+                _w.warn(
+                    "Cressie weighting requested but no pair_counts supplied; "
+                    "falling back to uniform weights.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+            return np.ones(n, dtype=float)
+
+        counts = np.asarray(pair_counts, dtype=float)
+
+        if weighting == 'pair_count':
+            return counts
+
+        # --- Cressie weighting:  w_i = N(h_i) / γ̂(h_i)² ---
+        gamma_sq = np.square(empirical_variogram)
+        # guard against division by zero at lags where γ̂ ≈ 0
+        gamma_sq = np.where(gamma_sq < np.finfo(float).eps, np.finfo(float).eps, gamma_sq)
+        return counts / gamma_sq
         
         self._registry = MODEL_REGISTRY
     
@@ -2129,7 +2203,7 @@ class VariogramAnalysis:
         selector = VariogramModelSelector(
             lags=self.lags,
             empirical_variogram=self.mean_variogram,
-            weights=self.mean_count,
+            pair_counts=self.mean_count,
             sigma=self.sigma_variogram,
         )
 
