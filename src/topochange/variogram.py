@@ -129,14 +129,24 @@ class VariogramModelSelector:
         Empirical semivariance values.
     pair_counts : ndarray, optional
         Number of point pairs per lag bin.  Required for ``'cressie'``
-        and ``'pair_count'`` weighting schemes.
+        and ``'pair_count'`` weighting schemes, and for ``min_pairs``
+        filtering.
     sigma : ndarray, optional
         Per-bin standard deviations for likelihood-based AIC/BIC.
     weighting : {'cressie', 'pair_count', 'uniform'}, default ``'cressie'``
         WLS weighting scheme.  ``'cressie'`` computes w_i = N(h)/γ̂(h)²
         (Cressie, 1985).  ``'pair_count'`` uses raw pair counts.
         ``'uniform'`` sets all weights to 1.
-    
+    min_pairs : int or None, default 30
+        Minimum number of point pairs required for a lag bin to be
+        included in model fitting.  Bins with fewer pairs receive
+        zero weight and are effectively excluded from the WLS fit.
+        Set to ``None`` or ``0`` to disable filtering.  Requires
+        ``pair_counts`` to be supplied; ignored otherwise.
+
+        The literature recommends thresholds of 30–50
+        (Cressie, 1985; Oliver & Webster, 2014).
+
     Examples
     --------
     >>> selector = VariogramModelSelector(lags, gamma, pair_counts=counts)
@@ -146,6 +156,12 @@ class VariogramModelSelector:
     
     References
     ----------
+    Cressie, N. (1985). Fitting variogram models by weighted least squares.
+    J. Int. Assoc. Math. Geol., 17(5), 563–586.
+
+    Oliver, M.A. & Webster, R. (2014). A tutorial guide to geostatistics.
+    Catena, 113, 56–69.
+
     Webster, R. & McBratney, A.B. (1989). On the Akaike Information Criterion
     for choosing models for variograms of soil properties. Eur. J. Soil Sci.
     """
@@ -164,6 +180,7 @@ class VariogramModelSelector:
         pair_counts: Optional[np.ndarray] = None,
         sigma: Optional[np.ndarray] = None,
         weighting: str = 'cressie',
+        min_pairs: Optional[int] = 30,
     ):
         self.lags = np.asarray(lags, dtype=float)
         self.empirical_variogram = np.asarray(empirical_variogram, dtype=float)
@@ -179,11 +196,31 @@ class VariogramModelSelector:
                 f"Choose from {self.WEIGHTING_SCHEMES}."
             )
         self.weighting = weighting
+        self.min_pairs = min_pairs if min_pairs else 0
 
         # compute WLS weights
         self.weights = self._compute_weights(
             self.empirical_variogram, self.pair_counts, weighting
         )
+
+        # apply minimum pair-count filter: zero-weight bins with too few pairs
+        self._n_filtered = 0
+        if self.min_pairs > 0 and self.pair_counts is not None:
+            low_count_mask = self.pair_counts < self.min_pairs
+            self._n_filtered = int(np.sum(low_count_mask))
+            if self._n_filtered > 0:
+                self.weights[low_count_mask] = 0.0
+                n_remaining = len(self.lags) - self._n_filtered
+                if n_remaining < 4:
+                    import warnings as _w
+                    _w.warn(
+                        f"min_pairs={self.min_pairs} filters {self._n_filtered} "
+                        f"of {len(self.lags)} lag bins, leaving only "
+                        f"{n_remaining}. Model fitting may fail or be "
+                        f"unreliable. Consider lowering min_pairs.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
 
         # standard deviation per bin (for likelihood-based criteria)
         if sigma is not None:
@@ -2161,6 +2198,7 @@ class VariogramAnalysis:
         cv_folds: int = 5,
         n_bootstrap: int = 500,
         seed: Optional[int] = None,
+        min_pairs: Optional[int] = 30,
     ) -> 'FittedVariogramModel':
         """
         Fit multiple variogram model types and automatically select the best.
@@ -2175,6 +2213,9 @@ class VariogramAnalysis:
             Whether to include nugget effect in all candidate models.
         criterion : {'aic', 'bic', 'cv'}
             Selection criterion.
+        min_pairs : int or None, default 30
+            Minimum pair count per lag bin.  Bins with fewer pairs are
+            excluded from fitting.  Set to ``None`` to disable.
 
         Returns
         -------
@@ -2205,6 +2246,7 @@ class VariogramAnalysis:
             empirical_variogram=self.mean_variogram,
             pair_counts=self.mean_count,
             sigma=self.sigma_variogram,
+            min_pairs=min_pairs,
         )
 
         # override model lists with user selection

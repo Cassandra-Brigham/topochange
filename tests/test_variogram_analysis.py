@@ -391,6 +391,172 @@ class TestWeightingSchemes:
         assert_allclose(selector.weights, expected, rtol=1e-10)
 
 
+# test Suite 2c: Minimum Pair-Count Filtering
+
+
+class TestMinPairsFiltering:
+    """Test VariogramModelSelector minimum pair-count filtering.
+
+    Literature basis: Cressie (1985) recommends N(h) > 50; Oliver &
+    Webster (2014) suggest N(h) > 30.  Bins with too few pairs are
+    unreliable and should be excluded from model fitting.
+    """
+
+    def test_bins_below_threshold_get_zero_weight(self):
+        """Bins with pair_counts < min_pairs should have weight = 0."""
+        lags = np.array([10, 20, 30, 40, 50])
+        empirical = np.array([0.3, 0.6, 0.8, 0.9, 1.0])
+        counts = np.array([100, 80, 25, 15, 5], dtype=float)
+
+        selector = VariogramModelSelector(
+            lags, empirical,
+            pair_counts=counts,
+            weighting='pair_count',
+            min_pairs=30,
+        )
+
+        # first two bins (100, 80) should keep their pair-count weights
+        assert selector.weights[0] == 100.0
+        assert selector.weights[1] == 80.0
+        # last three bins (25, 15, 5) should be zeroed
+        assert selector.weights[2] == 0.0
+        assert selector.weights[3] == 0.0
+        assert selector.weights[4] == 0.0
+
+    def test_n_filtered_count(self):
+        """_n_filtered should report how many bins were excluded."""
+        lags = np.array([10, 20, 30, 40, 50])
+        empirical = np.array([0.3, 0.6, 0.8, 0.9, 1.0])
+        counts = np.array([100, 80, 25, 15, 5], dtype=float)
+
+        selector = VariogramModelSelector(
+            lags, empirical,
+            pair_counts=counts,
+            weighting='uniform',
+            min_pairs=30,
+        )
+
+        assert selector._n_filtered == 3
+
+    def test_no_filtering_when_all_above_threshold(self, synthetic_variogram_data):
+        """No bins should be filtered when all counts exceed min_pairs."""
+        selector = VariogramModelSelector(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            pair_counts=synthetic_variogram_data['bin_counts'].astype(float),
+            weighting='pair_count',
+            min_pairs=30,
+        )
+
+        # fixture bin_counts range from 100 to 50, all > 30
+        assert selector._n_filtered == 0
+        assert np.all(selector.weights > 0)
+
+    def test_min_pairs_disabled_with_none(self, synthetic_variogram_data):
+        """Setting min_pairs=None should disable filtering entirely."""
+        lags = np.array([10, 20, 30])
+        empirical = np.array([0.3, 0.6, 0.8])
+        counts = np.array([5, 3, 1], dtype=float)
+
+        selector = VariogramModelSelector(
+            lags, empirical,
+            pair_counts=counts,
+            weighting='pair_count',
+            min_pairs=None,
+        )
+
+        assert selector._n_filtered == 0
+        assert_allclose(selector.weights, counts)
+
+    def test_min_pairs_disabled_with_zero(self):
+        """Setting min_pairs=0 should disable filtering entirely."""
+        lags = np.array([10, 20, 30])
+        empirical = np.array([0.3, 0.6, 0.8])
+        counts = np.array([5, 3, 1], dtype=float)
+
+        selector = VariogramModelSelector(
+            lags, empirical,
+            pair_counts=counts,
+            weighting='pair_count',
+            min_pairs=0,
+        )
+
+        assert selector._n_filtered == 0
+        assert_allclose(selector.weights, counts)
+
+    def test_min_pairs_ignored_without_pair_counts(self):
+        """min_pairs should be silently skipped when pair_counts is None."""
+        lags = np.array([10, 20, 30])
+        empirical = np.array([0.3, 0.6, 0.8])
+
+        selector = VariogramModelSelector(
+            lags, empirical,
+            weighting='uniform',
+            min_pairs=50,
+        )
+
+        # no filtering, all weights = 1
+        assert selector._n_filtered == 0
+        assert_allclose(selector.weights, np.ones(3))
+
+    def test_filtering_works_with_cressie_weights(self):
+        """min_pairs should zero Cressie weights for low-count bins."""
+        lags = np.array([10, 20, 30, 40, 50])
+        empirical = np.array([0.3, 0.6, 0.8, 0.9, 1.0])
+        counts = np.array([200, 150, 20, 10, 5], dtype=float)
+
+        selector = VariogramModelSelector(
+            lags, empirical,
+            pair_counts=counts,
+            weighting='cressie',
+            min_pairs=30,
+        )
+
+        # first two: Cressie weight = N(h) / γ̂(h)²
+        expected_0 = 200.0 / (0.3**2)
+        expected_1 = 150.0 / (0.6**2)
+        assert_allclose(selector.weights[0], expected_0, rtol=1e-10)
+        assert_allclose(selector.weights[1], expected_1, rtol=1e-10)
+        # last three: should be zeroed despite having valid Cressie weights
+        assert selector.weights[2] == 0.0
+        assert selector.weights[3] == 0.0
+        assert selector.weights[4] == 0.0
+
+    def test_few_remaining_bins_warns(self):
+        """Should warn when min_pairs leaves fewer than 4 usable bins."""
+        lags = np.array([10, 20, 30, 40, 50])
+        empirical = np.array([0.3, 0.6, 0.8, 0.9, 1.0])
+        # only 2 bins above threshold
+        counts = np.array([100, 80, 5, 3, 1], dtype=float)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            selector = VariogramModelSelector(
+                lags, empirical,
+                pair_counts=counts,
+                weighting='pair_count',
+                min_pairs=30,
+            )
+            # should warn about too few remaining bins
+            min_pairs_warnings = [
+                x for x in w
+                if "min_pairs" in str(x.message) and "filters" in str(x.message)
+            ]
+            assert len(min_pairs_warnings) >= 1
+            assert "2" in str(min_pairs_warnings[0].message)  # 2 remaining
+
+    def test_default_min_pairs_is_30(self, synthetic_variogram_data):
+        """Default min_pairs should be 30 (literature: Cressie 1985)."""
+        selector = VariogramModelSelector(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            pair_counts=synthetic_variogram_data['bin_counts'].astype(float),
+            weighting='pair_count',
+        )
+
+        assert selector.min_pairs == 30
+
+
 # test Suite 3: Candidate Generation
 
 
