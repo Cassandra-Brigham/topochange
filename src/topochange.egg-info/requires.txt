@@ -2,6 +2,7 @@ numpy
 pandas
 scipy
 matplotlib
+colormaps
 rasterio
 pyproj
 geopandas
@@ -15,7 +16,13 @@ pyyaml
 small_gicp
 
 [all]
-topochange[alignment,interactive,pointcloud]
+topochange[alignment,converters,data_access,interactive,pointcloud]
+
+[converters]
+xarray
+
+[data_access]
+boto3
 
 [dev]
 pytest
@@ -29,3 +36,4 @@ ipywidgets
 
 [pointcloud]
 pdal
+laspy

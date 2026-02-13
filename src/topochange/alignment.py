@@ -956,6 +956,8 @@ class LandscapeAligner:
         classifications = None
         if self.config.point_filter == "ground":
             classifications = [2]  # Ground class only
+        elif isinstance(self.config.point_filter, (list, tuple)):
+            classifications = list(self.config.point_filter)
         elif self.config.point_filter == "custom" and self.config.classification_filter is not None:
             if self.config.classification_filter == "ground":
                 classifications = [2]

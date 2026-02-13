@@ -2730,6 +2730,7 @@ class PointCloudPair:
         skip_epoch: bool = False,
         verbose: bool = True,
         alignment_kwargs: Optional[Dict[str, Any]] = None,
+        alignment_config: Optional[RegistrationConfig] = None,
     ) -> None:
         """
         Auto-prepare point clouds for differencing based on dem1 tier.
@@ -2763,6 +2764,12 @@ class PointCloudPair:
             Additional keyword arguments for align_point_clouds(). Useful for
             environment-specific settings (e.g., Colab with limited memory).
             Example: {"target_points": 500_000, "max_correspondence_distance": 1.0}
+            Ignored if alignment_config is provided.
+        alignment_config : RegistrationConfig, optional
+            A RegistrationConfig object specifying alignment parameters. When
+            provided, this forces ICP alignment regardless of the dem1 tier,
+            and overrides alignment_kwargs. The config's fields are extracted
+            as keyword arguments for align_point_clouds().
         """
         import sys
 
@@ -2877,8 +2884,9 @@ class PointCloudPair:
                     verbose=verbose,
                 )
 
-        # step 3: Align (only for aligned tier)
-        if is_aligned_tier and self._alignment_result is None:
+        # step 3: Align (for aligned tier, or when alignment_config is explicitly provided)
+        should_align = (is_aligned_tier or alignment_config is not None) and self._alignment_result is None
+        if should_align:
             aligned_path = predicted_paths['aligned']
 
             if not overwrite and aligned_path.exists():
@@ -2901,20 +2909,48 @@ class PointCloudPair:
             else:
                 if verbose:
                     print(f"\n--- Auto-preparing: ICP alignment ---", file=sys.stderr)
-                # merge default alignment settings with any user-provided kwargs
-                # defaults: GICP method, ground points, no downsampling, full area
-                align_params = {
-                    "method": "gicp",
-                    "point_filter": "ground",
-                    "auto_downsample": False,
-                    "alignment_box_size": None,  # Use full overlap area
-                    "use_cropped_clouds": True,
-                    "output_path": str(aligned_path),
-                    "overwrite": overwrite,
-                    "verbose": verbose,
-                }
-                if alignment_kwargs:
-                    align_params.update(alignment_kwargs)
+
+                if alignment_config is not None:
+                    # extract RegistrationConfig fields as align_point_clouds kwargs
+                    align_params = {
+                        "method": alignment_config.method,
+                        "max_correspondence_distance": alignment_config.max_correspondence_distance or 1.0,
+                        "max_iterations": alignment_config.max_iterations,
+                        "transformation_epsilon": alignment_config.transformation_epsilon,
+                        "num_threads": alignment_config.num_threads,
+                        "point_filter": alignment_config.point_filter,
+                        "auto_downsample": alignment_config.auto_downsample,
+                        "target_points": alignment_config.target_points,
+                        "use_cropped_clouds": True,
+                        "output_path": str(aligned_path),
+                        "overwrite": overwrite,
+                        "verbose": verbose,
+                    }
+                    if alignment_config.voxel_size is not None:
+                        align_params["downsample_resolution"] = alignment_config.voxel_size
+                    if alignment_config.initial_voxel_size is not None:
+                        align_params["initial_voxel_size"] = alignment_config.initial_voxel_size
+                    if alignment_config.max_points is not None:
+                        align_params["max_points"] = alignment_config.max_points
+                    if alignment_config.crop_dimensions is not None:
+                        align_params["alignment_box_size"] = alignment_config.crop_dimensions
+                    elif alignment_config.alignment_box_size is not None:
+                        align_params["alignment_box_size"] = alignment_config.alignment_box_size
+                else:
+                    # merge default alignment settings with any user-provided kwargs
+                    # defaults: GICP method, ground points, no downsampling, full area
+                    align_params = {
+                        "method": "gicp",
+                        "point_filter": "ground",
+                        "auto_downsample": False,
+                        "alignment_box_size": None,  # Use full overlap area
+                        "use_cropped_clouds": True,
+                        "output_path": str(aligned_path),
+                        "overwrite": overwrite,
+                        "verbose": verbose,
+                    }
+                    if alignment_kwargs:
+                        align_params.update(alignment_kwargs)
                 self.align_point_clouds(**align_params)
 
     def _resolve_pc1_source(self, dem1_option: str) -> Tuple[PointCloud, str]:
@@ -3044,6 +3080,7 @@ class PointCloudPair:
         auto_prepare: bool = True,
         interior_buffer: float = 10.0,
         alignment_kwargs: Optional[Dict[str, Any]] = None,
+        alignment_config: Optional[RegistrationConfig] = None,
         **dem_kwargs,
     ) -> Dict[str, Any]:
         """
@@ -3112,6 +3149,24 @@ class PointCloudPair:
             aligned tiers with auto_prepare=True. Useful for environment-specific
             settings (e.g., Colab with limited memory). Example:
             {"target_points": 500_000, "max_correspondence_distance": 1.0}
+            Ignored if alignment_config is provided.
+        alignment_config : RegistrationConfig, optional
+            A RegistrationConfig object specifying alignment parameters. When
+            provided, this triggers ICP alignment regardless of the dem1 tier
+            and overrides alignment_kwargs. This allows full control over
+            registration settings (method, point_filter, crop_dimensions, etc.).
+            Example::
+
+                config = RegistrationConfig(
+                    point_filter=[6],
+                    max_correspondence_distance=1.0,
+                    crop_dimensions=(500, 500),
+                    method="vgicp",
+                )
+                result = pc_pair.compute_2d_difference(
+                    dem1="dtm", dem2="dtm",
+                    alignment_config=config,
+                )
         **dem_kwargs
             Additional arguments for DEM creation
 
@@ -3166,6 +3221,20 @@ class PointCloudPair:
         ...     },
         ... )
 
+        # scenario 4: Custom alignment with RegistrationConfig (forces alignment)
+        >>> from topochange.alignment import RegistrationConfig
+        >>> config = RegistrationConfig(
+        ...     point_filter=[6],  # Building points only
+        ...     max_correspondence_distance=1.0,
+        ...     crop_dimensions=(500, 500),
+        ...     method="vgicp",
+        ... )
+        >>> result = pc_pair.compute_2d_difference(
+        ...     dem1="dtm",
+        ...     dem2="dtm",
+        ...     alignment_config=config,
+        ... )
+
         # legacy usage (deprecated but still supported)
         >>> result = pc_pair.compute_2d_difference(
         ...     dem_type="dtm",
@@ -3189,6 +3258,7 @@ class PointCloudPair:
                 skip_epoch=skip_epoch,
                 verbose=verbose,
                 alignment_kwargs=alignment_kwargs,
+                alignment_config=alignment_config,
             )
 
         # resolve dem1 and dem2 sources
