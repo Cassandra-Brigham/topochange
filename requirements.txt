@@ -3,7 +3,7 @@ numpy
 pandas
 scipy
 matplotlib
-colormaps  # Note: not on conda-forge, installed via pip in Colab
+colormaps  # Note: not on conda-forge, installed via pip
 
 # Geospatial/GIS Libraries
 # Note: In Colab, these are installed via pip after apt-get installs system libraries.
@@ -20,9 +20,23 @@ numba
 # Web and Data Access
 requests
 
-# Interactive Jupyter Widgets
+# Interactive Jupyter Widgets (optional: pip install topochange[interactive])
 ipyleaflet
 ipywidgets
 
 # Configuration
 pyyaml
+
+# --- Optional dependencies ---
+# Point cloud I/O (pip install topochange[pointcloud]):
+#   pdal, laspy
+# Point cloud alignment (pip install topochange[alignment]):
+#   small_gicp
+# Data download / OpenTopography (pip install topochange[data_access]):
+#   boto3, plus: conda install -c conda-forge gdal
+# Velocity model converters (pip install topochange[converters]):
+#   xarray
+# Raster terrain analysis (hillshade, slope, etc.):
+#   GDAL (osgeo) — install via: conda install -c conda-forge gdal
+# Hole-filling via inpainting:
+#   opencv-python (cv2) — install via: pip install opencv-python

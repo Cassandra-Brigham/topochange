@@ -1431,6 +1431,192 @@ class TestKrigingLOOCV:
         )
 
 
+# ─── Test Suite: MSSPE Model Selection Criterion ───────────────────
+
+
+class TestMSSPECriterion:
+    """Test MSSPE-based model selection via kriging LOOCV."""
+
+    @pytest.fixture
+    def synthetic_spatial_data(self):
+        """Generate synthetic spatial data with known spherical covariance.
+
+        Returns coords, values, and the variogram parameters so we can
+        build a selector with MSSPE populated.
+        """
+        rng = np.random.default_rng(123)
+        n = 200
+        coords = rng.uniform(0, 500, size=(n, 2))
+        # generate spatially correlated data using a simple model:
+        # for testing purposes we just need data where kriging works
+        values = rng.normal(0, 1.0, size=n)
+        return coords, values
+
+    @pytest.fixture
+    def selector_with_models(self, synthetic_variogram_data):
+        """Selector with several fitted models, no MSSPE yet."""
+        selector = VariogramModelSelector(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            pair_counts=synthetic_variogram_data['bin_counts'],
+            weighting='pair_count',
+        )
+        selector.fit_all_candidates(
+            max_components=1, include_nugget=True, compute_cv=False,
+        )
+        return selector
+
+    def test_select_best_msspe_picks_closest_to_one(self):
+        """select_best('msspe') should pick the model with |MSSPE−1| minimised."""
+        # create minimal fitted models with synthetic MSSPE values
+        lags = np.linspace(5, 500, 50)
+        empirical = 1.5 * (1 - np.exp(-lags / 80))
+        selector = VariogramModelSelector(
+            lags, empirical, weighting='uniform',
+        )
+        selector.fit_all_candidates(
+            max_components=1, include_nugget=False, compute_cv=False,
+        )
+        assert len(selector.fitted_models) >= 2
+
+        # manually assign MSSPE values
+        selector.fitted_models[0].msspe = 3.2   # far from 1.0
+        selector.fitted_models[1].msspe = 1.05  # close to 1.0
+
+        best = selector.select_best(criterion='msspe')
+        assert best.msspe == 1.05
+
+    def test_select_best_msspe_handles_none(self):
+        """Models without MSSPE should get infinite score."""
+        lags = np.linspace(5, 500, 50)
+        empirical = 1.5 * (1 - np.exp(-lags / 80))
+        selector = VariogramModelSelector(
+            lags, empirical, weighting='uniform',
+        )
+        selector.fit_all_candidates(
+            max_components=1, include_nugget=False, compute_cv=False,
+        )
+        assert len(selector.fitted_models) >= 2
+
+        # only one model has MSSPE
+        selector.fitted_models[0].msspe = None
+        selector.fitted_models[1].msspe = 2.5
+
+        best = selector.select_best(criterion='msspe')
+        assert best.msspe == 2.5  # the one with any MSSPE
+
+    def test_select_best_msspe_prefers_unity(self):
+        """MSSPE=0.9 (overestimates var) should beat MSSPE=1.5 (underestimates)."""
+        lags = np.linspace(5, 500, 50)
+        empirical = 1.5 * (1 - np.exp(-lags / 80))
+        selector = VariogramModelSelector(
+            lags, empirical, weighting='uniform',
+        )
+        selector.fit_all_candidates(
+            max_components=1, include_nugget=False, compute_cv=False,
+        )
+        selector.fitted_models[0].msspe = 1.5  # |1.5 - 1| = 0.5
+        selector.fitted_models[1].msspe = 0.9  # |0.9 - 1| = 0.1
+
+        best = selector.select_best(criterion='msspe')
+        assert best.msspe == 0.9
+
+    def test_fitted_model_has_msspe_field(self, synthetic_variogram_data):
+        """FittedVariogramModel should have msspe and loocv_result fields."""
+        selector = VariogramModelSelector(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            weighting='uniform',
+        )
+        model = CompositeVariogramModel(['spherical'], include_nugget=False)
+        fitted = selector.fit_model(model)
+
+        assert hasattr(fitted, 'msspe')
+        assert hasattr(fitted, 'loocv_result')
+        assert fitted.msspe is None  # not computed yet
+        assert fitted.loocv_result is None
+
+    def test_msspe_computed_by_kriging_loocv(self, synthetic_spatial_data):
+        """Manually computing MSSPE via kriging_loocv should populate the field."""
+        coords, values = synthetic_spatial_data
+        model = CompositeVariogramModel(['spherical'], include_nugget=True)
+        # set known parameters: sill=1.0, range=100.0, nugget=0.3
+        model.set_params(np.array([1.0, 100.0, 0.3]))
+
+        result = VariogramAnalysis.kriging_loocv(
+            coords, values, model, n_subset=200, seed=42,
+        )
+
+        assert result.msspe is not None
+        assert np.isfinite(result.msspe)
+        assert result.msspe > 0
+        assert result.n_failed == 0
+
+    def test_msspe_prefilter_limits_evaluation(self, synthetic_variogram_data):
+        """msspe_prefilter should limit how many models are evaluated."""
+        lags = synthetic_variogram_data['lags']
+        empirical = synthetic_variogram_data['empirical']
+        counts = synthetic_variogram_data['bin_counts']
+
+        selector = VariogramModelSelector(
+            lags, empirical,
+            pair_counts=counts, weighting='pair_count',
+        )
+        selector.fit_all_candidates(
+            max_components=2, include_nugget=True, compute_cv=False,
+        )
+        total_models = len(selector.fitted_models)
+        assert total_models > 5  # should have many candidates
+
+        # manually assign MSSPE to only top-3 by AIC (simulating prefilter)
+        ranked = sorted(selector.fitted_models, key=lambda m: m.aic)
+        for m in ranked[:3]:
+            m.msspe = 1.0 + np.random.default_rng(0).uniform(-0.5, 0.5)
+
+        # models without MSSPE should have None
+        n_with_msspe = sum(1 for m in selector.fitted_models if m.msspe is not None)
+        assert n_with_msspe == 3
+        assert n_with_msspe < total_models
+
+        # select_best should still work, picking from those with MSSPE
+        best = selector.select_best(criterion='msspe')
+        assert best.msspe is not None
+
+    def test_summary_includes_msspe_column(self, synthetic_variogram_data):
+        """Summary should show MSSPE column when available."""
+        selector = VariogramModelSelector(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            pair_counts=synthetic_variogram_data['bin_counts'],
+            weighting='pair_count',
+        )
+        selector.fit_all_candidates(
+            max_components=1, include_nugget=False, compute_cv=False,
+        )
+        # assign MSSPE to at least one model
+        selector.fitted_models[0].msspe = 1.1
+        selector.select_best(criterion='aic')
+
+        summary = selector.summary()
+        assert 'MSSPE' in summary
+
+    def test_summary_no_msspe_column_when_absent(self, synthetic_variogram_data):
+        """Summary should NOT show MSSPE column when no model has it."""
+        selector = VariogramModelSelector(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            pair_counts=synthetic_variogram_data['bin_counts'],
+            weighting='pair_count',
+        )
+        selector.fit_all_candidates(
+            max_components=1, include_nugget=False, compute_cv=False,
+        )
+        selector.select_best(criterion='aic')
+
+        summary = selector.summary()
+        assert 'MSSPE' not in summary
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
 

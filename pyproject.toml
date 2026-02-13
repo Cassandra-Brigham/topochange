@@ -40,6 +40,7 @@ dependencies = [
     "pandas",
     "scipy",
     "matplotlib",
+    "colormaps",
     "rasterio",
     "pyproj",
     "geopandas",
@@ -57,9 +58,19 @@ interactive = [
 ]
 pointcloud = [
     "pdal",
+    "laspy",
 ]
 alignment = [
     "small_gicp",
+]
+data_access = [
+    "boto3",
+    # GDAL (osgeo) is also required but must be installed via conda or
+    # system packages — pip install GDAL is fragile and needs matching
+    # system libraries. Install with: conda install -c conda-forge gdal
+]
+converters = [
+    "xarray",
 ]
 dev = [
     "pytest",
@@ -68,7 +79,7 @@ dev = [
     "ruff",
 ]
 all = [
-    "topochange[interactive,pointcloud,alignment]",
+    "topochange[interactive,pointcloud,alignment,data_access,converters]",
 ]
 
 [project.urls]

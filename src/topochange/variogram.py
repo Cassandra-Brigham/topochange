@@ -49,6 +49,13 @@ class FittedVariogramModel:
         Bootstrap parameter samples (n_boot × n_params).
     warnings : list of str
         Diagnostic warnings (e.g. range exceeds half max lag).
+    msspe : float or None
+        Mean Standardized Squared Prediction Error from kriging
+        leave-one-out cross-validation.  Target value is 1.0;
+        values >> 1 indicate the model underestimates spatial
+        uncertainty; values << 1 indicate overestimation.
+    loocv_result : KrigingLOOCVResult or None
+        Full kriging LOOCV diagnostics (bias, RMSE, etc.).
     """
     composite_model: CompositeVariogramModel
     params: np.ndarray
@@ -59,6 +66,8 @@ class FittedVariogramModel:
     cv_rmse: Optional[float] = None
     param_samples: Optional[np.ndarray] = None
     warnings: List[str] = field(default_factory=list)
+    msspe: Optional[float] = None
+    loocv_result: Optional['KrigingLOOCVResult'] = None
 
     def predict(self, h: np.ndarray) -> np.ndarray:
         """Evaluate fitted model at lag distances."""
@@ -764,27 +773,43 @@ class VariogramModelSelector:
     
     def select_best(self, criterion: str = 'aic') -> FittedVariogramModel:
         """Select best model by criterion.
-        
+
         Parameters
         ----------
         criterion : str
-            Selection criterion: 'aic', 'bic', or 'cv'.
-        
+            Selection criterion: ``'aic'``, ``'bic'``, ``'cv'``, or
+            ``'msspe'``.  For ``'msspe'``, the model whose kriging
+            LOOCV MSSPE is closest to 1.0 is selected (minimise
+            ``|MSSPE − 1|``).  Requires that MSSPE has been computed
+            for each candidate (see ``fit_best_model_auto`` with
+            ``criterion='msspe'`` or ``compute_msspe=True``).
+
         Returns
         -------
         best : FittedVariogramModel
             Best model according to criterion.
+
+        References
+        ----------
+        Lark, R.M. (2000).  A comparison of some robust estimators of
+        the variogram for use in soil survey.  *Eur. J. Soil Sci.*,
+        51, 137–157.  Uses MSSPE ≈ 1.0 as acceptance criterion.
         """
         if not self.fitted_models:
             raise ValueError("No fitted models. Call fit_all_candidates() first.")
-        
+
         if criterion == 'aic':
             scores = [m.aic for m in self.fitted_models]
         elif criterion == 'bic':
             scores = [m.bic for m in self.fitted_models]
         elif criterion == 'cv':
-            scores = [m.cv_rmse if m.cv_rmse is not None else np.inf 
+            scores = [m.cv_rmse if m.cv_rmse is not None else np.inf
                      for m in self.fitted_models]
+        elif criterion == 'msspe':
+            scores = [
+                abs(m.msspe - 1.0) if m.msspe is not None else np.inf
+                for m in self.fitted_models
+            ]
         else:
             raise ValueError(f"Unknown criterion: {criterion}")
         
@@ -937,15 +962,26 @@ class VariogramModelSelector:
         if not self.fitted_models:
             return "No models fitted yet."
 
-        lines = ["=" * 70]
+        has_msspe = any(m.msspe is not None for m in self.fitted_models)
+
+        lines = ["=" * 80]
         lines.append("VARIOGRAM MODEL SELECTION SUMMARY")
-        lines.append("=" * 70)
-        lines.append(f"{'Model':<30} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10} {'Weight':>8}")
-        lines.append("-" * 70)
+        lines.append("=" * 80)
+        header = f"{'Model':<30} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10}"
+        if has_msspe:
+            header += f" {'MSSPE':>8}"
+        header += f" {'Weight':>8}"
+        lines.append(header)
+        lines.append("-" * 80)
 
         # sort by AIC
+        weights = (
+            self.model_weights
+            if self.model_weights is not None
+            else [0] * len(self.fitted_models)
+        )
         sorted_models = sorted(
-            zip(self.fitted_models, self.model_weights or [0] * len(self.fitted_models)),
+            zip(self.fitted_models, weights),
             key=lambda x: x[0].aic
         )
 
@@ -955,10 +991,15 @@ class VariogramModelSelector:
                 name += "+nugget"
 
             cv_str = f"{model.cv_rmse:.4f}" if model.cv_rmse else "N/A"
-            lines.append(
+            row = (
                 f"{name:<30} {model.aic:>10.2f} {model.bic:>10.2f} "
-                f"{cv_str:>10} {weight:>8.3f}"
+                f"{cv_str:>10}"
             )
+            if has_msspe:
+                msspe_str = f"{model.msspe:.3f}" if model.msspe is not None else "N/A"
+                row += f" {msspe_str:>8}"
+            row += f" {weight:>8.3f}"
+            lines.append(row)
 
         lines.append("=" * 70)
 
@@ -2268,6 +2309,9 @@ class VariogramAnalysis:
         n_bootstrap: int = 500,
         seed: Optional[int] = None,
         min_pairs: Optional[int] = 30,
+        compute_msspe: bool = False,
+        msspe_n_subset: int = 500,
+        msspe_prefilter: int = 0,
     ) -> 'FittedVariogramModel':
         """
         Fit multiple variogram model types and automatically select the best.
@@ -2275,16 +2319,41 @@ class VariogramAnalysis:
         Parameters
         ----------
         model_types : list of str, optional
-            Model types to consider. Default: ['spherical', 'exponential', 'gaussian', 'matern']
+            Model types to consider. Default: ['spherical', 'exponential',
+            'gaussian', 'matern'].
         max_components : int
             Maximum number of nested components (default: 2, max: 3).
         include_nugget : bool
             Whether to include nugget effect in all candidate models.
-        criterion : {'aic', 'bic', 'cv'}
-            Selection criterion.
+        criterion : {'aic', 'bic', 'cv', 'msspe'}
+            Selection criterion.  ``'msspe'`` selects the model whose
+            kriging LOOCV MSSPE is closest to 1.0 (|MSSPE − 1|
+            minimised).  Requires spatial data from ``sample_raster()``.
+        compute_cv : bool
+            Whether to compute variogram k-fold CV scores.
+        cv_folds : int
+            Number of CV folds.
+        n_bootstrap : int
+            Number of bootstrap resamples for parameter uncertainty.
+        seed : int, optional
+            Random seed.
         min_pairs : int or None, default 30
             Minimum pair count per lag bin.  Bins with fewer pairs are
             excluded from fitting.  Set to ``None`` to disable.
+        compute_msspe : bool
+            Whether to compute kriging LOOCV MSSPE for each candidate
+            model.  Automatically set to True when ``criterion='msspe'``.
+        msspe_n_subset : int
+            Maximum number of points for kriging LOOCV (default 500).
+            Runtime is O(n²) per model, so ~1 s per model at n=500.
+        msspe_prefilter : int
+            If > 0, compute MSSPE only for the top-N models ranked by
+            AIC, plus the AIC-best model from each complexity level
+            (number of components).  The stratified inclusion ensures
+            that simpler model families are always represented, even
+            when complex models dominate the AIC ranking.  Saves time
+            when many candidates are fitted.  If 0 (default), all
+            candidates are evaluated.
 
         Returns
         -------
@@ -2295,10 +2364,28 @@ class VariogramAnalysis:
         -----
         This method is model-agnostic for uncertainty propagation because
         Monte Carlo integration works for ANY valid variogram function
-        (Krige's Relation - Chilès & Delfiner, 2012, Chapter 4).
+        (Krige's Relation — Chilès & Delfiner, 2012, Chapter 4).
+
+        The ``'msspe'`` criterion evaluates spatial prediction calibration
+        directly, rather than variogram curve-fitting quality.  MSSPE ≈ 1.0
+        indicates that the kriging variance correctly matches actual
+        prediction errors (Lark, 2000).  This is preferred when the goal
+        is uncertainty propagation, because AIC/BIC can favour complex
+        models that overfit the empirical variogram while producing
+        miscalibrated kriging variances.
+
+        References
+        ----------
+        Lark, R.M. (2000).  A comparison of some robust estimators of
+        the variogram for use in soil survey.  *Eur. J. Soil Sci.*, 51,
+        137–157.
         """
         if self.mean_variogram is None:
             raise RuntimeError("No variogram data. Call calculate_mean_variogram_numba() first.")
+
+        # implicitly enable MSSPE computation when criterion requires it
+        if criterion == 'msspe':
+            compute_msspe = True
 
         if model_types is None:
             model_types = ['spherical', 'exponential', 'gaussian', 'matern']
@@ -2308,6 +2395,15 @@ class VariogramAnalysis:
         for mt in model_types:
             if mt not in available:
                 raise ValueError(f"Unknown model type '{mt}'. Available: {available}")
+
+        # validate spatial data availability for MSSPE
+        if compute_msspe:
+            rdh = self.raster_data_handler
+            if rdh.coords is None or rdh.samples is None:
+                raise RuntimeError(
+                    "Kriging LOOCV MSSPE requires spatial data. "
+                    "Call sample_raster() or calculate_mean_variogram_numba() first."
+                )
 
         # create selector
         selector = VariogramModelSelector(
@@ -2334,6 +2430,56 @@ class VariogramAnalysis:
 
         if not selector.fitted_models:
             raise RuntimeError("No models successfully fitted. Check input data.")
+
+        # ── compute kriging LOOCV MSSPE for candidate models ──
+        if compute_msspe:
+            rdh = self.raster_data_handler
+            coords = rdh.coords
+            values = rdh.samples
+
+            # determine which models to evaluate
+            if msspe_prefilter > 0 and len(selector.fitted_models) > msspe_prefilter:
+                # Stratified prefilter: take top-N by AIC, but also
+                # ensure the AIC-best model from each complexity level
+                # (number of components) is included.  Without this,
+                # prefiltering can exclude entire model families — e.g.
+                # all 1-component models when 3-component models
+                # dominate the AIC ranking — and miss the model with
+                # the best MSSPE.
+                ranked_idx = np.argsort([m.aic for m in selector.fitted_models])
+                eval_idx = set(ranked_idx[:msspe_prefilter].tolist())
+
+                # add best-AIC model per complexity level
+                best_per_complexity: Dict[int, int] = {}
+                for i in ranked_idx:
+                    m = selector.fitted_models[i]
+                    n_comp = len(m.composite_model.component_names)
+                    if n_comp not in best_per_complexity:
+                        best_per_complexity[n_comp] = i
+                eval_idx.update(best_per_complexity.values())
+            else:
+                eval_idx = set(range(len(selector.fitted_models)))
+
+            for i, fitted in enumerate(selector.fitted_models):
+                if i not in eval_idx:
+                    continue
+                # only evaluate stationary models (non-stationary have
+                # infinite variance → kriging is undefined)
+                if not fitted.composite_model.is_stationary:
+                    continue
+                try:
+                    result = self.kriging_loocv(
+                        coords, values,
+                        fitted.composite_model,
+                        n_subset=msspe_n_subset,
+                        seed=seed,
+                    )
+                    fitted.msspe = result.msspe
+                    fitted.loocv_result = result
+                except Exception:
+                    # kriging can fail for ill-conditioned models
+                    fitted.msspe = None
+                    fitted.loocv_result = None
 
         # select best model
         best = selector.select_best(criterion=criterion)
@@ -2470,22 +2616,38 @@ class VariogramAnalysis:
 
         self.cv_mean_error_best_aic = {'rmse': fitted.cv_rmse} if fitted.cv_rmse else None
 
+        # transfer MSSPE diagnostics
+        self.best_msspe = fitted.msspe
+        self.best_loocv_result = fitted.loocv_result
+
     def get_model_comparison_summary(self) -> str:
         """Get a summary of all fitted models for comparison.
 
-        Returns formatted table with AIC, BIC, CV-RMSE, and Akaike weights.
+        Returns formatted table with AIC, BIC, CV-RMSE, MSSPE, and
+        Akaike weights.  MSSPE column is included when at least one
+        candidate has been evaluated with kriging LOOCV.
         """
         if not hasattr(self, 'model_selector') or self.model_selector is None:
             raise RuntimeError("No model comparison available. Call fit_best_model_auto() first.")
 
         selector = self.model_selector
-        lines = ["=" * 80]
-        lines.append("VARIOGRAM MODEL SELECTION SUMMARY")
-        lines.append("=" * 80)
-        lines.append(f"{'Model':<35} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10} {'Weight':>10}")
-        lines.append("-" * 80)
 
-        weights = selector.model_weights if selector.model_weights is not None else [0] * len(selector.fitted_models)        
+        # check if any model has MSSPE computed
+        has_msspe = any(
+            m.msspe is not None for m in selector.fitted_models
+        )
+
+        lines = ["=" * 95]
+        lines.append("VARIOGRAM MODEL SELECTION SUMMARY")
+        lines.append("=" * 95)
+        header = f"{'Model':<35} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10}"
+        if has_msspe:
+            header += f" {'MSSPE':>8}"
+        header += f" {'Weight':>10}"
+        lines.append(header)
+        lines.append("-" * 95)
+
+        weights = selector.model_weights if selector.model_weights is not None else [0] * len(selector.fitted_models)
         sorted_models = sorted(zip(selector.fitted_models, weights), key=lambda x: x[0].aic)
 
         for model, weight in sorted_models:
@@ -2494,9 +2656,14 @@ class VariogramAnalysis:
                 name += "+nugget"
             cv_str = f"{model.cv_rmse:.4f}" if model.cv_rmse else "N/A"
             marker = " *" if model is selector.best_model else ""
-            lines.append(f"{name:<35} {model.aic:>10.2f} {model.bic:>10.2f} {cv_str:>10} {weight:>10.4f}{marker}")
+            row = f"{name:<35} {model.aic:>10.2f} {model.bic:>10.2f} {cv_str:>10}"
+            if has_msspe:
+                msspe_str = f"{model.msspe:.3f}" if model.msspe is not None else "N/A"
+                row += f" {msspe_str:>8}"
+            row += f" {weight:>10.4f}{marker}"
+            lines.append(row)
 
-        lines.append("=" * 80)
+        lines.append("=" * 95)
         return "\n".join(lines)
     
     def get_bma_variogram_function(self) -> Callable:

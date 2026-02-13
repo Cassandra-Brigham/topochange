@@ -29,6 +29,14 @@ from .stable_area_analysis import (
 from .crs_history import CRSHistory
 from .pipeline_builder import CRSState, build_vertical_pipeline
 
+# data_access requires GDAL (osgeo) which may not be installed — guard the import
+# so the rest of the package works without it. Users who need data_access should
+# install with: pip install topochange[data_access]  (plus conda install gdal)
+try:
+    from .data_access import DataAccess, OpenTopographyQuery, GetDEMs
+except ImportError:
+    pass
+
 from .alignment import (
     LandscapeAligner,
     RegistrationConfig,
@@ -75,5 +83,8 @@ __all__ = [
     "CRSHistory",
     "CRSState",
     "build_vertical_pipeline",
+    "DataAccess",
+    "OpenTopographyQuery",
+    "GetDEMs",
 ]
 

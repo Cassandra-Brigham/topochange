@@ -25,6 +25,7 @@ Requires-Dist: numpy
 Requires-Dist: pandas
 Requires-Dist: scipy
 Requires-Dist: matplotlib
+Requires-Dist: colormaps
 Requires-Dist: rasterio
 Requires-Dist: pyproj
 Requires-Dist: geopandas
@@ -38,15 +39,20 @@ Requires-Dist: ipyleaflet; extra == "interactive"
 Requires-Dist: ipywidgets; extra == "interactive"
 Provides-Extra: pointcloud
 Requires-Dist: pdal; extra == "pointcloud"
+Requires-Dist: laspy; extra == "pointcloud"
 Provides-Extra: alignment
 Requires-Dist: small_gicp; extra == "alignment"
+Provides-Extra: data-access
+Requires-Dist: boto3; extra == "data-access"
+Provides-Extra: converters
+Requires-Dist: xarray; extra == "converters"
 Provides-Extra: dev
 Requires-Dist: pytest; extra == "dev"
 Requires-Dist: pytest-cov; extra == "dev"
 Requires-Dist: black; extra == "dev"
 Requires-Dist: ruff; extra == "dev"
 Provides-Extra: all
-Requires-Dist: topochange[alignment,interactive,pointcloud]; extra == "all"
+Requires-Dist: topochange[alignment,converters,data_access,interactive,pointcloud]; extra == "all"
 
 # topochange
 
