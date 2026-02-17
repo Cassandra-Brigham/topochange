@@ -333,7 +333,7 @@ class TestRegistrationConfig:
         assert config.method == "vgicp"
         assert config.max_correspondence_distance == 1.0
         assert config.voxel_resolution == 0.5
-        assert config.multi_resolution is True
+        assert config.multi_resolution is False
         assert config.auto_revert is True
         assert config.crop_to_overlap is True
 

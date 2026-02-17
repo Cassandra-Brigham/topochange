@@ -98,7 +98,8 @@ class RegistrationConfig:
         Finest voxel resolution in meters for small_gicp preprocessing
         (default 0.5). Coarser stages are derived automatically.
     multi_resolution : bool
-        Enable coarse-to-fine multi-resolution alignment (default True).
+        Enable coarse-to-fine multi-resolution alignment (default False).
+        Only needed when initial misalignment exceeds ~1 m.
     resolution_stages : list of float, optional
         Custom resolution schedule ordered coarse-to-fine. If None and
         multi_resolution is True, stages are auto-computed as [4x, 2x, 1x]
@@ -148,7 +149,7 @@ class RegistrationConfig:
 
     # === Multi-Resolution Parameters ===
     voxel_resolution: float = 0.5
-    multi_resolution: bool = True
+    multi_resolution: bool = False
     resolution_stages: Optional[List[float]] = None
 
     # === Point Loading (orchestration layer) ===
