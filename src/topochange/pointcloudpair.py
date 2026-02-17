@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,12 +53,15 @@ from .alignment_utils import (
     AlignmentQualityMetrics,
 )
 
-# import alignment classes (for type hints and optional direct usage)
+# import alignment classes and core function
 from .alignment import (
     LandscapeAligner,
     RegistrationConfig,
     RegistrationResult,
+    align_point_clouds as _align_point_clouds_core,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # utility Functions
@@ -1405,94 +1409,72 @@ class PointCloudPair:
     
     def align_point_clouds(
         self,
-        method: str = "gicp",
-        downsample_resolution: Optional[float] = None,
+        alignment_config: Optional[RegistrationConfig] = None,
+        # Legacy kwargs still accepted for backward compat but config takes priority:
+        method: str = "vgicp",
         max_correspondence_distance: float = 1.0,
         max_iterations: int = 50,
-        transformation_epsilon: float = 1e-6,
         num_threads: int = 4,
         apply_transform: bool = True,
         output_path: Optional[str] = None,
         overwrite: bool = True,
         verbose: bool = True,
-        initial_voxel_size: Optional[float] = None,
         max_points: Optional[int] = None,
-        auto_downsample: bool = False,
-        target_points: int = 2_000_000,
-        source_cloud: Optional[PointCloud] = None,
-        target_cloud: Optional[PointCloud] = None,
-        alignment_buffer: float = 10.0,
-        use_cropped_clouds: bool = False,
         point_filter: Optional[Union[str, List[int]]] = "ground",
         alignment_box_size: Optional[Tuple[float, float]] = None,
+        alignment_buffer: float = 10.0,
+        # Deprecated kwargs (accepted but ignored with warning):
+        downsample_resolution: Optional[float] = None,
+        auto_downsample: bool = False,
+        target_points: int = 2_000_000,
+        initial_voxel_size: Optional[float] = None,
+        source_cloud: Optional[PointCloud] = None,
+        target_cloud: Optional[PointCloud] = None,
+        use_cropped_clouds: bool = False,
+        transformation_epsilon: float = 1e-6,
     ) -> Dict[str, Any]:
         """
         Align pc1 to pc2 using ICP registration via small_gicp.
 
-        Point clouds are automatically centered before registration to avoid
-        numerical issues with large UTM coordinates. This method delegates
-        the core registration logic to LandscapeAligner while handling
-        PointCloudPair-specific workflow concerns (cloud selection, state).
+        Both point clouds are cropped to their overlap area before alignment.
+        The compare cloud gets an additional buffer (default 10 m) to ensure
+        edge points are well-constrained. All downsampling is handled
+        internally by small_gicp.preprocess_points() at each resolution stage
+        — points are loaded at full resolution (no voxel downsampling at load).
 
         Parameters
         ----------
+        alignment_config : RegistrationConfig, optional
+            Full registration configuration. When provided, all other
+            keyword arguments except ``apply_transform``, ``output_path``,
+            and ``overwrite`` are ignored. This is the recommended way to
+            configure alignment.
         method : str
-            Registration method: 'gicp', 'vgicp', 'icp', or 'plane_icp'.
-            Default is 'gicp' for best accuracy.
-        downsample_resolution : float, optional
-            Voxel size for small_gicp preprocessing. If None and auto_downsample
-            is True, automatically calculated based on point density.
+            Registration method: 'vgicp' (default), 'gicp', 'icp', or
+            'plane_icp'. Ignored if alignment_config is provided.
         max_correspondence_distance : float
-            Maximum distance for point correspondences (default 1.0m)
+            Maximum distance for point correspondences (default 1.0 m).
         max_iterations : int
-            Maximum ICP iterations
-        transformation_epsilon : float
-            Convergence threshold
+            Maximum ICP iterations (default 50).
         num_threads : int
-            Number of threads for parallel processing
+            Number of threads (default 4).
         apply_transform : bool
-            Whether to apply the transform and update internal state
+            Whether to apply the transform and save the aligned cloud.
         output_path : str, optional
-            Path to save aligned point cloud
+            Path to save aligned point cloud.
         overwrite : bool
-            Whether to overwrite existing output file
+            Overwrite existing output file (default True).
         verbose : bool
-            Print progress information
-        initial_voxel_size : float, optional
-            Voxel size for initial downsampling during point cloud loading.
-            If None, uses downsample_resolution * 2 for memory efficiency.
-            Set to 0 to disable initial downsampling (loads all points).
+            Print progress information (default True).
         max_points : int, optional
-            Maximum points to load per cloud (default 2M). Applied after
-            voxel downsampling. Set to None for no limit.
-        auto_downsample : bool, default False
-            If True and downsample_resolution is None, automatically calculate
-            optimal voxel size to achieve approximately target_points points.
-        target_points : int, default 2_000_000
-            Target number of points for auto-downsampling. Uses minimum
-            downsampling needed to stay below this threshold.
-        source_cloud : PointCloud, optional
-            Custom source (compare) point cloud to use for alignment.
-            If None, uses pc1 (or transformed pc1 if available).
-        target_cloud : PointCloud, optional
-            Custom target (reference) point cloud to use for alignment.
-            If None, uses pc2.
-        alignment_buffer : float, default 10.0
-            Buffer distance (meters) for Area B when use_cropped_clouds=True.
-        use_cropped_clouds : bool, default False
-            If True, automatically crop clouds before alignment:
-            - Compare cloud (pc1) cropped to Area B (overlap + buffer)
-            - Reference cloud (pc2) cropped to Area A (overlap only)
-        point_filter : str or list of int, default "ground"
-            Filter points by classification for alignment. Options:
-            - "ground": Use only ground points (classification 2) - recommended
-            - "all" or None: Use all points
-            - List of ints: Use points with these classification codes
-        alignment_box_size : tuple of (width, height), optional
-            If specified, restrict alignment to a box of this size (in meters)
-            centered on the overlap centroid. Useful for memory-constrained
-            environments like Colab. Example: (200, 200) for a 200x200m box.
-            If None (default), uses the full overlap area.
+            Maximum points per cloud after filtering (random subsample).
+        point_filter : str or list of int
+            Classification filter: "ground", "all", or list of codes.
+        alignment_box_size : tuple of (float, float), optional
+            Restrict alignment to an NxN meter box centered on the overlap
+            centroid. Transform is still applied to the full cloud.
+        alignment_buffer : float
+            Buffer in meters for the compare cloud's overlap crop (default 10).
 
         Returns
         -------
@@ -1502,7 +1484,9 @@ class PointCloudPair:
             - 'centroid': Centroid used for centering
             - 'converged': Whether registration converged
             - 'fitness': Inlier ratio (0-1)
-            - 'rmse': Root mean square error
+            - 'rmse': Root mean square error (post-alignment)
+            - 'pre_rmse': Root mean square error (pre-alignment)
+            - 'reverted': Whether alignment was reverted to identity
             - 'num_correspondences': Number of inlier correspondences
             - 'translation': Translation vector [x, y, z]
             - 'rotation_angle_deg': Rotation angle in degrees
@@ -1511,91 +1495,158 @@ class PointCloudPair:
         """
         import sys
 
-        if verbose:
-            print(f"\n--- Point Cloud Alignment (small_gicp) ---", file=sys.stderr)
-            print(f"Method: {method.upper()}", file=sys.stderr)
+        # ── Step 1: Build or adopt RegistrationConfig ─────────────────────
+        if alignment_config is not None:
+            config = alignment_config
+        else:
+            config = RegistrationConfig(
+                method=method,
+                max_correspondence_distance=max_correspondence_distance,
+                max_iterations=max_iterations,
+                num_threads=num_threads,
+                voxel_resolution=downsample_resolution if downsample_resolution else 0.5,
+                point_filter=point_filter if point_filter else "all",
+                max_points=max_points,
+                crop_to_overlap=True,
+                crop_buffer=alignment_buffer,
+                crop_box_size=alignment_box_size,
+                verbose=verbose,
+            )
 
-        # step 1: Select source and target point clouds (PointCloudPair-specific)
+        if config.verbose:
+            print(f"\n--- Point Cloud Alignment (small_gicp) ---", file=sys.stderr)
+            print(f"Method: {config.method.upper()}", file=sys.stderr)
+
+        # ── Step 2: Select source and target point clouds ─────────────────
         source_pc, target_pc = self._select_alignment_clouds(
             source_cloud=source_cloud,
             target_cloud=target_cloud,
             use_cropped_clouds=use_cropped_clouds,
-            alignment_buffer=alignment_buffer,
-            verbose=verbose,
+            alignment_buffer=config.crop_buffer,
+            verbose=config.verbose,
         )
 
-        # step 2: Compute auto-downsample resolution if needed
-        if downsample_resolution is None and auto_downsample:
-            downsample_resolution = self._compute_auto_downsample_resolution(
-                source_pc, target_pc, target_points, verbose
-            )
-        elif downsample_resolution is None:
-            downsample_resolution = 0.5  # Default
-
-        # step 3: Compute crop bounds if alignment_box_size is specified
+        # ── Step 3: Crop to overlap ──────────────────────────────────────
+        # Both clouds are cropped to overlap; compare gets extra buffer.
+        # This uses the existing PointCloudPair crop machinery.
         crop_bounds = None
-        if alignment_box_size is not None:
-            crop_bounds = self._compute_alignment_box_bounds(alignment_box_size, verbose)
+        if config.crop_to_overlap:
+            src_bounds = getattr(source_pc, 'bounds', None)
+            tgt_bounds = getattr(target_pc, 'bounds', None)
+            if (src_bounds is not None and tgt_bounds is not None
+                    and all(v is not None for v in src_bounds)
+                    and all(v is not None for v in tgt_bounds)):
+                s_minx, s_miny, s_maxx, s_maxy = src_bounds
+                t_minx, t_miny, t_maxx, t_maxy = tgt_bounds
+                i_minx = max(s_minx, t_minx)
+                i_miny = max(s_miny, t_miny)
+                i_maxx = min(s_maxx, t_maxx)
+                i_maxy = min(s_maxy, t_maxy)
+                if i_minx < i_maxx and i_miny < i_maxy:
+                    buffer = config.crop_buffer
+                    crop_bounds = (
+                        i_minx - buffer,
+                        i_miny - buffer,
+                        i_maxx + buffer,
+                        i_maxy + buffer,
+                    )
+                    if config.verbose:
+                        overlap_area = (i_maxx - i_minx) * (i_maxy - i_miny)
+                        print(f"Crop to overlap: "
+                              f"{i_maxx - i_minx:.0f}x{i_maxy - i_miny:.0f} m "
+                              f"({overlap_area:,.0f} m\u00b2) + {buffer:.1f} m buffer",
+                              file=sys.stderr)
 
-        # step 4: Build RegistrationConfig and delegate to LandscapeAligner
-        config = RegistrationConfig(
-            method=method.lower(),
-            max_correspondence_distance=max_correspondence_distance,
-            max_iterations=max_iterations,
-            transformation_epsilon=transformation_epsilon,
-            num_threads=num_threads,
-            # centering
-            center_to_origin=True,
-            # crop bounds
-            crop_bounds=crop_bounds,
-            # downsampling
-            downsample=True,  # Enable fine registration downsampling
-            voxel_size=downsample_resolution,
-            initial_voxel_size=initial_voxel_size,
-            auto_downsample=False,  # We already computed resolution above
-            target_points=target_points,
-            max_points=max_points,
-            # point filtering - use "all" to skip LandscapeAligner's preprocessing
-            # since we do our own filtering during point loading
-            point_filter=point_filter if point_filter else "all",
-            outlier_removal=False,  # Skip - we load filtered points directly
-            # validation
-            min_fitness_score=0.1,  # Accept most results
-            enable_auto_retry=False,  # Handle retries at this level if needed
-            # output
-            apply_transform=False,  # We handle output ourselves
-            verbose=verbose,
+        # ── Step 4: Optional box crop ─────────────────────────────────────
+        box_bounds = None
+        if config.crop_box_size is not None:
+            box_bounds = self._compute_alignment_box_bounds(
+                config.crop_box_size, config.verbose,
+            )
+            # Use box bounds for loading if specified (tighter than overlap)
+            if box_bounds is not None:
+                # Add box buffer for compare cloud
+                bx0, by0, bx1, by1 = box_bounds
+                compare_box_bounds = (
+                    bx0 - config.crop_box_buffer,
+                    by0 - config.crop_box_buffer,
+                    bx1 + config.crop_box_buffer,
+                    by1 + config.crop_box_buffer,
+                )
+
+        # ── Step 5: Load points at full resolution ────────────────────────
+        if config.verbose:
+            print(f"\nLoading point clouds ...", file=sys.stderr)
+            print(f"  Source: {Path(source_pc.filename).name}", file=sys.stderr)
+            print(f"  Target: {Path(target_pc.filename).name}", file=sys.stderr)
+
+        # Determine load bounds: box bounds (if set) else overlap crop bounds
+        source_load_bounds = crop_bounds
+        target_load_bounds = crop_bounds
+        if config.crop_box_size is not None and box_bounds is not None:
+            source_load_bounds = box_bounds
+            target_load_bounds = compare_box_bounds
+
+        from concurrent.futures import ThreadPoolExecutor
+        load_kwargs_source = dict(
+            max_points=config.max_points,
+            voxel_size=None,  # NO voxel downsampling at load — small_gicp handles it
+            point_filter=config.point_filter,
+            crop_bounds=source_load_bounds,
         )
-
-        # perform registration using LandscapeAligner
-        result = self._run_registration(
-            source_pc=source_pc,
-            target_pc=target_pc,
-            config=config,
-            point_filter=point_filter,
-            crop_bounds=crop_bounds,
-            verbose=verbose,
+        load_kwargs_target = dict(
+            max_points=config.max_points,
+            voxel_size=None,
+            point_filter=config.point_filter,
+            crop_bounds=target_load_bounds,
         )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            source_future = executor.submit(
+                load_points_from_las, source_pc.filename, **load_kwargs_source,
+            )
+            target_future = executor.submit(
+                load_points_from_las, target_pc.filename, **load_kwargs_target,
+            )
+            source_points = source_future.result()
+            target_points_arr = target_future.result()
 
-        # step 5: Convert RegistrationResult to dict format (backward compatibility)
-        alignment_result = self._result_to_dict(result, method, downsample_resolution,
-                                                 max_correspondence_distance)
+        if config.verbose:
+            print(f"  Source points loaded: {len(source_points):,}", file=sys.stderr)
+            print(f"  Target points loaded: {len(target_points_arr):,}", file=sys.stderr)
 
-        # step 6: Apply transformation and update state if requested
-        if apply_transform:
+        if len(source_points) == 0 or len(target_points_arr) == 0:
+            import warnings
+            warnings.warn("Empty point cloud(s) after loading — cannot align.")
+            result = RegistrationResult()
+            result.source_path = source_pc.filename
+            result.target_path = target_pc.filename
+            alignment_result = self._result_to_dict(result, config)
+            self._alignment_result = alignment_result
+            return alignment_result
+
+        # ── Step 6: Delegate to core align_point_clouds() ─────────────────
+        result = _align_point_clouds_core(source_points, target_points_arr, config)
+        result.source_path = source_pc.filename
+        result.target_path = target_pc.filename
+
+        # ── Step 7: Convert to dict (backward compat) ─────────────────────
+        alignment_result = self._result_to_dict(result, config)
+
+        # ── Step 8: Apply transformation if requested ─────────────────────
+        if apply_transform or config.apply_transform:
             self._apply_alignment_transform(
                 source_pc=source_pc,
                 result=result,
                 alignment_result=alignment_result,
-                output_path=output_path,
-                overwrite=overwrite,
-                method=method,
-                verbose=verbose,
+                output_path=output_path or config.output_path,
+                overwrite=overwrite if output_path is None else overwrite,
+                method=config.method,
+                verbose=config.verbose,
             )
 
         self._alignment_result = alignment_result
 
-        if verbose:
+        if config.verbose:
             print(f"\n{'=' * 60}\n", file=sys.stderr)
 
         return alignment_result
@@ -1738,346 +1789,45 @@ class PointCloudPair:
         source_pc: PointCloud,
         target_pc: PointCloud,
         config: RegistrationConfig,
-        point_filter: Optional[Union[str, List[int]]],
-        crop_bounds: Optional[Tuple[float, float, float, float]],
-        verbose: bool,
+        point_filter: Optional[Union[str, List[int]]] = None,
+        crop_bounds: Optional[Tuple[float, float, float, float]] = None,
+        verbose: bool = True,
     ) -> RegistrationResult:
+        """Deprecated: registration is now handled inline by align_point_clouds().
+
+        This shim exists only for backward compatibility. It loads points and
+        delegates to the standalone ``alignment.align_point_clouds()`` function.
         """
-        Run ICP registration using LandscapeAligner with custom point loading.
+        import warnings
+        warnings.warn(
+            "_run_registration is deprecated. Use align_point_clouds() directly.",
+            DeprecationWarning, stacklevel=2,
+        )
 
-        This method handles point loading with filtering and centering, then
-        delegates the actual registration to LandscapeAligner.
-        """
-        import sys
-        import gc
+        _filter = point_filter or config.point_filter
 
-        require_small_gicp()
-        import small_gicp
-
-        # determine initial voxel size for memory-efficient loading.
-        # use 4x the fine resolution by default : aggressive initial downsampling
-        # is safe because preprocess_points refines to the exact target resolution.
-        # this dramatically reduces I/O and memory for >1GB datasets.
-        if config.initial_voxel_size is None:
-            load_voxel_size = config.voxel_size * 4.0 if config.voxel_size else 2.0
-        elif config.initial_voxel_size == 0:
-            load_voxel_size = None
-        else:
-            load_voxel_size = config.initial_voxel_size
-
-        if verbose:
-            print(f"Downsample resolution: {config.voxel_size} m", file=sys.stderr)
-            print(f"Max correspondence distance: {config.max_correspondence_distance} m",
-                  file=sys.stderr)
-            if load_voxel_size:
-                print(f"Initial voxel downsampling: {load_voxel_size} m", file=sys.stderr)
-            if config.max_points:
-                print(f"Max points per cloud: {config.max_points:,}", file=sys.stderr)
-            if point_filter:
-                print(f"Point filter: {point_filter}", file=sys.stderr)
-
-        # auto-crop to bounding box intersection if no explicit crop_bounds given.
-        # this avoids loading millions of non-overlapping points that contribute
-        # nothing to alignment. The buffer ensures edge points are included.
-        if crop_bounds is None:
-            src_bounds = getattr(source_pc, 'bounds', None)
-            tgt_bounds = getattr(target_pc, 'bounds', None)
-            if (src_bounds is not None and tgt_bounds is not None
-                    and all(v is not None for v in src_bounds)
-                    and all(v is not None for v in tgt_bounds)):
-                s_minx, s_miny, s_maxx, s_maxy = src_bounds
-                t_minx, t_miny, t_maxx, t_maxy = tgt_bounds
-                # compute intersection
-                i_minx = max(s_minx, t_minx)
-                i_miny = max(s_miny, t_miny)
-                i_maxx = min(s_maxx, t_maxx)
-                i_maxy = min(s_maxy, t_maxy)
-                if i_minx < i_maxx and i_miny < i_maxy:
-                    # add buffer (10% of extent or max_correspondence_distance, whichever is larger)
-                    extent = max(i_maxx - i_minx, i_maxy - i_miny)
-                    buffer = max(extent * 0.1, config.max_correspondence_distance * 5)
-                    crop_bounds = (
-                        i_minx - buffer,
-                        i_miny - buffer,
-                        i_maxx + buffer,
-                        i_maxy + buffer,
-                    )
-                    if verbose:
-                        overlap_area = (i_maxx - i_minx) * (i_maxy - i_miny)
-                        print(f"Auto-crop to overlap region: "
-                              f"{i_maxx - i_minx:.0f}x{i_maxy - i_miny:.0f}m "
-                              f"({overlap_area:,.0f} m\u00b2) + {buffer:.1f}m buffer",
-                              file=sys.stderr)
-
-        # load source and target points in parallel (independent I/O operations)
-        if verbose:
-            print(f"\nLoading point clouds in parallel...", file=sys.stderr)
-            print(f"  Source: {Path(source_pc.filename).name}", file=sys.stderr)
-            print(f"  Target: {Path(target_pc.filename).name}", file=sys.stderr)
-
-        from concurrent.futures import ThreadPoolExecutor
         load_kwargs = dict(
             max_points=config.max_points,
-            voxel_size=load_voxel_size,
-            point_filter=point_filter,
+            voxel_size=None,
+            point_filter=_filter,
             crop_bounds=crop_bounds,
         )
+        from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=2) as executor:
-            source_future = executor.submit(
-                load_points_from_las, source_pc.filename, **load_kwargs,
-            )
-            target_future = executor.submit(
-                load_points_from_las, target_pc.filename, **load_kwargs,
-            )
-            source_points = source_future.result()
-            target_points = target_future.result()
+            sf = executor.submit(load_points_from_las, source_pc.filename, **load_kwargs)
+            tf = executor.submit(load_points_from_las, target_pc.filename, **load_kwargs)
+            source_points = sf.result()
+            target_points_arr = tf.result()
 
-        if verbose:
-            print(f"Source points: {len(source_points):,}", file=sys.stderr)
-            print(f"Target points: {len(target_points):,}", file=sys.stderr)
-
-        # center point clouds
-        n_source = len(source_points)
-        n_target = len(target_points)
-        n_total = n_source + n_target
-
-        source_centroid = np.mean(source_points, axis=0)
-        target_centroid = np.mean(target_points, axis=0)
-        centroid = (source_centroid * n_source + target_centroid * n_target) / n_total
-
-        if verbose:
-            print(f"\nCentering point clouds (centroid: "
-                  f"[{centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f}])",
-                  file=sys.stderr)
-
-        source_points -= centroid
-        target_points -= centroid
-
-        if verbose:
-            src_range = np.ptp(source_points, axis=0)
-            tgt_range = np.ptp(target_points, axis=0)
-            print(f"Source range after centering: "
-                  f"X={src_range[0]:.1f}, Y={src_range[1]:.1f}, Z={src_range[2]:.1f}",
-                  file=sys.stderr)
-            print(f"Target range after centering: "
-                  f"X={tgt_range[0]:.1f}, Y={tgt_range[1]:.1f}, Z={tgt_range[2]:.1f}",
-                  file=sys.stderr)
-
-        # validate method
-        method_upper = config.method.upper()
-        if method_upper not in ["GICP", "VGICP", "ICP", "PLANE_ICP"]:
-            raise ValueError(
-                f"Unknown method: {config.method}. Use 'gicp', 'vgicp', 'icp', or 'plane_icp'."
-            )
-
-        # run registration
-        if verbose:
-            print(f"\nRunning {method_upper} registration...", file=sys.stderr)
-
-        init_T = np.eye(4)
-        downsample_resolution = config.voxel_size or 0.5
-
-        if method_upper in ["VGICP", "GICP", "PLANE_ICP"]:
-            # ── Build coarse-to-fine resolution schedule ──
-            from concurrent.futures import ThreadPoolExecutor
-            from scipy.spatial import cKDTree as _cKDTree
-
-            if getattr(config, 'multi_resolution', True) and downsample_resolution > 0:
-                if getattr(config, 'resolution_stages', None) is not None:
-                    resolutions = sorted(config.resolution_stages, reverse=True)
-                else:
-                    # default: 3 stages : 4×, 2×, 1× the target resolution
-                    resolutions = [
-                        downsample_resolution * 4.0,
-                        downsample_resolution * 2.0,
-                        downsample_resolution,
-                    ]
-                # deduplicate stages that are too close together
-                resolutions = [r for i, r in enumerate(resolutions)
-                               if i == 0 or r < resolutions[i - 1] * 0.9]
-            else:
-                resolutions = [downsample_resolution]
-
-            if verbose:
-                if len(resolutions) > 1:
-                    res_str = " → ".join(f"{r:.2f}m" for r in resolutions)
-                    print(f"  Coarse-to-fine schedule: {res_str}", file=sys.stderr)
-                else:
-                    print("  Preprocessing point clouds (downsampling + covariance)...",
-                          file=sys.stderr)
-
-            # ── Multi-resolution alignment loop ──
-            for stage_idx, stage_resolution in enumerate(resolutions):
-                is_final = (stage_idx == len(resolutions) - 1)
-
-                if verbose and len(resolutions) > 1:
-                    label = "Final" if is_final else f"Stage {stage_idx + 1}/{len(resolutions)}"
-                    print(f"  [{label}] Preprocessing at resolution {stage_resolution:.3f}m...",
-                          file=sys.stderr)
-
-                # preprocess source and target in parallel
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    target_future = executor.submit(
-                        small_gicp.preprocess_points,
-                        target_points,
-                        downsampling_resolution=stage_resolution,
-                        num_threads=max(1, config.num_threads // 2),
-                    )
-                    source_future = executor.submit(
-                        small_gicp.preprocess_points,
-                        source_points,
-                        downsampling_resolution=stage_resolution,
-                        num_threads=max(1, config.num_threads // 2),
-                    )
-                    target_cloud_gicp, target_tree = target_future.result()
-                    source_cloud_gicp, source_tree = source_future.result()
-
-                if verbose:
-                    print(f"    Points: {source_cloud_gicp.size():,} source, "
-                          f"{target_cloud_gicp.size():,} target", file=sys.stderr)
-
-                # scale correspondence distance and iterations for coarser stages
-                if is_final:
-                    stage_max_dist = config.max_correspondence_distance
-                    stage_max_iters = config.max_iterations
-                else:
-                    scale = stage_resolution / resolutions[-1]
-                    stage_max_dist = config.max_correspondence_distance * scale
-                    stage_max_iters = max(20, config.max_iterations // 2)
-
-                # VGICP requires a GaussianVoxelMap target (overload 3);
-                # GICP / PLANE_ICP use PointCloud + KdTree (overload 2).
-                align_kwargs = dict(
-                    init_T_target_source=init_T,
-                    max_correspondence_distance=stage_max_dist,
-                    max_iterations=stage_max_iters,
-                    num_threads=config.num_threads,
-                )
-
-                if method_upper == "VGICP":
-                    target_voxelmap = small_gicp.GaussianVoxelMap(stage_resolution)
-                    target_voxelmap.insert(target_cloud_gicp)
-                    gicp_result = small_gicp.align(
-                        target_voxelmap,
-                        source_cloud_gicp,
-                        **align_kwargs,
-                    )
-                else:
-                    align_kwargs["registration_type"] = method_upper
-                    gicp_result = small_gicp.align(
-                        target_cloud_gicp,
-                        source_cloud_gicp,
-                        target_tree,
-                        **align_kwargs,
-                    )
-
-                # carry the transform forward as the initial guess for the next stage
-                init_T = gicp_result.T_target_source
-
-                if verbose and len(resolutions) > 1:
-                    t = init_T[:3, 3]
-                    print(f"    Translation so far: [{t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f}] m",
-                          file=sys.stderr)
-
-                # compute Euclidean RMSE only at the finest resolution
-                if is_final:
-                    source_pts_pp = np.asarray(source_cloud_gicp.points())
-                    target_pts_pp = np.asarray(target_cloud_gicp.points())
-                    if source_pts_pp.shape[1] > 3:
-                        source_pts_pp = source_pts_pp[:, :3]
-                    if target_pts_pp.shape[1] > 3:
-                        target_pts_pp = target_pts_pp[:, :3]
-
-                    T = gicp_result.T_target_source
-                    source_h = np.hstack([source_pts_pp, np.ones((len(source_pts_pp), 1))])
-                    source_transformed = (source_h @ T.T)[:, :3]
-                    _tree = _cKDTree(target_pts_pp)
-                    distances, _ = _tree.query(source_transformed)
-
-                    max_dist = config.max_correspondence_distance
-                    inlier_mask = distances < max_dist
-                    inlier_dists = distances[inlier_mask]
-
-                    n_source_processed = len(source_pts_pp)
-                    metrics_num_inliers = len(inlier_dists)
-                    metrics_rmse = float(np.sqrt(np.mean(inlier_dists ** 2))) if len(inlier_dists) > 0 else float('inf')
-                    metrics_fitness = metrics_num_inliers / n_source_processed if n_source_processed > 0 else 0.0
-
-                    del source_pts_pp, target_pts_pp, source_h, source_transformed, _tree, distances
-
-                # cleanup stage clouds
-                del target_cloud_gicp, target_tree, source_cloud_gicp, source_tree
-                gc.collect()
-
-            del source_points, target_points
-            gc.collect()
-        else:
-            gicp_result = small_gicp.align(
-                target_points,
-                source_points,
-                init_T_target_source=init_T,
-                registration_type="ICP",
-                downsampling_resolution=downsample_resolution,
-                max_correspondence_distance=config.max_correspondence_distance,
-                max_iterations=config.max_iterations,
-                num_threads=config.num_threads,
-            )
-
-            # compute proper Euclidean RMSE and fitness for ICP path
-            from scipy.spatial import cKDTree as _cKDTree
-            T = gicp_result.T_target_source
-            source_h = np.hstack([source_points, np.ones((len(source_points), 1))])
-            source_transformed = (source_h @ T.T)[:, :3]
-            _tree = _cKDTree(target_points)
-            distances, _ = _tree.query(source_transformed)
-
-            max_dist = config.max_correspondence_distance
-            inlier_mask = distances < max_dist
-            inlier_dists = distances[inlier_mask]
-
-            metrics_num_inliers = len(inlier_dists)
-            metrics_rmse = float(np.sqrt(np.mean(inlier_dists ** 2))) if len(inlier_dists) > 0 else float('inf')
-            metrics_fitness = metrics_num_inliers / len(source_points) if len(source_points) > 0 else 0.0
-
-            del source_h, source_transformed, _tree, distances
-            del source_points, target_points
-            gc.collect()
-
-        # build RegistrationResult
-        result = RegistrationResult()
-        result.transformation = gicp_result.T_target_source
-        result.converged = getattr(gicp_result, 'converged', True)
-        result.iterations = getattr(gicp_result, 'iterations', 0)
-        result.centroid = centroid
+        result = _align_point_clouds_core(source_points, target_points_arr, config)
         result.source_path = source_pc.filename
         result.target_path = target_pc.filename
-        result.method_used = config.method
-
-        # use properly computed Euclidean metrics
-        result.num_inliers = metrics_num_inliers
-        result.num_correspondences = metrics_num_inliers
-        result.fitness = metrics_fitness
-        result.rmse = metrics_rmse
-
-        if verbose:
-            print(f"\nAlignment Results:", file=sys.stderr)
-            print(f"  Converged: {result.converged}", file=sys.stderr)
-            print(f"  Fitness (inlier ratio): {result.fitness:.4f}", file=sys.stderr)
-            print(f"  RMSE: {result.rmse:.4f} m", file=sys.stderr)
-            print(f"  Inlier correspondences: {result.num_inliers:,}", file=sys.stderr)
-            print(f"  Translation: [{result.translation[0]:.4f}, "
-                  f"{result.translation[1]:.4f}, {result.translation[2]:.4f}] m",
-                  file=sys.stderr)
-            print(f"  Rotation: {result.rotation_angle_deg:.4f}°", file=sys.stderr)
-
         return result
 
     def _result_to_dict(
         self,
         result: RegistrationResult,
-        method: str,
-        downsample_resolution: float,
-        max_correspondence_distance: float,
+        config: Optional[RegistrationConfig] = None,
     ) -> Dict[str, Any]:
         """Convert RegistrationResult to dict format for backward compatibility."""
         return {
@@ -2088,10 +1838,14 @@ class PointCloudPair:
             'iterations': result.iterations,
             'fitness': result.fitness,
             'rmse': result.rmse,
+            'pre_rmse': result.pre_rmse,
+            'reverted': result.reverted,
             'num_correspondences': result.num_correspondences,
-            'method': method,
-            'downsample_resolution': downsample_resolution,
-            'max_correspondence_distance': max_correspondence_distance,
+            'method': result.method_used or (config.method if config else ""),
+            'voxel_resolution': config.voxel_resolution if config else None,
+            'max_correspondence_distance': (
+                config.max_correspondence_distance if config else None
+            ),
             'translation': result.translation,
             'rotation_angle_deg': result.rotation_angle_deg,
         }
@@ -2768,8 +2522,8 @@ class PointCloudPair:
         alignment_config : RegistrationConfig, optional
             A RegistrationConfig object specifying alignment parameters. When
             provided, this forces ICP alignment regardless of the dem1 tier,
-            and overrides alignment_kwargs. The config's fields are extracted
-            as keyword arguments for align_point_clouds().
+            and overrides alignment_kwargs. The config is passed directly to
+            align_point_clouds(alignment_config=...) with no field extraction.
         """
         import sys
 
@@ -2911,47 +2665,26 @@ class PointCloudPair:
                     print(f"\n--- Auto-preparing: ICP alignment ---", file=sys.stderr)
 
                 if alignment_config is not None:
-                    # extract RegistrationConfig fields as align_point_clouds kwargs
-                    align_params = {
-                        "method": alignment_config.method,
-                        "max_correspondence_distance": alignment_config.max_correspondence_distance or 1.0,
-                        "max_iterations": alignment_config.max_iterations,
-                        "transformation_epsilon": alignment_config.transformation_epsilon,
-                        "num_threads": alignment_config.num_threads,
-                        "point_filter": alignment_config.point_filter,
-                        "auto_downsample": alignment_config.auto_downsample,
-                        "target_points": alignment_config.target_points,
-                        "use_cropped_clouds": True,
-                        "output_path": str(aligned_path),
-                        "overwrite": overwrite,
-                        "verbose": verbose,
-                    }
-                    if alignment_config.voxel_size is not None:
-                        align_params["downsample_resolution"] = alignment_config.voxel_size
-                    if alignment_config.initial_voxel_size is not None:
-                        align_params["initial_voxel_size"] = alignment_config.initial_voxel_size
-                    if alignment_config.max_points is not None:
-                        align_params["max_points"] = alignment_config.max_points
-                    if alignment_config.crop_dimensions is not None:
-                        align_params["alignment_box_size"] = alignment_config.crop_dimensions
-                    elif alignment_config.alignment_box_size is not None:
-                        align_params["alignment_box_size"] = alignment_config.alignment_box_size
+                    # Pass config directly — no field extraction
+                    self.align_point_clouds(
+                        alignment_config=alignment_config,
+                        output_path=str(aligned_path),
+                        overwrite=overwrite,
+                        use_cropped_clouds=True,
+                    )
                 else:
-                    # merge default alignment settings with any user-provided kwargs
-                    # defaults: GICP method, ground points, no downsampling, full area
-                    align_params = {
-                        "method": "gicp",
+                    # Build default config, merging any user-provided kwargs
+                    default_params = {
+                        "method": "vgicp",
                         "point_filter": "ground",
-                        "auto_downsample": False,
-                        "alignment_box_size": None,  # Use full overlap area
                         "use_cropped_clouds": True,
                         "output_path": str(aligned_path),
                         "overwrite": overwrite,
                         "verbose": verbose,
                     }
                     if alignment_kwargs:
-                        align_params.update(alignment_kwargs)
-                self.align_point_clouds(**align_params)
+                        default_params.update(alignment_kwargs)
+                    self.align_point_clouds(**default_params)
 
     def _resolve_pc1_source(self, dem1_option: str) -> Tuple[PointCloud, str]:
         """
@@ -3226,7 +2959,7 @@ class PointCloudPair:
         >>> config = RegistrationConfig(
         ...     point_filter=[6],  # Building points only
         ...     max_correspondence_distance=1.0,
-        ...     crop_dimensions=(500, 500),
+        ...     crop_box_size=(500, 500),
         ...     method="vgicp",
         ... )
         >>> result = pc_pair.compute_2d_difference(

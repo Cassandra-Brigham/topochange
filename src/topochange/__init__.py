@@ -42,6 +42,7 @@ from .alignment import (
     RegistrationConfig,
     RegistrationResult,
     RegistrationMethod,
+    align_point_clouds,
 )
 
 from .alignment_utils import (
@@ -62,6 +63,7 @@ __all__ = [
     "RegistrationConfig",
     "RegistrationResult",
     "RegistrationMethod",
+    "align_point_clouds",
     "PointCloudPreprocessor",
     "AlignmentQualityMetrics",
     "load_points_from_las",
