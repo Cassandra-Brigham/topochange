@@ -1812,7 +1812,7 @@ class Raster:
             if needs_horizontal:
                 parts.append("reproj")
             if needs_align:
-                parts.append("aligned")
+                parts.append("gridded")
             tag = "_".join(parts) if parts else "warped"
             output_path = f"{base}_{tag}{ext}"
         
