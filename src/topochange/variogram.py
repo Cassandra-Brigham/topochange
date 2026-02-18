@@ -351,67 +351,108 @@ class VariogramModelSelector:
         bounded_only_combinations: bool = True,
     ) -> List[CompositeVariogramModel]:
         """Generate candidate composite models.
-        
+
+        When ``include_nugget=True``, every candidate is generated in both
+        a with-nugget and a without-nugget variant so that model selection
+        can decide whether an explicit nugget is needed.
+
+        The Matérn model's smoothness parameter ν already controls the
+        shape at short lags, making multiple Matérn components redundant
+        and poorly identifiable.  Combinations containing more than one
+        Matérn component are therefore excluded.
+
         Parameters
         ----------
         max_components : int
             Maximum number of component models to combine.
         include_nugget : bool
-            Whether to include nugget in all models.
+            Whether to include nugget variants.  When True, multi-component
+            models are generated both with and without nugget; single-
+            component models always include the nugget.
         include_unbounded : bool
             Whether to include unbounded (non-stationary) models.
         bounded_only_combinations : bool
             If True, only combine bounded models together.
             Unbounded models are only tried as single components.
-        
+
         Returns
         -------
         candidates : List[CompositeVariogramModel]
             List of candidate composite models.
+
+        References
+        ----------
+        Stein, M.L. (1999). *Interpolation of Spatial Data: Some Theory
+        for Kriging*. Springer.  Argues that the Matérn class subsumes
+        exponential (ν=0.5) and Gaussian (ν→∞), making nested Matérn
+        structures redundant for kriging.
         """
         candidates = []
-        
+
         # get model lists
         bounded = self.BOUNDED_MODELS
         unbounded = self.UNBOUNDED_MODELS if include_unbounded else []
-        
+
         # generate bounded-only combinations
         for n in range(1, max_components + 1):
             for combo in combinations_with_replacement(bounded, n):
-                try:
-                    model = CompositeVariogramModel(
-                        list(combo), 
-                        include_nugget=include_nugget
-                    )
-                    candidates.append(model)
-                except ValueError:
+                combo_list = list(combo)
+
+                # ── block multiple Matérns (Stein, 1999) ──
+                # A single Matérn's ν parameter already controls
+                # smoothness; stacking Matérns creates redundant,
+                # poorly identifiable parameters.  Allow at most one.
+                if combo_list.count('matern') > 1:
                     continue
-        
+
+                # ── nugget variants ──
+                # When include_nugget is True, generate both with-
+                # and without-nugget variants so the model selection
+                # can decide whether an explicit nugget is needed or
+                # whether a short-range component can absorb the
+                # micro-scale variance.
+                if include_nugget:
+                    nugget_options = [True, False]
+                else:
+                    nugget_options = [False]
+
+                for use_nugget in nugget_options:
+                    try:
+                        model = CompositeVariogramModel(
+                            combo_list,
+                            include_nugget=use_nugget,
+                        )
+                        candidates.append(model)
+                    except ValueError:
+                        continue
+
         # add single unbounded models (not in combinations to preserve validity)
         if include_unbounded:
             for name in unbounded:
                 try:
                     model = CompositeVariogramModel(
-                        [name], 
-                        include_nugget=include_nugget
+                        [name],
+                        include_nugget=True,  # always include nugget
                     )
                     candidates.append(model)
                 except ValueError:
                     continue
-            
+
             # optionally: bounded + unbounded combinations
             if not bounded_only_combinations:
                 for bounded_name in bounded:
                     for unbounded_name in unbounded:
-                        try:
-                            model = CompositeVariogramModel(
-                                [bounded_name, unbounded_name],
-                                include_nugget=include_nugget
-                            )
-                            candidates.append(model)
-                        except ValueError:
-                            continue
-        
+                        nugget_options = [True, False] if include_nugget else [False]
+                        for use_nugget in nugget_options:
+                            try:
+                                model = CompositeVariogramModel(
+                                    [bounded_name, unbounded_name],
+                                    include_nugget=use_nugget,
+                                )
+                                candidates.append(model)
+                            except ValueError:
+                                continue
+
         return candidates
     
     # ── nugget pre-estimation (two-stage approach) ──────────────────
