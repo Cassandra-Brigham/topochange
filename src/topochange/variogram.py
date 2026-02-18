@@ -51,11 +51,21 @@ class FittedVariogramModel:
         Diagnostic warnings (e.g. range exceeds half max lag).
     msspe : float or None
         Mean Standardized Squared Prediction Error from kriging
-        leave-one-out cross-validation.  Target value is 1.0;
+        leave-one-out cross-validation, averaged over multiple
+        independent random subsamples.  Target value is 1.0;
         values >> 1 indicate the model underestimates spatial
         uncertainty; values << 1 indicate overestimation.
-    loocv_result : KrigingLOOCVResult or None
-        Full kriging LOOCV diagnostics (bias, RMSE, etc.).
+    msspe_std : float or None
+        Standard deviation of MSSPE across repeated runs.
+        A large value relative to ``|msspe − 1|`` suggests the
+        ranking is sensitive to the particular subsample drawn.
+    msspe_n_runs : int
+        Number of MSSPE runs that succeeded.
+    loocv_result : AggregatedLOOCVResult or None
+        Aggregated kriging LOOCV diagnostics across all repeated
+        runs, including mean/median/std/nmad for MSSPE, bias,
+        RMSE, and standardized error, plus the individual per-run
+        results.
     """
     composite_model: CompositeVariogramModel
     params: np.ndarray
@@ -67,7 +77,9 @@ class FittedVariogramModel:
     param_samples: Optional[np.ndarray] = None
     warnings: List[str] = field(default_factory=list)
     msspe: Optional[float] = None
-    loocv_result: Optional['KrigingLOOCVResult'] = None
+    msspe_std: Optional[float] = None
+    msspe_n_runs: int = 0
+    loocv_result: Optional['AggregatedLOOCVResult'] = None
 
     def predict(self, h: np.ndarray) -> np.ndarray:
         """Evaluate fitted model at lag distances."""
@@ -167,6 +179,117 @@ class KrigingLOOCVResult:
     mean_standardized_error: float
     n_points: int
     n_failed: int
+
+
+@dataclass
+class AggregatedLOOCVResult:
+    """Aggregated diagnostics from repeated kriging LOOCV runs.
+
+    Each field stores summary statistics (mean, median, std, nmad)
+    across ``n_runs`` independent random subsamples.  The spread
+    quantifies how sensitive each diagnostic is to the particular
+    subsample drawn — large spread relative to ``|msspe_mean − 1|``
+    suggests the ranking may not be stable.
+
+    Attributes
+    ----------
+    n_runs : int
+        Number of successful LOOCV runs.
+    total_points : int
+        Total number of LOOCV predictions across all runs.
+    msspe_mean, msspe_median, msspe_std, msspe_nmad : float
+        Summary statistics of MSSPE across runs.
+    mean_error_mean, mean_error_median, mean_error_std, mean_error_nmad : float
+        Summary statistics of mean prediction error (bias).
+    rmse_mean, rmse_median, rmse_std, rmse_nmad : float
+        Summary statistics of RMSE.
+    mse_mean, mse_median, mse_std, mse_nmad : float
+        Summary statistics of mean standardized error.
+    n_failed_total : int
+        Total LOO iterations that failed across all runs.
+    per_run_results : list of KrigingLOOCVResult
+        Individual run results for detailed inspection.
+    """
+
+    n_runs: int
+    total_points: int
+
+    msspe_mean: float
+    msspe_median: float
+    msspe_std: float
+    msspe_nmad: float
+
+    mean_error_mean: float
+    mean_error_median: float
+    mean_error_std: float
+    mean_error_nmad: float
+
+    rmse_mean: float
+    rmse_median: float
+    rmse_std: float
+    rmse_nmad: float
+
+    mse_mean: float
+    mse_median: float
+    mse_std: float
+    mse_nmad: float
+
+    n_failed_total: int
+
+    per_run_results: List[KrigingLOOCVResult] = field(default_factory=list)
+
+    @staticmethod
+    def from_results(results: List[KrigingLOOCVResult]) -> 'AggregatedLOOCVResult':
+        """Compute aggregate statistics from a list of per-run results.
+
+        Parameters
+        ----------
+        results : list of KrigingLOOCVResult
+            Individual LOOCV results, one per subsample run.
+
+        Returns
+        -------
+        AggregatedLOOCVResult
+        """
+        def _nmad(arr: np.ndarray) -> float:
+            """Normalized Median Absolute Deviation (robust σ estimate)."""
+            return float(1.4826 * np.median(np.abs(arr - np.median(arr))))
+
+        def _stats(arr: np.ndarray) -> tuple:
+            return (
+                float(np.mean(arr)),
+                float(np.median(arr)),
+                float(np.std(arr)),
+                _nmad(arr),
+            )
+
+        msspes = np.array([r.msspe for r in results])
+        mean_errors = np.array([r.mean_error for r in results])
+        rmses = np.array([r.rmse for r in results])
+        mses = np.array([r.mean_standardized_error for r in results])
+
+        return AggregatedLOOCVResult(
+            n_runs=len(results),
+            total_points=sum(r.n_points for r in results),
+            msspe_mean=_stats(msspes)[0],
+            msspe_median=_stats(msspes)[1],
+            msspe_std=_stats(msspes)[2],
+            msspe_nmad=_stats(msspes)[3],
+            mean_error_mean=_stats(mean_errors)[0],
+            mean_error_median=_stats(mean_errors)[1],
+            mean_error_std=_stats(mean_errors)[2],
+            mean_error_nmad=_stats(mean_errors)[3],
+            rmse_mean=_stats(rmses)[0],
+            rmse_median=_stats(rmses)[1],
+            rmse_std=_stats(rmses)[2],
+            rmse_nmad=_stats(rmses)[3],
+            mse_mean=_stats(mses)[0],
+            mse_median=_stats(mses)[1],
+            mse_std=_stats(mses)[2],
+            mse_nmad=_stats(mses)[3],
+            n_failed_total=sum(r.n_failed for r in results),
+            per_run_results=list(results),
+        )
 
 
 class VariogramModelSelector:
@@ -1004,16 +1127,20 @@ class VariogramModelSelector:
             return "No models fitted yet."
 
         has_msspe = any(m.msspe is not None for m in self.fitted_models)
+        has_msspe_std = any(
+            getattr(m, 'msspe_std', None) is not None
+            for m in self.fitted_models
+        )
 
-        lines = ["=" * 80]
+        lines = ["=" * 95]
         lines.append("VARIOGRAM MODEL SELECTION SUMMARY")
-        lines.append("=" * 80)
-        header = f"{'Model':<30} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10}"
+        lines.append("=" * 95)
+        header = f"{'Model':<40} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10}"
         if has_msspe:
-            header += f" {'MSSPE':>8}"
+            header += f" {'MSSPE':>12}"
         header += f" {'Weight':>8}"
         lines.append(header)
-        lines.append("-" * 80)
+        lines.append("-" * 95)
 
         # sort by AIC
         weights = (
@@ -1033,12 +1160,18 @@ class VariogramModelSelector:
 
             cv_str = f"{model.cv_rmse:.4f}" if model.cv_rmse else "N/A"
             row = (
-                f"{name:<30} {model.aic:>10.2f} {model.bic:>10.2f} "
+                f"{name:<40} {model.aic:>10.2f} {model.bic:>10.2f} "
                 f"{cv_str:>10}"
             )
             if has_msspe:
-                msspe_str = f"{model.msspe:.3f}" if model.msspe is not None else "N/A"
-                row += f" {msspe_str:>8}"
+                if model.msspe is not None:
+                    msspe_str = f"{model.msspe:.3f}"
+                    std = getattr(model, 'msspe_std', None)
+                    if std is not None:
+                        msspe_str += f"±{std:.3f}"
+                else:
+                    msspe_str = "N/A"
+                row += f" {msspe_str:>12}"
             row += f" {weight:>8.3f}"
             lines.append(row)
 
@@ -2344,7 +2477,7 @@ class VariogramAnalysis:
         model_types: Optional[List[str]] = None,
         max_components: int = 2,
         include_nugget: bool = True,
-        criterion: str = 'aic',
+        criterion: str = 'msspe',
         compute_cv: bool = True,
         cv_folds: int = 5,
         n_bootstrap: int = 500,
@@ -2352,6 +2485,7 @@ class VariogramAnalysis:
         min_pairs: Optional[int] = 30,
         compute_msspe: bool = False,
         msspe_n_subset: int = 500,
+        msspe_n_runs: int = 10,
         msspe_prefilter: int = 0,
     ) -> 'FittedVariogramModel':
         """
@@ -2367,9 +2501,20 @@ class VariogramAnalysis:
         include_nugget : bool
             Whether to include nugget effect in all candidate models.
         criterion : {'aic', 'bic', 'cv', 'msspe'}
-            Selection criterion.  ``'msspe'`` selects the model whose
-            kriging LOOCV MSSPE is closest to 1.0 (|MSSPE − 1|
-            minimised).  Requires spatial data from ``sample_raster()``.
+            Selection criterion.  Default is ``'msspe'``, which selects
+            the model whose kriging LOOCV MSSPE is closest to 1.0
+            (|MSSPE − 1| minimised).  This directly evaluates whether
+            the kriging variance matches actual prediction errors,
+            which is what matters for uncertainty propagation.
+
+            AIC/BIC treat variogram lag bins as independent observations,
+            which they are not — adjacent bins share point pairs and are
+            correlated.  This systematically favours complex models.
+            MSSPE avoids this by evaluating spatial prediction
+            calibration directly (Lark, 2000).
+
+            Requires spatial data from ``sample_raster()`` or
+            ``calculate_mean_variogram_numba()``.
         compute_cv : bool
             Whether to compute variogram k-fold CV scores.
         cv_folds : int
@@ -2385,8 +2530,17 @@ class VariogramAnalysis:
             Whether to compute kriging LOOCV MSSPE for each candidate
             model.  Automatically set to True when ``criterion='msspe'``.
         msspe_n_subset : int
-            Maximum number of points for kriging LOOCV (default 500).
-            Runtime is O(n²) per model, so ~1 s per model at n=500.
+            Number of points per kriging LOOCV run (default 500).
+            Runtime is O(n²) per model per run, so ~1 s per model at
+            n=500.
+        msspe_n_runs : int
+            Number of independent random subsamples over which to
+            average the MSSPE (default 10).  A single subsample
+            introduces sampling variability; averaging over multiple
+            runs produces a more stable estimate — analogous to
+            repeated k-fold CV versus a single train/test split.
+            Total LOOCV effort is ``msspe_n_runs × msspe_n_subset``
+            points per candidate model.
         msspe_prefilter : int
             If > 0, compute MSSPE only for the top-N models ranked by
             AIC, plus the AIC-best model from each complexity level
@@ -2501,6 +2655,14 @@ class VariogramAnalysis:
             else:
                 eval_idx = set(range(len(selector.fitted_models)))
 
+            # ── repeated MSSPE runs for stability ──
+            # A single random subsample introduces sampling variability
+            # in the MSSPE estimate.  Averaging over multiple independent
+            # subsamples (each of size msspe_n_subset) produces a more
+            # stable ranking — analogous to repeated k-fold CV.
+            run_rng = np.random.default_rng(seed)
+            run_seeds = run_rng.integers(0, 2**31, size=msspe_n_runs)
+
             for i, fitted in enumerate(selector.fitted_models):
                 if i not in eval_idx:
                     continue
@@ -2508,18 +2670,31 @@ class VariogramAnalysis:
                 # infinite variance → kriging is undefined)
                 if not fitted.composite_model.is_stationary:
                     continue
-                try:
-                    result = self.kriging_loocv(
-                        coords, values,
-                        fitted.composite_model,
-                        n_subset=msspe_n_subset,
-                        seed=seed,
-                    )
-                    fitted.msspe = result.msspe
-                    fitted.loocv_result = result
-                except Exception:
-                    # kriging can fail for ill-conditioned models
+
+                run_results: list[KrigingLOOCVResult] = []
+                for run_seed in run_seeds:
+                    try:
+                        result = self.kriging_loocv(
+                            coords, values,
+                            fitted.composite_model,
+                            n_subset=msspe_n_subset,
+                            seed=int(run_seed),
+                        )
+                        if np.isfinite(result.msspe):
+                            run_results.append(result)
+                    except Exception:
+                        continue
+
+                if run_results:
+                    agg = AggregatedLOOCVResult.from_results(run_results)
+                    fitted.msspe = agg.msspe_mean
+                    fitted.msspe_std = agg.msspe_std
+                    fitted.msspe_n_runs = agg.n_runs
+                    fitted.loocv_result = agg
+                else:
                     fitted.msspe = None
+                    fitted.msspe_std = None
+                    fitted.msspe_n_runs = 0
                     fitted.loocv_result = None
 
         # select best model
@@ -2678,15 +2853,15 @@ class VariogramAnalysis:
             m.msspe is not None for m in selector.fitted_models
         )
 
-        lines = ["=" * 95]
+        lines = ["=" * 105]
         lines.append("VARIOGRAM MODEL SELECTION SUMMARY")
-        lines.append("=" * 95)
-        header = f"{'Model':<35} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10}"
+        lines.append("=" * 105)
+        header = f"{'Model':<40} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10}"
         if has_msspe:
-            header += f" {'MSSPE':>8}"
+            header += f" {'MSSPE':>12}"
         header += f" {'Weight':>10}"
         lines.append(header)
-        lines.append("-" * 95)
+        lines.append("-" * 105)
 
         weights = selector.model_weights if selector.model_weights is not None else [0] * len(selector.fitted_models)
         sorted_models = sorted(zip(selector.fitted_models, weights), key=lambda x: x[0].aic)
@@ -2697,10 +2872,16 @@ class VariogramAnalysis:
                 name += "+nugget"
             cv_str = f"{model.cv_rmse:.4f}" if model.cv_rmse else "N/A"
             marker = " *" if model is selector.best_model else ""
-            row = f"{name:<35} {model.aic:>10.2f} {model.bic:>10.2f} {cv_str:>10}"
+            row = f"{name:<40} {model.aic:>10.2f} {model.bic:>10.2f} {cv_str:>10}"
             if has_msspe:
-                msspe_str = f"{model.msspe:.3f}" if model.msspe is not None else "N/A"
-                row += f" {msspe_str:>8}"
+                if model.msspe is not None:
+                    msspe_str = f"{model.msspe:.3f}"
+                    std = getattr(model, 'msspe_std', None)
+                    if std is not None:
+                        msspe_str += f"±{std:.3f}"
+                else:
+                    msspe_str = "N/A"
+                row += f" {msspe_str:>12}"
             row += f" {weight:>10.4f}{marker}"
             lines.append(row)
 
