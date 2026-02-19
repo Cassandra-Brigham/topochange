@@ -598,149 +598,241 @@ class EnsembleVariogramResult:
         lines.append("=" * 72)
         return "\n".join(lines)
 
-    def plot(self, figsize=(12, 10)):
+    def plot(self, figsize=(10, 8), unit: str = ''):
         """Plot ensemble variogram results.
 
-        Creates a 3-panel figure:
-          - Top: model selection frequency bar chart
-          - Middle: median fitted variogram ± 16th/84th percentile
-            envelope, with individual empirical variograms in light gray
-          - Bottom: parameter distributions (sills, ranges, nugget, ν)
+        Creates a 2-panel figure:
+
+        Upper panel
+            Median bin pair counts as a bar chart.
+
+        Lower panel
+            - **Empirical variogram**: median per bin as points with
+              1σ (solid blue) and 2σ (dotted blue) error bars.
+            - **Ranges**: median as vertical lines (red / green /
+              lightblue for range 1 / 2 / 3), with 1σ and 2σ
+              envelopes as translucent vertical rectangles.
+            - **Nugget**: median as horizontal orange line, with 1σ
+              and 2σ envelopes as translucent horizontal rectangles.
+            - **Fitted model**: dark-red curve evaluated at the
+              median parameters of the most frequently selected
+              model structure (modal model + median params).
+
+        Parameters
+        ----------
+        figsize : tuple
+            Figure size (width, height) in inches.
+        unit : str
+            Distance unit label for axes (e.g. 'm').
 
         Returns
         -------
         fig : matplotlib.figure.Figure
         """
-        from matplotlib.patches import Patch
+        from matplotlib.patches import Patch, Rectangle
         from matplotlib.lines import Line2D
-        from collections import Counter
 
+        lags = self.lags
         n_ok = self.n_realizations - self.n_failed
 
-        fig, axes = plt.subplots(3, 1, figsize=figsize,
-                                 gridspec_kw={'height_ratios': [1, 2.5, 1.5]})
-
-        # ── Panel 1: model selection frequency ──
-        ax = axes[0]
-        sorted_models = sorted(
-            self.model_counts.items(), key=lambda x: -x[1]
-        )
-        names = [m[0] for m in sorted_models]
-        counts = [m[1] for m in sorted_models]
-        bars = ax.barh(range(len(names)), counts, color='steelblue', alpha=0.8)
-        ax.set_yticks(range(len(names)))
-        ax.set_yticklabels(names, fontsize=8)
-        ax.set_xlabel('Times selected')
-        ax.set_title(f'Model selection frequency (n={n_ok})')
-        ax.invert_yaxis()
-
-        # ── Panel 2: median variogram + envelope ──
-        ax = axes[1]
-        lags = self.lags
-
-        # individual empirical variograms (light gray)
-        for i in range(self.empirical_variograms.shape[0]):
-            ev = self.empirical_variograms[i]
-            valid = np.isfinite(ev)
-            if np.any(valid):
-                ax.plot(lags[valid], ev[valid], color='gray', alpha=0.1,
-                        linewidth=0.5)
-
-        # fitted variogram envelope
-        vario_arr = self.variograms
-        with np.errstate(all='ignore'):
-            median_curve = np.nanmedian(vario_arr, axis=0)
-            p16_curve = np.nanpercentile(vario_arr, 16, axis=0)
-            p84_curve = np.nanpercentile(vario_arr, 84, axis=0)
-            p025_curve = np.nanpercentile(vario_arr, 2.5, axis=0)
-            p975_curve = np.nanpercentile(vario_arr, 97.5, axis=0)
-
-        # also plot median empirical variogram
+        # ── compute percentiles across realizations ──
         with np.errstate(all='ignore'):
             median_emp = np.nanmedian(self.empirical_variograms, axis=0)
+            p16_emp = np.nanpercentile(self.empirical_variograms, 16, axis=0)
+            p84_emp = np.nanpercentile(self.empirical_variograms, 84, axis=0)
+            p2_5_emp = np.nanpercentile(self.empirical_variograms, 2.5, axis=0)
+            p97_5_emp = np.nanpercentile(self.empirical_variograms, 97.5, axis=0)
+            median_counts = np.nanmedian(self.pair_counts, axis=0)
+
         valid_emp = np.isfinite(median_emp)
-        ax.plot(lags[valid_emp], median_emp[valid_emp], 'ko', markersize=4,
-                alpha=0.6, label='Median empirical')
 
-        valid_fit = np.isfinite(median_curve)
-        ax.fill_between(lags[valid_fit], p025_curve[valid_fit],
-                        p975_curve[valid_fit], color='steelblue',
-                        alpha=0.1, label='95% envelope')
-        ax.fill_between(lags[valid_fit], p16_curve[valid_fit],
-                        p84_curve[valid_fit], color='steelblue',
-                        alpha=0.3, label='68% envelope')
-        ax.plot(lags[valid_fit], median_curve[valid_fit], 'b-',
-                linewidth=2, label='Median fitted')
+        # ── range percentiles (per component) ──
+        n_range_cols = self.ranges.shape[1] if self.ranges.ndim > 1 else 0
+        range_stats = []  # list of (median, p16, p84, p2.5, p97.5) per col
+        for j in range(n_range_cols):
+            col = self.ranges[:, j]
+            v = col[np.isfinite(col)]
+            if len(v) > 0:
+                range_stats.append({
+                    'median': float(np.median(v)),
+                    'p16': float(np.percentile(v, 16)),
+                    'p84': float(np.percentile(v, 84)),
+                    'p2_5': float(np.percentile(v, 2.5)),
+                    'p97_5': float(np.percentile(v, 97.5)),
+                })
 
-        ax.set_xlabel('Lag distance')
-        ax.set_ylabel('Semivariance')
-        ax.set_title('Ensemble variogram')
-        ax.legend(loc='lower right', fontsize=8)
+        # ── nugget percentiles ──
+        nug_valid = self.nuggets[np.isfinite(self.nuggets)]
+        nug_stats = None
+        if len(nug_valid) > 0:
+            nug_stats = {
+                'median': float(np.median(nug_valid)),
+                'p16': float(np.percentile(nug_valid, 16)),
+                'p84': float(np.percentile(nug_valid, 84)),
+                'p2_5': float(np.percentile(nug_valid, 2.5)),
+                'p97_5': float(np.percentile(nug_valid, 97.5)),
+            }
 
-        # ── Panel 3: parameter distributions ──
-        ax = axes[2]
-        # Collect all non-NaN parameter arrays for box plots
-        box_data = []
-        box_labels = []
+        # ── build median model curve (modal structure + median params) ──
+        modal_desc = max(self.model_counts, key=self.model_counts.get)
+        modal_records = [
+            rec for rec in self.per_realization
+            if rec['model_description'] == modal_desc
+        ]
 
-        for j in range(self.sills.shape[1] if self.sills.ndim > 1 else 0):
-            vals = self.sills[:, j]
-            valid = vals[np.isfinite(vals)]
-            if len(valid) > 0:
-                box_data.append(valid)
-                box_labels.append(f'Sill {j + 1}')
+        median_model_curve = None
+        if modal_records:
+            # extract component_names and include_nugget from the first
+            ref = modal_records[0]
+            comp_names = ref['component_names']
+            inc_nugget = ref['include_nugget']
 
-        valid_nug = self.nuggets[np.isfinite(self.nuggets)]
-        if len(valid_nug) > 0:
-            box_data.append(valid_nug)
-            box_labels.append('Nugget')
+            # stack parameter arrays and take element-wise median
+            all_params = np.array([rec['params'] for rec in modal_records])
+            median_params = np.nanmedian(all_params, axis=0)
 
-        valid_nu = self.nus[np.isfinite(self.nus)]
-        if len(valid_nu) > 0:
-            box_data.append(valid_nu)
-            box_labels.append('Matérn ν')
-
-        if box_data:
-            bp = ax.boxplot(box_data, labels=box_labels, vert=True,
-                            patch_artist=True, showfliers=True,
-                            flierprops=dict(markersize=3, alpha=0.4))
-            for patch in bp['boxes']:
-                patch.set_facecolor('steelblue')
-                patch.set_alpha(0.5)
-            ax.set_ylabel('Parameter value')
-            ax.set_title('Parameter distributions (sills, nugget, ν)')
-
-            # add a secondary axis for ranges (different scale)
-            range_data = []
-            range_labels = []
-            for j in range(self.ranges.shape[1] if self.ranges.ndim > 1 else 0):
-                vals = self.ranges[:, j]
-                valid = vals[np.isfinite(vals)]
-                if len(valid) > 0:
-                    range_data.append(valid)
-                    range_labels.append(f'Range {j + 1}')
-
-            if range_data:
-                ax2 = ax.twinx()
-                positions = list(range(
-                    len(box_data) + 1,
-                    len(box_data) + 1 + len(range_data),
-                ))
-                bp2 = ax2.boxplot(
-                    range_data, positions=positions,
-                    labels=range_labels, vert=True,
-                    patch_artist=True, showfliers=True,
-                    flierprops=dict(markersize=3, alpha=0.4),
+            try:
+                median_model = CompositeVariogramModel(
+                    comp_names, include_nugget=inc_nugget,
                 )
-                for patch in bp2['boxes']:
-                    patch.set_facecolor('coral')
-                    patch.set_alpha(0.5)
-                ax2.set_ylabel('Range value', color='coral')
-                ax.set_xlim(0.5, len(box_data) + len(range_data) + 0.5)
-                all_labels = box_labels + range_labels
-                all_positions = list(range(1, len(box_data) + 1)) + positions
-                ax.set_xticks(all_positions)
-                ax.set_xticklabels(all_labels, fontsize=8, rotation=15)
+                median_model.set_params(median_params)
+                # evaluate at a dense set of lags for a smooth curve
+                lag_fine = np.linspace(0, float(lags[-1]) * 1.05, 300)
+                median_model_curve = (lag_fine, median_model(lag_fine))
+            except Exception:
+                median_model_curve = None
+
+        # ── create figure ──
+        fig, axs = plt.subplots(
+            2, 1, figsize=figsize, sharex=True,
+            gridspec_kw={'height_ratios': [1, 3]},
+        )
+
+        # ── upper panel: pair counts ──
+        ax_top = axs[0]
+        valid_c = np.isfinite(median_counts) & (median_counts > 0)
+        if len(lags) > 1:
+            bar_w = (lags[1] - lags[0]) * 0.9
+        else:
+            bar_w = (lags[0] if len(lags) else 1.0) * 0.9
+        ax_top.bar(
+            lags[valid_c], median_counts[valid_c],
+            width=bar_w, color='orange', alpha=0.5,
+        )
+        ax_top.set_ylabel('Median pair count')
+        ax_top.tick_params(labelbottom=False)
+
+        # ── lower panel: main variogram plot ──
+        ax = axs[1]
+
+        # — empirical variogram: median points + error bars —
+        err_1sig_lo = median_emp - p16_emp
+        err_1sig_hi = p84_emp - median_emp
+        err_2sig_lo = median_emp - p2_5_emp
+        err_2sig_hi = p97_5_emp - median_emp
+
+        # 2σ error bars (dotted blue, plotted first so 1σ overlays)
+        ax.errorbar(
+            lags[valid_emp], median_emp[valid_emp],
+            yerr=[err_2sig_lo[valid_emp], err_2sig_hi[valid_emp]],
+            fmt='none', ecolor='steelblue', elinewidth=1.0,
+            capsize=3, capthick=1.0,
+            linestyle=':', zorder=3,
+        )
+        # draw dotted caps manually by setting the caplines linestyle
+        # (errorbar capstyle can't be dotted, so use thin alpha)
+
+        # 1σ error bars (solid blue)
+        _, caps_1, bars_1 = ax.errorbar(
+            lags[valid_emp], median_emp[valid_emp],
+            yerr=[err_1sig_lo[valid_emp], err_1sig_hi[valid_emp]],
+            fmt='o', color='steelblue', ecolor='steelblue',
+            elinewidth=1.8, capsize=4, capthick=1.8,
+            markersize=5, markerfacecolor='steelblue',
+            markeredgecolor='navy', markeredgewidth=0.5,
+            zorder=4, label='Median empirical',
+        )
+
+        # — range envelopes (vertical rectangles) —
+        range_colors = ['red', 'green', 'lightblue']
+
+        for i, rs in enumerate(range_stats):
+            c = range_colors[i % len(range_colors)]
+            # 2σ envelope (very translucent)
+            ax.axvspan(
+                rs['p2_5'], rs['p97_5'],
+                color=c, alpha=0.08, zorder=1,
+            )
+            # 1σ envelope (translucent)
+            ax.axvspan(
+                rs['p16'], rs['p84'],
+                color=c, alpha=0.20, zorder=1,
+            )
+            # median range (solid vertical line)
+            ax.axvline(
+                rs['median'], color=c, linewidth=1.8,
+                linestyle='-', zorder=5,
+                label=f'Range {i + 1}: {rs["median"]:.0f}',
+            )
+
+        # — nugget envelope (horizontal rectangles) —
+        if nug_stats is not None:
+            # 2σ envelope
+            ax.axhspan(
+                nug_stats['p2_5'], nug_stats['p97_5'],
+                color='orange', alpha=0.08, zorder=1,
+            )
+            # 1σ envelope
+            ax.axhspan(
+                nug_stats['p16'], nug_stats['p84'],
+                color='orange', alpha=0.20, zorder=1,
+            )
+            # median nugget line
+            ax.axhline(
+                nug_stats['median'], color='orange', linewidth=1.8,
+                linestyle='-', zorder=5,
+                label=f'Nugget: {nug_stats["median"]:.4g}',
+            )
+
+        # — median model curve (dark red) —
+        if median_model_curve is not None:
+            lag_fine, gamma_fine = median_model_curve
+            ax.plot(
+                lag_fine, gamma_fine,
+                color='darkred', linewidth=2.2, zorder=6,
+                label=f'Median model ({modal_desc})',
+            )
+
+        # ── axis labels, legend, title ──
+        xlabel = 'Lag distance'
+        if unit:
+            xlabel += f' ({unit})'
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel('Semivariance')
+        ax.set_xlim(0, float(lags[-1]) * 1.05)
+        ax.set_ylim(bottom=0)
+
+        # build a compact legend
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(
+            handles, labels, loc='lower right', fontsize=8,
+            framealpha=0.9, edgecolor='gray',
+        )
+
+        # informative title
+        msspe_valid = self.msspes[np.isfinite(self.msspes)]
+        title_parts = [
+            f'Ensemble variogram  (n={n_ok} realizations)',
+        ]
+        if len(msspe_valid) > 0:
+            title_parts.append(
+                f'MSSPE={np.median(msspe_valid):.3f}'
+            )
+        title_parts.append(
+            f'Modal: {modal_desc} '
+            f'({self.model_counts[modal_desc]}/{n_ok})'
+        )
+        ax.set_title('   |   '.join(title_parts), fontsize=9)
 
         plt.tight_layout()
         return fig
