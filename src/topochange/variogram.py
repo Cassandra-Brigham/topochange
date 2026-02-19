@@ -2770,7 +2770,14 @@ class VariogramAnalysis:
                         )
                         if np.isfinite(result.msspe):
                             run_results.append(result)
-                    except Exception:
+                    except Exception as exc:
+                        import warnings as _warnings
+                        model_name = "+".join(fitted.composite_model.component_names)
+                        _warnings.warn(
+                            f"LOOCV failed for {model_name}: "
+                            f"{type(exc).__name__}: {exc}",
+                            stacklevel=2,
+                        )
                         continue
 
                 if run_results:
@@ -3102,8 +3109,17 @@ class VariogramAnalysis:
         z_aug[:n] = values
 
         # ── invert once → all LOO diagnostics ──
+        #
+        # The augmented kriging semivariance system mixes γ(h) entries
+        # (which can be very small, e.g. O(10⁻³) for mm-scale
+        # topographic changes) with Lagrange-multiplier entries of 1.0.
+        # This makes the matrix poorly conditioned for np.linalg.inv.
+        #
+        # We use the SVD-based pseudoinverse (pinv) which handles
+        # ill-conditioning gracefully by zeroing out singular values
+        # below a threshold, rather than amplifying numerical noise.
         try:
-            A_inv = np.linalg.inv(A)
+            A_inv = np.linalg.pinv(A, rcond=1e-12)
         except np.linalg.LinAlgError:
             return KrigingLOOCVResult(
                 msspe=np.nan,
@@ -3121,7 +3137,8 @@ class VariogramAnalysis:
         diag_A_inv = np.diag(A_inv)[:n]  # first n diagonal entries
 
         # guard against zero/negative diagonal (numerically singular)
-        valid_diag = np.abs(diag_A_inv) > np.finfo(float).eps
+        eps = max(np.finfo(float).eps, 1e-15 * np.max(np.abs(diag_A_inv)))
+        valid_diag = np.abs(diag_A_inv) > eps
         n_failed = int(np.sum(~valid_diag))
 
         errors = np.full(n, np.nan)
@@ -3531,7 +3548,25 @@ class VariogramAnalysis:
                                 fitted.msspe_std = None
                                 fitted.msspe_n_runs = 1
                                 fitted.loocv_result = AggregatedLOOCVResult.from_results([result])
-                        except Exception:
+                            elif verbose:
+                                model_name = "+".join(fitted.composite_model.component_names)
+                                import warnings as _warnings
+                                _warnings.warn(
+                                    f"LOOCV returned non-finite MSSPE for "
+                                    f"{model_name} (n_points={result.n_points}, "
+                                    f"n_failed={result.n_failed}, "
+                                    f"msspe={result.msspe:.4g})",
+                                    stacklevel=2,
+                                )
+                        except Exception as exc:
+                            if verbose:
+                                model_name = "+".join(fitted.composite_model.component_names)
+                                import warnings as _warnings
+                                _warnings.warn(
+                                    f"LOOCV failed for {model_name}: "
+                                    f"{type(exc).__name__}: {exc}",
+                                    stacklevel=2,
+                                )
                             continue
 
                 best = selector.select_best(criterion=criterion)
