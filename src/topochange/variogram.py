@@ -292,9 +292,295 @@ class AggregatedLOOCVResult:
         )
 
 
+@dataclass
+class EnsembleVariogramResult:
+    """Results from ensemble variogram fitting across independent spatial samples.
+
+    Each realization draws an independent random sample from the raster,
+    computes an empirical variogram, runs the full model selection pipeline
+    (all candidate model types, WLS fitting, MSSPE-based selection), and
+    records the winning model's structure and parameters.  The ensemble
+    captures both *model selection uncertainty* (does the pipeline always
+    pick the same model family?) and *parameter uncertainty* (how stable
+    are the fitted sills, ranges, nuggets, and Matérn ν?).
+
+    This is conceptually similar to a parametric bootstrap, but instead
+    of perturbing a single empirical variogram, it re-samples the spatial
+    field — making it a Monte Carlo assessment of the entire pipeline
+    from sampling through model selection.
+
+    Attributes
+    ----------
+    n_realizations : int
+        Number of independent variogram realizations fitted.
+    n_failed : int
+        Realizations where no model could be fitted.
+    model_counts : dict
+        {model_description: count} — how often each model structure
+        was selected (e.g. ``{'spherical + nugget': 35, 'exponential + matern + nugget': 15}``).
+    model_fractions : dict
+        {model_description: fraction} — selection frequency as proportion.
+    sills : ndarray, shape (n_success, max_n_sills)
+        Per-realization sill values (NaN-padded where models have
+        fewer sill components).
+    ranges : ndarray, shape (n_success, max_n_ranges)
+        Per-realization range values (NaN-padded).
+    nuggets : ndarray, shape (n_success,)
+        Per-realization nugget values (NaN where model has no nugget).
+    nus : ndarray, shape (n_success,)
+        Per-realization Matérn ν values (NaN for non-Matérn models).
+    msspes : ndarray, shape (n_success,)
+        Per-realization MSSPE of the selected model.
+    lags : ndarray
+        Common lag vector (from the first successful realization).
+    variograms : ndarray, shape (n_success, n_lags)
+        Per-realization fitted variogram curves evaluated at ``lags``.
+    empirical_variograms : ndarray, shape (n_success, n_lags)
+        Per-realization empirical variograms (NaN-padded to common length).
+    per_realization : list of dict
+        Detailed per-realization records including model description,
+        all parameters, component names, MSSPE, AIC, and fitted curve.
+
+    References
+    ----------
+    Lark, R.M. (2000). A comparison of some robust estimators of the
+    variogram for use in soil survey. *Eur. J. Soil Sci.*, 51, 137–157.
+
+    Marchetti, Y. et al. (2018). An assessment of model selection
+    uncertainty in spatial prediction. *Environmetrics*, 29(7–8),
+    e2530. doi:10.1002/env.2530
+    """
+
+    n_realizations: int
+    n_failed: int
+    model_counts: Dict[str, int]
+    model_fractions: Dict[str, float]
+    sills: np.ndarray
+    ranges: np.ndarray
+    nuggets: np.ndarray
+    nus: np.ndarray
+    msspes: np.ndarray
+    lags: np.ndarray
+    variograms: np.ndarray
+    empirical_variograms: np.ndarray
+    per_realization: List[Dict[str, Any]]
+
+    def summary(self) -> str:
+        """Human-readable summary of ensemble results."""
+        lines = []
+        lines.append("=" * 72)
+        lines.append("ENSEMBLE VARIOGRAM FITTING RESULTS")
+        lines.append("=" * 72)
+        n_ok = self.n_realizations - self.n_failed
+        lines.append(
+            f"Realizations: {self.n_realizations} total, "
+            f"{n_ok} successful, {self.n_failed} failed"
+        )
+        lines.append("")
+
+        # model selection frequency
+        lines.append("MODEL SELECTION FREQUENCY")
+        lines.append("-" * 50)
+        for desc, frac in sorted(
+            self.model_fractions.items(), key=lambda x: -x[1]
+        ):
+            cnt = self.model_counts[desc]
+            lines.append(f"  {desc:<40s}  {cnt:3d} ({frac:5.1%})")
+        lines.append("")
+
+        # parameter summaries
+        lines.append("PARAMETER SUMMARY (median [16th, 84th percentile])")
+        lines.append("-" * 50)
+
+        def _summarize(arr, name):
+            valid = arr[np.isfinite(arr)]
+            if len(valid) == 0:
+                return
+            med = np.median(valid)
+            p16 = np.percentile(valid, 16)
+            p84 = np.percentile(valid, 84)
+            lines.append(f"  {name:<20s}  {med:10.4f}  [{p16:.4f}, {p84:.4f}]")
+
+        # sills
+        for j in range(self.sills.shape[1] if self.sills.ndim > 1 else 0):
+            _summarize(self.sills[:, j], f"Sill {j + 1}")
+
+        # ranges
+        for j in range(self.ranges.shape[1] if self.ranges.ndim > 1 else 0):
+            _summarize(self.ranges[:, j], f"Range {j + 1}")
+
+        _summarize(self.nuggets, "Nugget")
+        _summarize(self.nus, "Matérn ν")
+        lines.append("")
+
+        # MSSPE
+        valid_msspe = self.msspes[np.isfinite(self.msspes)]
+        if len(valid_msspe) > 0:
+            lines.append("MSSPE SUMMARY")
+            lines.append("-" * 50)
+            lines.append(
+                f"  Median: {np.median(valid_msspe):.4f}  "
+                f"Mean: {np.mean(valid_msspe):.4f}  "
+                f"Std: {np.std(valid_msspe):.4f}"
+            )
+            lines.append(
+                f"  [16th, 84th]: [{np.percentile(valid_msspe, 16):.4f}, "
+                f"{np.percentile(valid_msspe, 84):.4f}]"
+            )
+        lines.append("=" * 72)
+        return "\n".join(lines)
+
+    def plot(self, figsize=(12, 10)):
+        """Plot ensemble variogram results.
+
+        Creates a 3-panel figure:
+          - Top: model selection frequency bar chart
+          - Middle: median fitted variogram ± 16th/84th percentile
+            envelope, with individual empirical variograms in light gray
+          - Bottom: parameter distributions (sills, ranges, nugget, ν)
+
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+        """
+        from matplotlib.patches import Patch
+        from matplotlib.lines import Line2D
+        from collections import Counter
+
+        n_ok = self.n_realizations - self.n_failed
+
+        fig, axes = plt.subplots(3, 1, figsize=figsize,
+                                 gridspec_kw={'height_ratios': [1, 2.5, 1.5]})
+
+        # ── Panel 1: model selection frequency ──
+        ax = axes[0]
+        sorted_models = sorted(
+            self.model_counts.items(), key=lambda x: -x[1]
+        )
+        names = [m[0] for m in sorted_models]
+        counts = [m[1] for m in sorted_models]
+        bars = ax.barh(range(len(names)), counts, color='steelblue', alpha=0.8)
+        ax.set_yticks(range(len(names)))
+        ax.set_yticklabels(names, fontsize=8)
+        ax.set_xlabel('Times selected')
+        ax.set_title(f'Model selection frequency (n={n_ok})')
+        ax.invert_yaxis()
+
+        # ── Panel 2: median variogram + envelope ──
+        ax = axes[1]
+        lags = self.lags
+
+        # individual empirical variograms (light gray)
+        for i in range(self.empirical_variograms.shape[0]):
+            ev = self.empirical_variograms[i]
+            valid = np.isfinite(ev)
+            if np.any(valid):
+                ax.plot(lags[valid], ev[valid], color='gray', alpha=0.1,
+                        linewidth=0.5)
+
+        # fitted variogram envelope
+        vario_arr = self.variograms
+        with np.errstate(all='ignore'):
+            median_curve = np.nanmedian(vario_arr, axis=0)
+            p16_curve = np.nanpercentile(vario_arr, 16, axis=0)
+            p84_curve = np.nanpercentile(vario_arr, 84, axis=0)
+            p025_curve = np.nanpercentile(vario_arr, 2.5, axis=0)
+            p975_curve = np.nanpercentile(vario_arr, 97.5, axis=0)
+
+        # also plot median empirical variogram
+        with np.errstate(all='ignore'):
+            median_emp = np.nanmedian(self.empirical_variograms, axis=0)
+        valid_emp = np.isfinite(median_emp)
+        ax.plot(lags[valid_emp], median_emp[valid_emp], 'ko', markersize=4,
+                alpha=0.6, label='Median empirical')
+
+        valid_fit = np.isfinite(median_curve)
+        ax.fill_between(lags[valid_fit], p025_curve[valid_fit],
+                        p975_curve[valid_fit], color='steelblue',
+                        alpha=0.1, label='95% envelope')
+        ax.fill_between(lags[valid_fit], p16_curve[valid_fit],
+                        p84_curve[valid_fit], color='steelblue',
+                        alpha=0.3, label='68% envelope')
+        ax.plot(lags[valid_fit], median_curve[valid_fit], 'b-',
+                linewidth=2, label='Median fitted')
+
+        ax.set_xlabel('Lag distance')
+        ax.set_ylabel('Semivariance')
+        ax.set_title('Ensemble variogram')
+        ax.legend(loc='lower right', fontsize=8)
+
+        # ── Panel 3: parameter distributions ──
+        ax = axes[2]
+        # Collect all non-NaN parameter arrays for box plots
+        box_data = []
+        box_labels = []
+
+        for j in range(self.sills.shape[1] if self.sills.ndim > 1 else 0):
+            vals = self.sills[:, j]
+            valid = vals[np.isfinite(vals)]
+            if len(valid) > 0:
+                box_data.append(valid)
+                box_labels.append(f'Sill {j + 1}')
+
+        valid_nug = self.nuggets[np.isfinite(self.nuggets)]
+        if len(valid_nug) > 0:
+            box_data.append(valid_nug)
+            box_labels.append('Nugget')
+
+        valid_nu = self.nus[np.isfinite(self.nus)]
+        if len(valid_nu) > 0:
+            box_data.append(valid_nu)
+            box_labels.append('Matérn ν')
+
+        if box_data:
+            bp = ax.boxplot(box_data, labels=box_labels, vert=True,
+                            patch_artist=True, showfliers=True,
+                            flierprops=dict(markersize=3, alpha=0.4))
+            for patch in bp['boxes']:
+                patch.set_facecolor('steelblue')
+                patch.set_alpha(0.5)
+            ax.set_ylabel('Parameter value')
+            ax.set_title('Parameter distributions (sills, nugget, ν)')
+
+            # add a secondary axis for ranges (different scale)
+            range_data = []
+            range_labels = []
+            for j in range(self.ranges.shape[1] if self.ranges.ndim > 1 else 0):
+                vals = self.ranges[:, j]
+                valid = vals[np.isfinite(vals)]
+                if len(valid) > 0:
+                    range_data.append(valid)
+                    range_labels.append(f'Range {j + 1}')
+
+            if range_data:
+                ax2 = ax.twinx()
+                positions = list(range(
+                    len(box_data) + 1,
+                    len(box_data) + 1 + len(range_data),
+                ))
+                bp2 = ax2.boxplot(
+                    range_data, positions=positions,
+                    labels=range_labels, vert=True,
+                    patch_artist=True, showfliers=True,
+                    flierprops=dict(markersize=3, alpha=0.4),
+                )
+                for patch in bp2['boxes']:
+                    patch.set_facecolor('coral')
+                    patch.set_alpha(0.5)
+                ax2.set_ylabel('Range value', color='coral')
+                ax.set_xlim(0.5, len(box_data) + len(range_data) + 0.5)
+                all_labels = box_labels + range_labels
+                all_positions = list(range(1, len(box_data) + 1)) + positions
+                ax.set_xticks(all_positions)
+                ax.set_xticklabels(all_labels, fontsize=8, rotation=15)
+
+        plt.tight_layout()
+        return fig
+
+
 class VariogramModelSelector:
     """Select and fit optimal variogram model from candidates.
-    
+
     This class implements:
     - Automatic generation of candidate nested models
     - Fitting via weighted least squares
@@ -2598,7 +2884,7 @@ class VariogramAnalysis:
         max_components: int = 2,
         include_nugget: bool = True,
         criterion: str = 'msspe',
-        compute_cv: bool = True,
+        compute_cv: bool = False,
         cv_folds: int = 5,
         n_bootstrap: int = 500,
         seed: Optional[int] = None,
@@ -3198,6 +3484,355 @@ class VariogramAnalysis:
             n_points=n_valid,
             n_failed=n_failed,
         )
+
+    def fit_variogram_ensemble(
+        self,
+        n_realizations: int = 50,
+        area_side: float = 1000,
+        samples_per_area: float = 1.0,
+        max_samples: int = 10000,
+        bin_width: float = 50.0,
+        max_lag_multiplier: float = 1 / 3,
+        *,
+        model_types: Optional[List[str]] = None,
+        max_components: int = 2,
+        include_nugget: bool = True,
+        criterion: str = 'msspe',
+        msspe_n_subset: int = 500,
+        msspe_n_runs: int = 5,
+        estimator: str = 'matheron',
+        min_pairs: Optional[int] = 30,
+        seed: Optional[int] = None,
+        verbose: bool = True,
+    ) -> 'EnsembleVariogramResult':
+        """Fit variogram models to independent spatial samples — ensemble approach.
+
+        Generates ``n_realizations`` independent empirical variograms
+        (each from a fresh random sample of the raster), runs the full
+        model selection pipeline on each, and collects results.  This
+        captures both *model selection uncertainty* and *parameter
+        uncertainty* in a single Monte Carlo experiment.
+
+        The approach is analogous to a spatial bootstrap: instead of
+        perturbing a single empirical variogram, it re-samples the
+        underlying field.  Each realization goes through candidate
+        generation → WLS fitting → MSSPE-based selection independently,
+        so the ensemble naturally reflects how sensitive model choice
+        and parameter estimates are to the particular sample drawn.
+
+        Parameters
+        ----------
+        n_realizations : int
+            Number of independent variogram realizations (default 50).
+        area_side : float
+            Reference side length for sampling density (e.g. 1000 for
+            km² if coordinates are in meters).
+        samples_per_area : float
+            Sampling density per reference area unit.
+        max_samples : int
+            Maximum points per realization.
+        bin_width : float
+            Lag bin width (same units as coordinates).
+        max_lag_multiplier : float
+            Maximum lag as fraction of domain diagonal.
+        model_types : list of str, optional
+            Model types to try (default: spherical, exponential,
+            gaussian, matern).
+        max_components : int
+            Maximum number of nested components (default 2, max 3).
+        include_nugget : bool
+            Whether to include nugget variants in candidates.
+        criterion : str
+            Selection criterion (default 'msspe').
+        msspe_n_subset : int
+            Points per MSSPE LOOCV run.
+        msspe_n_runs : int
+            MSSPE subsample repeats per candidate per realization.
+            Reduced from default 10 to 5 because the outer ensemble
+            loop already provides variance estimation.
+        estimator : str
+            Empirical variogram estimator ('matheron' or 'cressie_hawkins').
+        min_pairs : int or None
+            Minimum pair count per lag bin for inclusion.
+        seed : int, optional
+            Base random seed for reproducibility.
+        verbose : bool
+            Print progress (default True).
+
+        Returns
+        -------
+        EnsembleVariogramResult
+            Dataclass with per-realization parameters, model selection
+            frequencies, and aggregate statistics.  Call ``.summary()``
+            for a text report or ``.plot()`` for a multi-panel figure.
+
+        Notes
+        -----
+        Runtime scales as ``n_realizations × n_candidates × msspe_n_runs``.
+        With 50 realizations, ~30 candidates, and 5 MSSPE runs each,
+        expect ~7500 LOOCV evaluations — on the order of 1–2 hours for
+        n_subset=500 on typical hardware.  Reduce ``n_realizations`` or
+        ``msspe_n_runs`` for faster exploratory runs.
+
+        References
+        ----------
+        Marchetti, Y., Paciorek, C.J., & Genton, M.G. (2018).
+        An assessment of model selection uncertainty in spatial
+        prediction. *Environmetrics*, 29(7–8), e2530.
+        doi:10.1002/env.2530
+
+        Lark, R.M. (2000). A comparison of some robust estimators
+        of the variogram for use in soil survey. *Eur. J. Soil Sci.*,
+        51, 137–157.
+        """
+        if model_types is None:
+            model_types = ['spherical', 'exponential', 'gaussian', 'matern']
+
+        # reproducible child seeds
+        ss = np.random.SeedSequence(seed)
+        child_seeds = ss.spawn(n_realizations)
+
+        # storage
+        records: List[Dict[str, Any]] = []
+        all_empirical: List[np.ndarray] = []
+        all_fitted_curves: List[np.ndarray] = []
+        common_lags: Optional[np.ndarray] = None
+        n_failed = 0
+
+        for r in range(n_realizations):
+            run_seed = int(child_seeds[r].generate_state(1)[0])
+
+            if verbose:
+                print(f"  Realization {r + 1}/{n_realizations} "
+                      f"(seed={run_seed})", end=" ... ", flush=True)
+
+            try:
+                # ── 1. Sample raster and compute empirical variogram ──
+                (bin_counts, variogram_est, n_bins,
+                 min_dist, max_dist, max_lag) = self.numba_variogram(
+                    area_side, samples_per_area, max_samples,
+                    bin_width, max_lag_multiplier,
+                    seed=run_seed,
+                    estimator=estimator,
+                )
+
+                # build lags and filter valid bins
+                n_lags = variogram_est.size
+                lags = np.linspace(
+                    bin_width / 2,
+                    bin_width * n_lags - bin_width / 2,
+                    n_lags,
+                )
+                valid = np.isfinite(variogram_est)
+                if valid.sum() < 5:
+                    raise ValueError("Fewer than 5 valid lag bins.")
+
+                emp_vario = variogram_est[valid]
+                emp_lags = lags[valid]
+                emp_counts = bin_counts[valid] if bin_counts is not None else None
+
+                # Store common lag vector from first success
+                if common_lags is None:
+                    common_lags = emp_lags.copy()
+
+                # Compute sigma (std across bins) — use simple approach
+                # for single realizations: std ∝ γ(h) / √N(h)
+                if emp_counts is not None:
+                    safe_counts = np.where(emp_counts > 0, emp_counts, 1)
+                    sigma = emp_vario / np.sqrt(safe_counts)
+                    sigma = np.where(sigma > 0, sigma, np.finfo(float).eps)
+                else:
+                    sigma = None
+
+                # ── 2. Fit all candidate models ──
+                selector = VariogramModelSelector(
+                    lags=emp_lags,
+                    empirical_variogram=emp_vario,
+                    pair_counts=emp_counts,
+                    sigma=sigma,
+                    min_pairs=min_pairs,
+                )
+
+                # override model lists
+                available = MODEL_REGISTRY.list_models()
+                selector.BOUNDED_MODELS = [m for m in model_types
+                                           if m in available and MODEL_REGISTRY.is_bounded(m)]
+                selector.UNBOUNDED_MODELS = [m for m in model_types
+                                             if m in available and not MODEL_REGISTRY.is_bounded(m)]
+
+                selector.fit_all_candidates(
+                    max_components=min(max_components, 3),
+                    include_nugget=include_nugget,
+                    include_unbounded=bool(selector.UNBOUNDED_MODELS),
+                    compute_cv=False,
+                    seed=run_seed,
+                )
+
+                if not selector.fitted_models:
+                    raise ValueError("No models successfully fitted.")
+
+                # ── 3. Compute MSSPE and select best ──
+                if criterion == 'msspe':
+                    rdh = self.raster_data_handler
+                    coords = rdh.coords
+                    values = rdh.samples
+
+                    run_rng = np.random.default_rng(run_seed)
+                    msspe_seeds = run_rng.integers(0, 2**31, size=msspe_n_runs)
+
+                    for fitted in selector.fitted_models:
+                        if not fitted.composite_model.is_stationary:
+                            continue
+                        run_results: list = []
+                        for ms in msspe_seeds:
+                            try:
+                                result = self.kriging_loocv(
+                                    coords, values,
+                                    fitted.composite_model,
+                                    n_subset=msspe_n_subset,
+                                    seed=int(ms),
+                                )
+                                if np.isfinite(result.msspe):
+                                    run_results.append(result)
+                            except Exception:
+                                continue
+                        if run_results:
+                            agg = AggregatedLOOCVResult.from_results(run_results)
+                            fitted.msspe = agg.msspe_mean
+                            fitted.msspe_std = agg.msspe_std
+                            fitted.msspe_n_runs = agg.n_runs
+                            fitted.loocv_result = agg
+
+                best = selector.select_best(criterion=criterion)
+
+                # ── 4. Extract parameters ──
+                model = best.composite_model
+                params = best.params
+                desc = model.description()
+
+                # extract sills, ranges, nugget, nu
+                sills_r = []
+                ranges_r = []
+                nu_val = np.nan
+
+                for i, spec in enumerate(model._components):
+                    comp_params = model.get_component_params(i)
+                    if spec.has_sill:
+                        sills_r.append(comp_params[0])
+                    for rkey in ('range', 'wavelength'):
+                        if rkey in spec.param_names:
+                            ridx = spec.param_names.index(rkey)
+                            ranges_r.append(
+                                comp_params[ridx] * (spec.practical_range_factor or 1.0)
+                            )
+                            break
+                    if 'nu' in spec.param_names:
+                        nu_idx = spec.param_names.index('nu')
+                        nu_val = comp_params[nu_idx]
+
+                nugget_val = model.get_nugget() if model.include_nugget else np.nan
+
+                # fitted curve evaluated at common lags
+                fitted_curve = model(common_lags) if common_lags is not None else np.array([])
+
+                # empirical variogram padded/trimmed to common lag length
+                if common_lags is not None:
+                    emp_padded = np.full(len(common_lags), np.nan)
+                    n_copy = min(len(emp_vario), len(common_lags))
+                    emp_padded[:n_copy] = emp_vario[:n_copy]
+                else:
+                    emp_padded = emp_vario
+
+                record = {
+                    'model_description': desc,
+                    'component_names': list(model.component_names),
+                    'include_nugget': model.include_nugget,
+                    'params': params.copy(),
+                    'param_names': model.param_names,
+                    'sills': sills_r,
+                    'ranges': ranges_r,
+                    'nugget': nugget_val,
+                    'nu': nu_val,
+                    'msspe': best.msspe,
+                    'msspe_std': best.msspe_std,
+                    'aic': best.aic,
+                    'rss': best.rss,
+                    'fitted_curve': fitted_curve,
+                    'empirical_variogram': emp_padded,
+                    'seed': run_seed,
+                }
+                records.append(record)
+                all_fitted_curves.append(fitted_curve)
+                all_empirical.append(emp_padded)
+
+                if verbose:
+                    msspe_str = (f"MSSPE={best.msspe:.3f}" if best.msspe is not None
+                                 else "MSSPE=N/A")
+                    print(f"{desc}  {msspe_str}")
+
+            except Exception as e:
+                n_failed += 1
+                if verbose:
+                    print(f"FAILED ({e})")
+                continue
+
+        # ── Assemble ensemble result ──
+        if not records:
+            raise RuntimeError(
+                f"All {n_realizations} realizations failed. "
+                "Check raster data and fitting parameters."
+            )
+
+        # model selection counts
+        from collections import Counter
+        desc_list = [rec['model_description'] for rec in records]
+        model_counts = dict(Counter(desc_list))
+        n_ok = len(records)
+        model_fractions = {k: v / n_ok for k, v in model_counts.items()}
+
+        # pad sills/ranges to common width
+        max_n_sills = max(len(rec['sills']) for rec in records)
+        max_n_ranges = max(len(rec['ranges']) for rec in records)
+
+        sills_arr = np.full((n_ok, max(max_n_sills, 1)), np.nan)
+        ranges_arr = np.full((n_ok, max(max_n_ranges, 1)), np.nan)
+        nuggets_arr = np.array([rec['nugget'] for rec in records])
+        nus_arr = np.array([rec['nu'] for rec in records])
+        msspes_arr = np.array([
+            rec['msspe'] if rec['msspe'] is not None else np.nan
+            for rec in records
+        ])
+
+        for i, rec in enumerate(records):
+            for j, s in enumerate(rec['sills']):
+                sills_arr[i, j] = s
+            for j, rng in enumerate(rec['ranges']):
+                ranges_arr[i, j] = rng
+
+        # stack fitted curves and empirical variograms
+        variograms_arr = np.array(all_fitted_curves)
+        empirical_arr = np.array(all_empirical)
+
+        result = EnsembleVariogramResult(
+            n_realizations=n_realizations,
+            n_failed=n_failed,
+            model_counts=model_counts,
+            model_fractions=model_fractions,
+            sills=sills_arr,
+            ranges=ranges_arr,
+            nuggets=nuggets_arr,
+            nus=nus_arr,
+            msspes=msspes_arr,
+            lags=common_lags if common_lags is not None else np.array([]),
+            variograms=variograms_arr,
+            empirical_variograms=empirical_arr,
+            per_realization=records,
+        )
+
+        if verbose:
+            print("\n" + result.summary())
+
+        return result
 
     def plot_best_model(self):
         """
