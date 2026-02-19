@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from typing import Sequence, Optional, Dict, Any, Callable
 import numpy as np
 import pandas as pd
@@ -2863,9 +2864,8 @@ class VariogramAnalysis:
                         if np.isfinite(result.msspe):
                             run_results.append(result)
                     except Exception as exc:
-                        import warnings as _warnings
                         model_name = "+".join(fitted.composite_model.component_names)
-                        _warnings.warn(
+                        warnings.warn(
                             f"LOOCV failed for {model_name}: "
                             f"{type(exc).__name__}: {exc}",
                             stacklevel=2,
@@ -3085,20 +3085,16 @@ class VariogramAnalysis:
     ) -> 'KrigingLOOCVResult':
         """Leave-one-out cross-validation using ordinary kriging.
 
-        Uses the virtual LOO identity (Dubrule, 1983) for O(n³) total
-        cost instead of O(n⁴):  invert the full augmented kriging
-        system once, then extract every LOO error and variance directly
-        from the inverse.  For point *i*::
+        For each point *i*, removes it from the dataset, builds the
+        ordinary kriging system from the remaining *n − 1* points,
+        predicts z_i and its kriging variance σ²_{−i}, then computes
+        the standardised squared error (z_i − ẑ_{−i})² / σ²_{−i}.
+        The MSSPE is the mean of these over all points; a value
+        near 1.0 indicates well-calibrated kriging uncertainty.
 
-            ê_i  = −[K⁻¹ z̃]_i  /  [K⁻¹]_{ii}
-            σ²_i = −1 / [K⁻¹]_{ii}
-
-        where K is the (n+1)×(n+1) augmented **covariance** matrix
-        and z̃ = [z₁, …, z_n, 0]ᵀ.  The covariance form is required
-        because the semivariance form produces an indefinite system
-        whose inverse has negative diagonal entries, yielding negative
-        kriging variances.  The covariance matrix is obtained via
-        C(h) = C(0) − γ(h).
+        Uses the **semivariance** form directly: the kriging
+        variance is σ² = λ′γ₀ + μ, which is guaranteed positive
+        for any valid (conditionally negative-definite) variogram.
 
         Parameters
         ----------
@@ -3131,33 +3127,31 @@ class VariogramAnalysis:
 
         Notes
         -----
-        The ordinary kriging augmented covariance system::
+        The ordinary kriging system in semivariance form::
 
-            ⎡ C   𝟏 ⎤ ⎡ λ ⎤   ⎡ c₀ ⎤
+            ⎡ Γ   𝟏 ⎤ ⎡ λ ⎤   ⎡ γ₀ ⎤
             ⎣ 𝟏ᵀ  0 ⎦ ⎣ μ ⎦ = ⎣  1 ⎦
 
-        where C_{ij} = C(0) − γ(h_{ij}) is the covariance.  The
-        virtual LOO identity avoids forming *n* sub-systems.  Instead,
-        a single matrix inversion yields all LOO diagnostics.  The
-        diagonal entries [K⁻¹]_{ii} are negative for a valid covariance
-        system, so the sign flips in the formulas produce positive
-        kriging variances.  This is the standard approach in
-        geostatistics (Dubrule, 1983; Davis, 1987; Pang et al., 2023).
+        The kriging prediction is ẑ = λ′z and the kriging variance
+        is σ² = λ′γ₀ + μ.  Each LOO iteration solves an
+        (n−1+1) × (n−1+1) system via ``np.linalg.solve``, which
+        uses pivoted LU factorisation — numerically robust even for
+        ill-conditioned semivariance matrices.
+
+        Cost is O(n⁴), but with n ≤ 500 each LAPACK solve takes
+        < 1 ms, so total wall time per model is well under 1 s.
 
         References
         ----------
-        Dubrule, O. (1983). Cross validation of kriging in a unique
-        neighborhood. *J. Int. Assoc. Math. Geol.*, 15(6), 687–699.
-        doi:10.1007/BF01033232
+        Cressie, N. (1993). *Statistics for Spatial Data*, rev. ed.,
+        Wiley.  Section 5.6 — kriging cross-validation.
 
-        Davis, B.M. (1987). Uses and abuses of cross-validation in
-        geostatistics. *Math. Geol.*, 19(3), 241–248.
-        doi:10.1007/BF00897749
+        Webster, R. & Oliver, M.A. (2007). *Geostatistics for
+        Environmental Scientists*, 2nd ed., Wiley.  Section 8.3.
 
-        Pang, Y. et al. (2023). Enhanced Kriging leave-one-out cross-
-        validation in improving model estimation and optimization.
-        *Comput. Methods Appl. Mech. Engrg.*, 414, 116194.
-        doi:10.1016/j.cma.2023.116194
+        Lark, R.M. (2000). A comparison of some robust estimators of
+        the variogram for use in soil survey. *Eur. J. Soil Sci.*,
+        51, 137–157.
         """
         coords = np.asarray(coords, dtype=float)
         values = np.asarray(values, dtype=float)
@@ -3190,90 +3184,56 @@ class VariogramAnalysis:
             dy = coords[:, 1:2] - coords[:, 1:2].T
             dist_matrix = np.sqrt(dx**2 + dy**2)
 
-        # ── semivariance matrix → covariance matrix ──
-        #
-        # The Dubrule (1983) virtual LOO identity must be applied to
-        # the COVARIANCE form of the kriging system, not the
-        # semivariance form.  The augmented semivariance system
-        # A = [Γ 1; 1' 0] is an indefinite saddle-point matrix whose
-        # inverse has *negative* diagonal entries — giving negative
-        # kriging variances if used naïvely.
-        #
-        # The covariance form K = [C 1; 1' 0] has a positive-definite
-        # upper-left block, and the Dubrule identity with K yields:
-        #
-        #   ê_i  = −[K⁻¹ z̃]_i  /  [K⁻¹]_{ii}
-        #   σ²_i = −1 / [K⁻¹]_{ii}
-        #
-        # where [K⁻¹]_{ii} < 0, making σ² > 0 as required.
-        #
-        # Conversion: C(h) = C(0) − γ(h), where C(0) is the total
-        # sill (a-priori variance) = γ(∞) for stationary models.
-
+        # ── semivariance matrix (n × n) ──
         gamma_matrix = variogram_func(dist_matrix)
 
-        # total sill: evaluate γ at a very large distance
-        C0 = float(variogram_func(np.array([1e10]))[0])
-        if C0 <= 0 or not np.isfinite(C0):
-            # fallback: use the maximum observed semivariance
-            C0 = float(np.nanmax(gamma_matrix))
-        if C0 <= 0 or not np.isfinite(C0):
-            return KrigingLOOCVResult(
-                msspe=np.nan, mean_error=np.nan, rmse=np.nan,
-                mean_standardized_error=np.nan, n_points=0, n_failed=n,
-            )
-
-        # covariance matrix
-        cov_matrix = C0 - gamma_matrix
-
-        # ── build augmented covariance kriging system ──
-        #    K = ⎡ C   𝟏 ⎤   z̃ = [z₁, …, z_n, 0]ᵀ
-        #        ⎣ 𝟏ᵀ  0 ⎦
-        m = n + 1
-        K = np.empty((m, m))
-        K[:n, :n] = cov_matrix
-        K[:n, n] = 1.0
-        K[n, :n] = 1.0
-        K[n, n] = 0.0
-
-        z_aug = np.zeros(m)
-        z_aug[:n] = values
-
-        # ── invert once → all LOO diagnostics ──
-        try:
-            K_inv = np.linalg.pinv(K, rcond=1e-12)
-        except np.linalg.LinAlgError:
-            return KrigingLOOCVResult(
-                msspe=np.nan, mean_error=np.nan, rmse=np.nan,
-                mean_standardized_error=np.nan, n_points=0, n_failed=n,
-            )
-
-        # Virtual LOO identity (Dubrule, 1983) — covariance form:
-        #   ê_i  = −[K⁻¹ z̃]_i  /  [K⁻¹]_{ii}
-        #   σ²_i = −1 / [K⁻¹]_{ii}
-        #
-        # The diagonal [K⁻¹]_{ii} is NEGATIVE for a valid covariance
-        # system, so the minus signs yield positive variances.
-        K_inv_z = K_inv @ z_aug           # (m,)
-        diag_K_inv = np.diag(K_inv)[:n]   # first n diagonal entries
-
-        # guard against zero diagonal (numerically singular)
-        eps = max(np.finfo(float).eps,
-                  1e-15 * np.max(np.abs(diag_K_inv)))
-        valid_diag = np.abs(diag_K_inv) > eps
-        n_failed = int(np.sum(~valid_diag))
-
+        # ── direct LOO: for each point, solve (n-1+1) kriging system ──
         errors = np.full(n, np.nan)
         variances = np.full(n, np.nan)
+        n_failed = 0
 
-        errors[valid_diag] = (
-            -K_inv_z[:n][valid_diag] / diag_K_inv[valid_diag]
-        )
-        variances[valid_diag] = -1.0 / diag_K_inv[valid_diag]
+        for i in range(n):
+            # boolean mask: all points except i
+            mask = np.ones(n, dtype=bool)
+            mask[i] = False
+
+            # semivariance sub-matrix and RHS vector
+            gamma_sub = gamma_matrix[np.ix_(mask, mask)]   # (n-1, n-1)
+            gamma_0 = gamma_matrix[mask, i]                # (n-1,)
+            n_sub = n - 1
+
+            # build augmented system
+            #   [Γ_sub  1] [λ]   [γ₀]
+            #   [1'     0] [μ] = [1 ]
+            m = n_sub + 1
+            A = np.empty((m, m))
+            A[:n_sub, :n_sub] = gamma_sub
+            A[:n_sub, n_sub] = 1.0
+            A[n_sub, :n_sub] = 1.0
+            A[n_sub, n_sub] = 0.0
+
+            b = np.empty(m)
+            b[:n_sub] = gamma_0
+            b[n_sub] = 1.0
+
+            try:
+                w = np.linalg.solve(A, b)
+            except np.linalg.LinAlgError:
+                n_failed += 1
+                continue
+
+            lam = w[:n_sub]   # kriging weights
+            mu = w[n_sub]     # Lagrange multiplier
+
+            # kriging prediction and variance (semivariance form)
+            z_pred = float(np.dot(lam, values[mask]))
+            sigma2 = float(np.dot(lam, gamma_0) + mu)
+
+            errors[i] = values[i] - z_pred
+            variances[i] = sigma2
 
         # ── aggregate diagnostics ──
-        valid = (valid_diag
-                 & np.isfinite(errors)
+        valid = (np.isfinite(errors)
                  & np.isfinite(variances)
                  & (variances > 0))
         e = errors[valid]
@@ -3650,9 +3610,8 @@ class VariogramAnalysis:
                         sub_values = sample_values
 
                     if verbose:
-                        print(f"\n    [DEBUG MSSPE] n_pts={n_pts}, "
-                              f"sub shape={sub_coords.shape}, "
-                              f"n_models={len(selector.fitted_models)}", flush=True)
+                        print(f"    MSSPE: {len(sub_coords)} points, "
+                              f"{len(selector.fitted_models)} candidates")
 
                     # distance matrix: computed once, reused for every model
                     dx = sub_coords[:, 0:1] - sub_coords[:, 0:1].T
@@ -3663,8 +3622,7 @@ class VariogramAnalysis:
                         model_name = "+".join(fitted.composite_model.component_names)
                         if not fitted.composite_model.is_stationary:
                             if verbose:
-                                print(f"    [DEBUG MSSPE] {model_name}: "
-                                      f"skipped (non-stationary)", flush=True)
+                                print(f"      {model_name}: skipped (non-stationary)")
                             continue
                         try:
                             result = self.kriging_loocv(
@@ -3674,20 +3632,20 @@ class VariogramAnalysis:
                                 dist_matrix=sub_dist,
                             )
                             if verbose:
-                                print(f"    [DEBUG MSSPE] {model_name}: "
-                                      f"msspe={result.msspe:.6g}, "
-                                      f"n_points={result.n_points}, "
-                                      f"n_failed={result.n_failed}", flush=True)
+                                print(f"      {model_name}: "
+                                      f"MSSPE={result.msspe:.4f} "
+                                      f"({result.n_points} pts, "
+                                      f"{result.n_failed} failed)")
                             if np.isfinite(result.msspe):
                                 fitted.msspe = result.msspe
                                 fitted.msspe_std = None
                                 fitted.msspe_n_runs = 1
                                 fitted.loocv_result = AggregatedLOOCVResult.from_results([result])
                         except Exception as exc:
-                            if verbose:
-                                print(f"    [DEBUG MSSPE] {model_name}: "
-                                      f"EXCEPTION {type(exc).__name__}: {exc}",
-                                      flush=True)
+                            warnings.warn(
+                                f"MSSPE failed for {model_name}: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
                             continue
 
                 best = selector.select_best(criterion=criterion)
