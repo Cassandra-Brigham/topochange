@@ -3620,13 +3620,22 @@ class VariogramAnalysis:
                         sub_coords = sample_coords
                         sub_values = sample_values
 
+                    if verbose:
+                        print(f"\n    [DEBUG MSSPE] n_pts={n_pts}, "
+                              f"sub shape={sub_coords.shape}, "
+                              f"n_models={len(selector.fitted_models)}", flush=True)
+
                     # distance matrix: computed once, reused for every model
                     dx = sub_coords[:, 0:1] - sub_coords[:, 0:1].T
                     dy = sub_coords[:, 1:2] - sub_coords[:, 1:2].T
                     sub_dist = np.sqrt(dx**2 + dy**2)
 
                     for fitted in selector.fitted_models:
+                        model_name = "+".join(fitted.composite_model.component_names)
                         if not fitted.composite_model.is_stationary:
+                            if verbose:
+                                print(f"    [DEBUG MSSPE] {model_name}: "
+                                      f"skipped (non-stationary)", flush=True)
                             continue
                         try:
                             result = self.kriging_loocv(
@@ -3635,30 +3644,21 @@ class VariogramAnalysis:
                                 n_subset=len(sub_values),
                                 dist_matrix=sub_dist,
                             )
+                            if verbose:
+                                print(f"    [DEBUG MSSPE] {model_name}: "
+                                      f"msspe={result.msspe:.6g}, "
+                                      f"n_points={result.n_points}, "
+                                      f"n_failed={result.n_failed}", flush=True)
                             if np.isfinite(result.msspe):
                                 fitted.msspe = result.msspe
                                 fitted.msspe_std = None
                                 fitted.msspe_n_runs = 1
                                 fitted.loocv_result = AggregatedLOOCVResult.from_results([result])
-                            elif verbose:
-                                model_name = "+".join(fitted.composite_model.component_names)
-                                import warnings as _warnings
-                                _warnings.warn(
-                                    f"LOOCV returned non-finite MSSPE for "
-                                    f"{model_name} (n_points={result.n_points}, "
-                                    f"n_failed={result.n_failed}, "
-                                    f"msspe={result.msspe:.4g})",
-                                    stacklevel=2,
-                                )
                         except Exception as exc:
                             if verbose:
-                                model_name = "+".join(fitted.composite_model.component_names)
-                                import warnings as _warnings
-                                _warnings.warn(
-                                    f"LOOCV failed for {model_name}: "
-                                    f"{type(exc).__name__}: {exc}",
-                                    stacklevel=2,
-                                )
+                                print(f"    [DEBUG MSSPE] {model_name}: "
+                                      f"EXCEPTION {type(exc).__name__}: {exc}",
+                                      flush=True)
                             continue
 
                 best = selector.select_best(criterion=criterion)
