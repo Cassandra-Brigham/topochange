@@ -736,6 +736,35 @@ class VariogramModelSelector:
                 return False
         return True
 
+    #: Maximum allowed total sill as a multiple of the observed
+    #: maximum semivariance.  With multiple freely-parameterised
+    #: components the optimizer can inflate one component's sill to
+    #: compensate for another, producing a total sill far exceeding
+    #: the data.  2× allows some headroom for noise while rejecting
+    #: physically unrealistic fits (Gringarten & Deutsch, 2001).
+    MAX_SILL_RATIO: float = 2.0
+
+    def _passes_total_sill_check(
+        self,
+        model: CompositeVariogramModel,
+        params: np.ndarray,
+    ) -> bool:
+        """Reject fits whose total sill exceeds MAX_SILL_RATIO × max(γ̂).
+
+        The total sill is the sum of all component sills plus the
+        nugget.  For stationary models this equals the process
+        variance at infinite lag.  A total sill far exceeding the
+        observed semivariance plateau is physically unrealistic.
+        """
+        model.set_params(params)
+        if not model.is_stationary:
+            return True  # unbounded models have no finite sill
+        total_sill = model.get_total_sill()
+        if total_sill is None:
+            return True
+        max_gamma = float(np.nanmax(self.empirical_variogram))
+        return total_sill <= self.MAX_SILL_RATIO * max_gamma
+
     # ── core model fitting ───────────────────────────────────────
 
     def fit_model(
@@ -777,31 +806,26 @@ class VariogramModelSelector:
         p0_base = model.default_guess(self.lags, self.empirical_variogram)
         bounds = model.bounds(self.lags, self.empirical_variogram)
 
-        # ── two-stage nugget constraint ──
-        # Pre-estimate the nugget from short-lag extrapolation and constrain
-        # the optimisation window around it.  The tolerance is asymmetric:
-        # tighter below (we're fairly confident the nugget isn't negative)
-        # and wider above (the linear extrapolation tends to underestimate
-        # the nugget for high-nugget data because the first few lags still
-        # contain spatial structure).
+        # ── nugget bounds ──
+        # Use the full [0, 0.5 × max_γ] range from the composite model
+        # bounds rather than the previous tight asymmetric constraint
+        # (−50%/+80% around short-lag extrapolation with a 15% floor).
+        # The tight bounds locked the nugget too low when the first few
+        # lags still contained spatial structure, causing MSSPE >> 1
+        # (kriging variance underestimation).
+        #
+        # The initial guess is still informed by short-lag extrapolation
+        # for a reasonable starting point, but the optimizer is free to
+        # explore the full feasible range.
         if model.include_nugget:
             nugget_pre = self._estimate_nugget_from_short_lags(
                 self.lags, self.empirical_variogram
             )
             nugget_idx = model.n_params - 1  # nugget is always last
-            max_gamma = float(np.nanmax(self.empirical_variogram))
-            nug_lb = max(0.0, nugget_pre * 0.5)          # −50 %
-            # upper: allow up to +80% or at least 15% of max_gamma
-            nug_ub = max(nugget_pre * 1.8, max_gamma * 0.15)
-            # keep within the overall bounds (which cap at 50% of max_gamma)
-            bounds_lower = list(bounds[0])
-            bounds_upper = list(bounds[1])
-            bounds_lower[nugget_idx] = max(bounds_lower[nugget_idx], nug_lb)
-            bounds_upper[nugget_idx] = min(bounds_upper[nugget_idx], nug_ub)
-            bounds = (bounds_lower, bounds_upper)
-            # update initial guess to match
+            # bounds already set to [0, 0.5 * max_gamma] by
+            # CompositeVariogramModel.bounds(); no further tightening
             p0_base[nugget_idx] = np.clip(
-                nugget_pre, bounds_lower[nugget_idx], bounds_upper[nugget_idx]
+                nugget_pre, bounds[0][nugget_idx], bounds[1][nugget_idx]
             )
 
         # prepare fitting function
@@ -834,6 +858,12 @@ class VariogramModelSelector:
                 # Reject fits where multi-component practical ranges
                 # are not sufficiently separated (non-identifiable).
                 if not self._passes_range_separation(model, popt):
+                    continue
+
+                # ── total sill check ──
+                # Reject fits where the total sill (all component
+                # sills + nugget) exceeds MAX_SILL_RATIO × max(γ̂).
+                if not self._passes_total_sill_check(model, popt):
                     continue
 
                 # compute RSS
@@ -968,12 +998,12 @@ class VariogramModelSelector:
         max_components: int = 2,
         include_nugget: bool = True,
         include_unbounded: bool = True,
-        compute_cv: bool = True,
+        compute_cv: bool = False,
         cv_folds: int = 5,
         seed: Optional[int] = None,
     ) -> None:
         """Fit all candidate models.
-        
+
         Parameters
         ----------
         max_components : int
@@ -983,9 +1013,14 @@ class VariogramModelSelector:
         include_unbounded : bool
             Include non-stationary models.
         compute_cv : bool
-            Compute cross-validation scores.
+            Whether to compute variogram k-fold CV scores.
+            Default False — variogram k-fold CV randomly shuffles
+            lag bins, which are ordered and correlated, making the
+            resulting RMSE unreliable for model selection.  Use
+            kriging LOOCV (MSSPE) instead for spatial cross-
+            validation.  Retained for backward compatibility.
         cv_folds : int
-            Number of CV folds.
+            Number of CV folds (only used if ``compute_cv=True``).
         seed : int, optional
             Random seed for CV.
         """
@@ -994,7 +1029,7 @@ class VariogramModelSelector:
             include_nugget=include_nugget,
             include_unbounded=include_unbounded,
         )
-        
+
         self.fitted_models = []
         max_lag = float(np.nanmax(self.lags))
 
