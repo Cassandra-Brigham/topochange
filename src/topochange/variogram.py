@@ -502,6 +502,8 @@ class EnsembleVariogramResult:
         Per-realization fitted variogram curves evaluated at ``lags``.
     empirical_variograms : ndarray, shape (n_success, n_lags)
         Per-realization empirical variograms (NaN-padded to common length).
+    pair_counts : ndarray, shape (n_success, n_lags)
+        Per-realization pair counts (NaN-padded to common length).
     per_realization : list of dict
         Detailed per-realization records including model description,
         all parameters, component names, MSSPE, AIC, and fitted curve.
@@ -528,6 +530,7 @@ class EnsembleVariogramResult:
     lags: np.ndarray
     variograms: np.ndarray
     empirical_variograms: np.ndarray
+    pair_counts: np.ndarray
     per_realization: List[Dict[str, Any]]
 
     def summary(self) -> str:
@@ -3158,13 +3161,11 @@ class VariogramAnalysis:
 
     def fit_ensemble(
         self,
-        # ── sampling / empirical variogram parameters ──
+        # ── sampling parameters ──
         area_side: float,
         samples_per_area: float,
         max_samples: int,
         bin_width: float,
-        max_n_bins: int,
-        n_variogram_runs: int = 10,
         max_lag_multiplier: float = 1 / 3,
         estimator: str = 'matheron',
         # ── ensemble parameters ──
@@ -3180,14 +3181,14 @@ class VariogramAnalysis:
         seed: Optional[int] = None,
         verbose: bool = True,
     ) -> Tuple['EmpiricalVariogram', 'EnsembleVariogramResult']:
-        """Compute mean empirical variogram, then run ensemble fitting.
+        """Run ensemble fitting and derive the mean empirical variogram.
 
-        Single entry point that chains
-        :meth:`compute_empirical_variogram` →
-        :meth:`fit_variogram_ensemble`.  The mean empirical variogram
-        is computed first (useful for inspection and plotting), then
-        the ensemble runs independent realizations to capture both
-        model selection uncertainty and parameter uncertainty.
+        Each of the ``n_realizations`` independently samples the
+        raster, computes an empirical variogram, fits candidates,
+        and selects the best model.  The mean empirical variogram is
+        derived *from the ensemble's own realizations* — no separate
+        pre-computation step, no redundant ``n_variogram_runs``
+        parameter.
 
         Parameters
         ----------
@@ -3199,16 +3200,14 @@ class VariogramAnalysis:
             Hard cap on total sample points per realization.
         bin_width : float
             Lag bin width (same units as coordinates).
-        max_n_bins : int
-            Maximum number of lag bins.
-        n_variogram_runs : int, default 10
-            Realizations for the mean empirical variogram.
         max_lag_multiplier : float, default 1/3
             Maximum lag as fraction of sampling extent.
         estimator : {'matheron', 'cressie_hawkins'}, default 'matheron'
             Empirical variogram estimator.
         n_realizations : int, default 50
-            Independent ensemble realizations.
+            Independent ensemble realizations.  Each one draws a
+            fresh sample, computes an empirical variogram, fits all
+            candidates, evaluates MSSPE, and selects the best model.
         model_types : list of str, optional
             Model types to try (default: spherical, exponential,
             matern).
@@ -3232,32 +3231,21 @@ class VariogramAnalysis:
         Returns
         -------
         (EmpiricalVariogram, EnsembleVariogramResult)
-            The mean empirical variogram and the ensemble result.
+            The mean empirical variogram (derived from all
+            ensemble realizations) and the full ensemble result.
 
         Examples
         --------
         >>> va = VariogramAnalysis(rdh)
         >>> emp, ensemble = va.fit_ensemble(
         ...     area_side=1000, samples_per_area=1.0,
-        ...     max_samples=10000, bin_width=50, max_n_bins=40,
+        ...     max_samples=10000, bin_width=50,
         ...     n_realizations=50, criterion='msspe',
         ... )
         >>> emp.plot()              # empirical variogram only
         >>> ensemble.plot()         # full ensemble results
         >>> print(ensemble.summary())
         """
-        emp = self.compute_empirical_variogram(
-            area_side=area_side,
-            samples_per_area=samples_per_area,
-            max_samples=max_samples,
-            bin_width=bin_width,
-            max_n_bins=max_n_bins,
-            n_runs=n_variogram_runs,
-            max_lag_multiplier=max_lag_multiplier,
-            seed=seed,
-            estimator=estimator,
-        )
-
         ensemble = self.fit_variogram_ensemble(
             n_realizations=n_realizations,
             area_side=area_side,
@@ -3276,6 +3264,32 @@ class VariogramAnalysis:
             seed=seed,
             verbose=verbose,
         )
+
+        # Derive the mean empirical variogram from the ensemble's
+        # own realizations — each realization already produced an
+        # independent empirical variogram, so n_realizations *is*
+        # the number of averaging runs.
+        emp_arr = ensemble.empirical_variograms  # (n_success, n_lags)
+        cnt_arr = ensemble.pair_counts            # (n_success, n_lags)
+        lags = ensemble.lags
+
+        with np.errstate(all='ignore'):
+            emp = EmpiricalVariogram(
+                lags=lags.copy(),
+                median_variogram=np.nanmedian(emp_arr, axis=0),
+                mean_variogram=np.nanmean(emp_arr, axis=0),
+                pair_counts=np.nanmean(cnt_arr, axis=0),
+                sigma=np.nanstd(emp_arr, axis=0),
+                p2_5=np.nanpercentile(emp_arr, 2.5, axis=0),
+                p16=np.nanpercentile(emp_arr, 16, axis=0),
+                p84=np.nanpercentile(emp_arr, 84, axis=0),
+                p97_5=np.nanpercentile(emp_arr, 97.5, axis=0),
+                n_runs=ensemble.n_realizations - ensemble.n_failed,
+                n_bins=len(lags),
+                estimator=estimator,
+                all_variograms=emp_arr,
+                all_counts=cnt_arr,
+            )
 
         return emp, ensemble
 
@@ -3401,6 +3415,7 @@ class VariogramAnalysis:
         # storage
         records: List[Dict[str, Any]] = []
         all_empirical: List[np.ndarray] = []
+        all_counts_list: List[np.ndarray] = []
         all_fitted_curves: List[np.ndarray] = []
         common_lags: Optional[np.ndarray] = None
         n_failed = 0
@@ -3552,13 +3567,19 @@ class VariogramAnalysis:
                 # fitted curve evaluated at common lags
                 fitted_curve = model(common_lags) if common_lags is not None else np.array([])
 
-                # empirical variogram padded/trimmed to common lag length
+                # empirical variogram and counts padded/trimmed to common lag length
                 if common_lags is not None:
                     emp_padded = np.full(len(common_lags), np.nan)
                     n_copy = min(len(emp_vario), len(common_lags))
                     emp_padded[:n_copy] = emp_vario[:n_copy]
+
+                    counts_padded = np.full(len(common_lags), np.nan)
+                    if emp_counts is not None:
+                        n_copy_c = min(len(emp_counts), len(common_lags))
+                        counts_padded[:n_copy_c] = emp_counts[:n_copy_c]
                 else:
                     emp_padded = emp_vario
+                    counts_padded = emp_counts if emp_counts is not None else np.zeros_like(emp_vario)
 
                 record = {
                     'model_description': struct_desc,
@@ -3581,6 +3602,7 @@ class VariogramAnalysis:
                 records.append(record)
                 all_fitted_curves.append(fitted_curve)
                 all_empirical.append(emp_padded)
+                all_counts_list.append(counts_padded)
 
                 if verbose:
                     msspe_str = (f"MSSPE={best.msspe:.3f}" if best.msspe is not None
@@ -3626,9 +3648,10 @@ class VariogramAnalysis:
             for j, rng in enumerate(rec['ranges']):
                 ranges_arr[i, j] = rng
 
-        # stack fitted curves and empirical variograms
+        # stack fitted curves, empirical variograms, and pair counts
         variograms_arr = np.array(all_fitted_curves)
         empirical_arr = np.array(all_empirical)
+        counts_arr = np.array(all_counts_list) if all_counts_list else np.zeros_like(empirical_arr)
 
         result = EnsembleVariogramResult(
             n_realizations=n_realizations,
@@ -3643,6 +3666,7 @@ class VariogramAnalysis:
             lags=common_lags if common_lags is not None else np.array([]),
             variograms=variograms_arr,
             empirical_variograms=empirical_arr,
+            pair_counts=counts_arr,
             per_realization=records,
         )
 
