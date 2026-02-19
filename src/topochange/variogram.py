@@ -2429,6 +2429,122 @@ class VariogramAnalysis:
             all_counts=self.all_counts.copy(),
         )
 
+    def fit(
+        self,
+        # ── sampling / empirical variogram parameters ──
+        area_side: float,
+        samples_per_area: float,
+        max_samples: int,
+        bin_width: float,
+        max_n_bins: int,
+        n_runs: int = 10,
+        max_lag_multiplier: float = 1 / 3,
+        estimator: str = 'matheron',
+        # ── model fitting parameters ──
+        model_types: Optional[List[str]] = None,
+        max_components: int = 1,
+        include_nugget: bool = True,
+        criterion: str = 'msspe',
+        n_bootstrap: int = 500,
+        min_pairs: Optional[int] = 30,
+        msspe_n_subset: int = 500,
+        msspe_n_runs: int = 10,
+        msspe_prefilter: int = 0,
+        *,
+        seed: Optional[int] = None,
+    ) -> Tuple['EmpiricalVariogram', 'FittedVariogramModel']:
+        """Compute empirical variogram, fit models, and select the best.
+
+        Single entry point that chains
+        :meth:`compute_empirical_variogram` →
+        :meth:`fit_best_model_auto`.  After calling, use
+        ``va.plot_best_model()`` to visualise the result.
+
+        Parameters
+        ----------
+        area_side : float
+            Side length of the random sampling square (map units).
+        samples_per_area : float
+            Sampling density (points per area_side²).
+        max_samples : int
+            Hard cap on total sample points per realization.
+        bin_width : float
+            Lag bin width (same units as coordinates).
+        max_n_bins : int
+            Maximum number of lag bins.
+        n_runs : int, default 10
+            Independent variogram realizations to average.
+        max_lag_multiplier : float, default 1/3
+            Maximum lag as fraction of sampling extent.
+        estimator : {'matheron', 'cressie_hawkins'}, default 'matheron'
+            Empirical variogram estimator.
+        model_types : list of str, optional
+            Model types to try (default: spherical, exponential,
+            matern).
+        max_components : int, default 1
+            Max nested structures per candidate.
+        include_nugget : bool, default True
+            Generate with/without nugget variants.
+        criterion : {'aic', 'bic', 'msspe'}, default 'msspe'
+            Model selection criterion.
+        n_bootstrap : int, default 500
+            Bootstrap resamples for parameter uncertainty.
+        min_pairs : int or None, default 30
+            Minimum pair count per lag bin.
+        msspe_n_subset : int, default 500
+            Points per LOOCV evaluation.
+        msspe_n_runs : int, default 10
+            Independent LOOCV repetitions.
+        msspe_prefilter : int, default 0
+            If > 0, evaluate MSSPE on top-N AIC models only.
+        seed : int, optional
+            Base seed for reproducibility.
+
+        Returns
+        -------
+        (EmpiricalVariogram, FittedVariogramModel)
+            The empirical variogram and the best fitted model.
+
+        Examples
+        --------
+        >>> va = VariogramAnalysis(rdh)
+        >>> emp, fitted = va.fit(
+        ...     area_side=1000, samples_per_area=1.0,
+        ...     max_samples=10000, bin_width=50, max_n_bins=40,
+        ...     n_runs=20, criterion='msspe',
+        ... )
+        >>> va.plot_best_model()       # combined plot
+        >>> emp.plot()                  # empirical only
+        >>> fitted.composite_model     # the winning model
+        """
+        emp = self.compute_empirical_variogram(
+            area_side=area_side,
+            samples_per_area=samples_per_area,
+            max_samples=max_samples,
+            bin_width=bin_width,
+            max_n_bins=max_n_bins,
+            n_runs=n_runs,
+            max_lag_multiplier=max_lag_multiplier,
+            seed=seed,
+            estimator=estimator,
+        )
+
+        fitted = self.fit_best_model_auto(
+            model_types=model_types,
+            max_components=max_components,
+            include_nugget=include_nugget,
+            criterion=criterion,
+            n_bootstrap=n_bootstrap,
+            seed=seed,
+            min_pairs=min_pairs,
+            compute_msspe=(criterion == 'msspe'),
+            msspe_n_subset=msspe_n_subset,
+            msspe_n_runs=msspe_n_runs,
+            msspe_prefilter=msspe_prefilter,
+        )
+
+        return emp, fitted
+
     def fit_best_model_auto(
         self,
         model_types: Optional[List[str]] = None,
@@ -3039,6 +3155,129 @@ class VariogramAnalysis:
             n_points=n_valid,
             n_failed=n_failed,
         )
+
+    def fit_ensemble(
+        self,
+        # ── sampling / empirical variogram parameters ──
+        area_side: float,
+        samples_per_area: float,
+        max_samples: int,
+        bin_width: float,
+        max_n_bins: int,
+        n_variogram_runs: int = 10,
+        max_lag_multiplier: float = 1 / 3,
+        estimator: str = 'matheron',
+        # ── ensemble parameters ──
+        n_realizations: int = 50,
+        model_types: Optional[List[str]] = None,
+        max_components: int = 1,
+        include_nugget: bool = True,
+        bounded_only_combinations: bool = True,
+        criterion: str = 'msspe',
+        msspe_n_subset: int = 500,
+        min_pairs: Optional[int] = 30,
+        *,
+        seed: Optional[int] = None,
+        verbose: bool = True,
+    ) -> Tuple['EmpiricalVariogram', 'EnsembleVariogramResult']:
+        """Compute mean empirical variogram, then run ensemble fitting.
+
+        Single entry point that chains
+        :meth:`compute_empirical_variogram` →
+        :meth:`fit_variogram_ensemble`.  The mean empirical variogram
+        is computed first (useful for inspection and plotting), then
+        the ensemble runs independent realizations to capture both
+        model selection uncertainty and parameter uncertainty.
+
+        Parameters
+        ----------
+        area_side : float
+            Side length of the random sampling square (map units).
+        samples_per_area : float
+            Sampling density (points per area_side²).
+        max_samples : int
+            Hard cap on total sample points per realization.
+        bin_width : float
+            Lag bin width (same units as coordinates).
+        max_n_bins : int
+            Maximum number of lag bins.
+        n_variogram_runs : int, default 10
+            Realizations for the mean empirical variogram.
+        max_lag_multiplier : float, default 1/3
+            Maximum lag as fraction of sampling extent.
+        estimator : {'matheron', 'cressie_hawkins'}, default 'matheron'
+            Empirical variogram estimator.
+        n_realizations : int, default 50
+            Independent ensemble realizations.
+        model_types : list of str, optional
+            Model types to try (default: spherical, exponential,
+            matern).
+        max_components : int, default 1
+            Max nested structures per candidate.
+        include_nugget : bool, default True
+            Generate with/without nugget variants.
+        bounded_only_combinations : bool, default True
+            Unbounded models only as single-component candidates.
+        criterion : {'aic', 'bic', 'msspe'}, default 'msspe'
+            Model selection criterion.
+        msspe_n_subset : int, default 500
+            Points per LOOCV evaluation.
+        min_pairs : int or None, default 30
+            Minimum pair count per lag bin.
+        seed : int, optional
+            Base seed for reproducibility.
+        verbose : bool, default True
+            Print progress.
+
+        Returns
+        -------
+        (EmpiricalVariogram, EnsembleVariogramResult)
+            The mean empirical variogram and the ensemble result.
+
+        Examples
+        --------
+        >>> va = VariogramAnalysis(rdh)
+        >>> emp, ensemble = va.fit_ensemble(
+        ...     area_side=1000, samples_per_area=1.0,
+        ...     max_samples=10000, bin_width=50, max_n_bins=40,
+        ...     n_realizations=50, criterion='msspe',
+        ... )
+        >>> emp.plot()              # empirical variogram only
+        >>> ensemble.plot()         # full ensemble results
+        >>> print(ensemble.summary())
+        """
+        emp = self.compute_empirical_variogram(
+            area_side=area_side,
+            samples_per_area=samples_per_area,
+            max_samples=max_samples,
+            bin_width=bin_width,
+            max_n_bins=max_n_bins,
+            n_runs=n_variogram_runs,
+            max_lag_multiplier=max_lag_multiplier,
+            seed=seed,
+            estimator=estimator,
+        )
+
+        ensemble = self.fit_variogram_ensemble(
+            n_realizations=n_realizations,
+            area_side=area_side,
+            samples_per_area=samples_per_area,
+            max_samples=max_samples,
+            bin_width=bin_width,
+            max_lag_multiplier=max_lag_multiplier,
+            model_types=model_types,
+            max_components=max_components,
+            include_nugget=include_nugget,
+            bounded_only_combinations=bounded_only_combinations,
+            criterion=criterion,
+            msspe_n_subset=msspe_n_subset,
+            estimator=estimator,
+            min_pairs=min_pairs,
+            seed=seed,
+            verbose=verbose,
+        )
+
+        return emp, ensemble
 
     def fit_variogram_ensemble(
         self,
