@@ -43,8 +43,6 @@ class FittedVariogramModel:
         Akaike Information Criterion.
     bic : float
         Bayesian Information Criterion.
-    cv_rmse : float
-        Cross-validation RMSE.
     param_samples : ndarray or None
         Bootstrap parameter samples (n_boot × n_params).
     warnings : list of str
@@ -73,7 +71,6 @@ class FittedVariogramModel:
     rss: float
     aic: float
     bic: float
-    cv_rmse: Optional[float] = None
     param_samples: Optional[np.ndarray] = None
     warnings: List[str] = field(default_factory=list)
     msspe: Optional[float] = None
@@ -584,9 +581,8 @@ class VariogramModelSelector:
     This class implements:
     - Automatic generation of candidate nested models
     - Fitting via weighted least squares
-    - Model selection via AIC, BIC, and cross-validation
+    - Model selection via AIC, BIC, or MSSPE
     - Bootstrap parameter uncertainty
-    - Bayesian Model Averaging (optional)
     
     Parameters
     ----------
@@ -634,7 +630,7 @@ class VariogramModelSelector:
     """
     
     # models to include in candidate generation
-    BOUNDED_MODELS = ['spherical', 'exponential', 'gaussian', 'matern']
+    BOUNDED_MODELS = ['spherical', 'exponential', 'matern']
     UNBOUNDED_MODELS = ['power', 'linear']
     
     # supported weighting schemes for WLS fitting
@@ -698,7 +694,6 @@ class VariogramModelSelector:
 
         self.fitted_models: List[FittedVariogramModel] = []
         self.best_model: Optional[FittedVariogramModel] = None
-        self.model_weights: Optional[np.ndarray] = None  # Akaike weights
 
     @staticmethod
     def _compute_weights(
@@ -754,7 +749,7 @@ class VariogramModelSelector:
 
     def generate_candidates(
         self,
-        max_components: int = 2,
+        max_components: int = 1,
         include_nugget: bool = True,
         include_unbounded: bool = True,
         bounded_only_combinations: bool = True,
@@ -1008,44 +1003,6 @@ class VariogramModelSelector:
                     practical.append(raw_range)
         return practical
 
-    def _passes_range_separation(
-        self,
-        model: CompositeVariogramModel,
-        params: np.ndarray,
-    ) -> bool:
-        """Check whether fitted practical ranges satisfy separation.
-
-        For single-component models this always returns True.
-        For multi-component models, the sorted practical ranges must
-        satisfy  r_{i+1} / r_i  >=  MIN_RANGE_SEPARATION.
-
-        Also rejects any component whose practical range falls below
-        ``MIN_RANGE_FRACTION × bin_width`` — such components contribute
-        variance entirely at sub-bin scales, acting as nugget surrogates
-        rather than spatially resolvable structure.
-        """
-        practical = self._get_practical_ranges(model, params)
-
-        # minimum practical range floor (bin-width based)
-        if len(self.lags) >= 2:
-            bin_width = float(self.lags[1] - self.lags[0])
-        else:
-            bin_width = float(self.lags[0]) if len(self.lags) == 1 else 1.0
-        min_range = self.MIN_RANGE_FRACTION * bin_width
-        for pr in practical:
-            if pr < min_range:
-                return False
-
-        if len(practical) <= 1:
-            return True
-        ordered = sorted(practical)
-        for j in range(len(ordered) - 1):
-            if ordered[j] < np.finfo(float).eps:
-                return False  # degenerate zero range
-            if ordered[j + 1] / ordered[j] < self.MIN_RANGE_SEPARATION:
-                return False
-        return True
-
     #: Maximum allowed total sill as a multiple of the observed
     #: maximum semivariance.  With multiple freely-parameterised
     #: components the optimizer can inflate one component's sill to
@@ -1054,26 +1011,111 @@ class VariogramModelSelector:
     #: physically unrealistic fits (Gringarten & Deutsch, 2001).
     MAX_SILL_RATIO: float = 2.0
 
-    def _passes_total_sill_check(
+    def validate_fit(
         self,
         model: CompositeVariogramModel,
         params: np.ndarray,
-    ) -> bool:
-        """Reject fits whose total sill exceeds MAX_SILL_RATIO × max(γ̂).
+        max_lag: Optional[float] = None,
+    ) -> Tuple[bool, List[str]]:
+        """Consolidated post-fit validation.
 
-        The total sill is the sum of all component sills plus the
-        nugget.  For stationary models this equals the process
-        variance at infinite lag.  A total sill far exceeding the
-        observed semivariance plateau is physically unrealistic.
+        Runs all validation checks on a fitted model and returns a single
+        pass/fail result with diagnostic warnings.
+
+        Checks performed:
+
+        1. **Range floor**: every practical range must exceed
+           ``MIN_RANGE_FRACTION × bin_width`` (rejects sub-bin
+           nugget surrogates).
+        2. **Range separation**: for multi-component models, sorted
+           practical ranges must satisfy ``r_{i+1}/r_i >=
+           MIN_RANGE_SEPARATION`` (rejects non-identifiable fits).
+        3. **Total sill**: total sill must not exceed
+           ``MAX_SILL_RATIO × max(γ̂)`` (rejects physically
+           unrealistic fits).
+        4. **Half-lag heuristic** (warning only): any range exceeding
+           ``max_lag / 2`` triggers a warning that the fit is poorly
+           constrained at long distances (Journel & Huijbregts, 1978).
+
+        Parameters
+        ----------
+        model : CompositeVariogramModel
+            The candidate model with params already set.
+        params : ndarray
+            Optimal parameter vector.
+        max_lag : float, optional
+            Maximum lag distance for the half-lag warning.
+            Defaults to ``max(self.lags)``.
+
+        Returns
+        -------
+        passes : bool
+            True if all hard checks (1–3) pass.
+        warnings : list of str
+            Diagnostic warnings (e.g. half-lag exceeded).
+
+        References
+        ----------
+        Gringarten, E. & Deutsch, C.V. (2001). Teacher's aide:
+        variogram interpretation and modeling. *Math. Geol.*,
+        33(4), 507–534.
+
+        Journel, A.G. & Huijbregts, Ch.J. (1978). *Mining
+        Geostatistics*. Academic Press.
         """
+        warnings_list: List[str] = []
+
+        if max_lag is None:
+            max_lag = float(np.nanmax(self.lags))
+
+        practical = self._get_practical_ranges(model, params)
+
+        # ── 1. Range floor ──
+        if len(self.lags) >= 2:
+            bin_width = float(self.lags[1] - self.lags[0])
+        else:
+            bin_width = float(self.lags[0]) if len(self.lags) == 1 else 1.0
+        min_range = self.MIN_RANGE_FRACTION * bin_width
+        for pr in practical:
+            if pr < min_range:
+                return False, warnings_list
+
+        # ── 2. Range separation ──
+        if len(practical) > 1:
+            ordered = sorted(practical)
+            for j in range(len(ordered) - 1):
+                if ordered[j] < np.finfo(float).eps:
+                    return False, warnings_list
+                if ordered[j + 1] / ordered[j] < self.MIN_RANGE_SEPARATION:
+                    return False, warnings_list
+
+        # ── 3. Total sill ──
         model.set_params(params)
-        if not model.is_stationary:
-            return True  # unbounded models have no finite sill
-        total_sill = model.get_total_sill()
-        if total_sill is None:
-            return True
-        max_gamma = float(np.nanmax(self.empirical_variogram))
-        return total_sill <= self.MAX_SILL_RATIO * max_gamma
+        if model.is_stationary:
+            total_sill = model.get_total_sill()
+            if total_sill is not None:
+                max_gamma = float(np.nanmax(self.empirical_variogram))
+                if total_sill > self.MAX_SILL_RATIO * max_gamma:
+                    return False, warnings_list
+
+        # ── 4. Half-lag heuristic (warning only) ──
+        half_lag = max_lag / 2.0
+        for i, spec in enumerate(model._components):
+            if 'range' in spec.param_names:
+                range_idx = spec.param_names.index('range')
+                comp_params = model.get_component_params(i)
+                fitted_range = comp_params[range_idx]
+                if fitted_range > half_lag:
+                    name = model.component_names[i]
+                    warnings_list.append(
+                        f"WARNING: {name} range ({fitted_range:.1f}) exceeds "
+                        f"half the maximum lag ({half_lag:.1f}).  The variogram "
+                        f"is poorly constrained beyond this distance — consider "
+                        f"increasing max_lag or treating this range estimate "
+                        f"with caution."
+                    )
+
+        return True, warnings_list
 
     # ── core model fitting ───────────────────────────────────────
 
@@ -1164,16 +1206,9 @@ class VariogramModelSelector:
                     maxfev=maxfev,
                 )
 
-                # ── range separation check ──
-                # Reject fits where multi-component practical ranges
-                # are not sufficiently separated (non-identifiable).
-                if not self._passes_range_separation(model, popt):
-                    continue
-
-                # ── total sill check ──
-                # Reject fits where the total sill (all component
-                # sills + nugget) exceeds MAX_SILL_RATIO × max(γ̂).
-                if not self._passes_total_sill_check(model, popt):
+                # ── consolidated validation ──
+                passes, fit_warnings = self.validate_fit(model, popt)
+                if not passes:
                     continue
 
                 # compute RSS
@@ -1183,7 +1218,7 @@ class VariogramModelSelector:
 
                 if rss < best_rss:
                     best_rss = rss
-                    best_result = (popt, pcov, rss)
+                    best_result = (popt, pcov, rss, fit_warnings)
 
             except (RuntimeError, ValueError):
                 continue
@@ -1191,7 +1226,7 @@ class VariogramModelSelector:
         if best_result is None:
             return None
 
-        popt, pcov, rss = best_result
+        popt, pcov, rss, best_warnings = best_result
         model.set_params(popt)
 
         # compute information criteria
@@ -1213,6 +1248,7 @@ class VariogramModelSelector:
             rss=rss,
             aic=aic,
             bic=bic,
+            warnings=best_warnings,
         )
     
     def _log_likelihood(
@@ -1232,93 +1268,19 @@ class VariogramModelSelector:
         )
         return ll
     
-    def cross_validate(
-        self,
-        fitted_model: FittedVariogramModel,
-        k: int = 5,
-        seed: Optional[int] = None,
-    ) -> float:
-        """Compute k-fold cross-validation RMSE.
-        
-        Parameters
-        ----------
-        fitted_model : FittedVariogramModel
-            Model to evaluate.
-        k : int
-            Number of folds.
-        seed : int, optional
-            Random seed for fold assignment.
-        
-        Returns
-        -------
-        cv_rmse : float
-            Cross-validation RMSE.
-        """
-        rng = np.random.default_rng(seed)
-        n = len(self.lags)
-        indices = rng.permutation(n)
-        fold_size = max(1, n // k)
-        
-        squared_errors = []
-        
-        for i in range(k):
-            # split indices
-            val_idx = indices[i * fold_size: min((i + 1) * fold_size, n)]
-            train_idx = np.setdiff1d(indices, val_idx)
-            
-            if len(train_idx) < fitted_model.composite_model.n_params:
-                continue
-            
-            # fit on training set
-            model_copy = CompositeVariogramModel(
-                fitted_model.composite_model.component_names,
-                fitted_model.composite_model.include_nugget,
-            )
-            
-            def model_func(h, *params):
-                model_copy.set_params(np.array(params))
-                return model_copy(h)
-            
-            try:
-                popt, _ = curve_fit(
-                    model_func,
-                    self.lags[train_idx],
-                    self.empirical_variogram[train_idx],
-                    p0=fitted_model.params,
-                    bounds=model_copy.bounds(self.lags, self.empirical_variogram),
-                    maxfev=5000,
-                )
-                
-                # predict on validation set
-                model_copy.set_params(popt)
-                predictions = model_copy(self.lags[val_idx])
-                errors = self.empirical_variogram[val_idx] - predictions
-                squared_errors.extend(errors**2)
-                
-            except RuntimeError:
-                continue
-        
-        if not squared_errors:
-            return np.inf
-        
-        return np.sqrt(np.mean(squared_errors))
-    
     def fit_all_candidates(
         self,
-        max_components: int = 2,
+        max_components: int = 1,
         include_nugget: bool = True,
         include_unbounded: bool = True,
         bounded_only_combinations: bool = True,
-        compute_cv: bool = False,
-        cv_folds: int = 5,
-        seed: Optional[int] = None,
     ) -> None:
         """Fit all candidate models.
 
         Parameters
         ----------
         max_components : int
-            Maximum number of nested components.
+            Maximum number of nested components (default 1).
         include_nugget : bool
             Include nugget in all models.
         include_unbounded : bool
@@ -1327,17 +1289,6 @@ class VariogramModelSelector:
             If True (default), unbounded models are only tried as single
             components.  If False, bounded + unbounded combinations are
             also generated (e.g. spherical + linear + nugget).
-        compute_cv : bool
-            Whether to compute variogram k-fold CV scores.
-            Default False — variogram k-fold CV randomly shuffles
-            lag bins, which are ordered and correlated, making the
-            resulting RMSE unreliable for model selection.  Use
-            kriging LOOCV (MSSPE) instead for spatial cross-
-            validation.  Retained for backward compatibility.
-        cv_folds : int
-            Number of CV folds (only used if ``compute_cv=True``).
-        seed : int, optional
-            Random seed for CV.
         """
         candidates = self.generate_candidates(
             max_components=max_components,
@@ -1352,24 +1303,7 @@ class VariogramModelSelector:
         for model in candidates:
             fitted = self.fit_model(model)
             if fitted is not None:
-                if compute_cv:
-                    fitted.cv_rmse = self.cross_validate(fitted, k=cv_folds, seed=seed)
-                # check half-lag heuristic
-                fitted.check_half_lag(max_lag)
                 self.fitted_models.append(fitted)
-
-        # compute Akaike weights
-        if self.fitted_models:
-            self._compute_akaike_weights()
-    
-    def _compute_akaike_weights(self) -> None:
-        """Compute Akaike weights for model averaging."""
-        aics = np.array([m.aic for m in self.fitted_models])
-        delta_aic = aics - np.min(aics)
-        
-        # akaike weights
-        exp_terms = np.exp(-0.5 * delta_aic)
-        self.model_weights = exp_terms / np.sum(exp_terms)
     
     def select_best(self, criterion: str = 'aic') -> FittedVariogramModel:
         """Select best model by criterion.
@@ -1377,7 +1311,7 @@ class VariogramModelSelector:
         Parameters
         ----------
         criterion : str
-            Selection criterion: ``'aic'``, ``'bic'``, ``'cv'``, or
+            Selection criterion: ``'aic'``, ``'bic'``, or
             ``'msspe'``.  For ``'msspe'``, the model whose kriging
             LOOCV MSSPE is closest to 1.0 is selected (minimise
             ``|MSSPE − 1|``).  Requires that MSSPE has been computed
@@ -1402,9 +1336,6 @@ class VariogramModelSelector:
             scores = [m.aic for m in self.fitted_models]
         elif criterion == 'bic':
             scores = [m.bic for m in self.fitted_models]
-        elif criterion == 'cv':
-            scores = [m.cv_rmse if m.cv_rmse is not None else np.inf
-                     for m in self.fitted_models]
         elif criterion == 'msspe':
             scores = [
                 abs(m.msspe - 1.0) if m.msspe is not None else np.inf
@@ -1511,52 +1442,6 @@ class VariogramModelSelector:
         self.best_model.param_samples = param_samples
         return param_samples
     
-    def get_bma_variogram(self) -> Callable:
-        """Get Bayesian Model Averaged variogram function.
-        
-        Returns
-        -------
-        bma_func : Callable
-            Function γ_BMA(h) = Σ wₖ γₖ(h)
-        """
-        if self.model_weights is None:
-            raise ValueError("No model weights. Call fit_all_candidates() first.")
-        
-        def bma_variogram(h):
-            h = np.asarray(h)
-            result = np.zeros_like(h, dtype=float)
-            for model, weight in zip(self.fitted_models, self.model_weights):
-                result += weight * model.predict(h)
-            return result
-        
-        return bma_variogram
-    
-    def get_bma_variance_at_lag(self, h: float) -> Tuple[float, float, float]:
-        """Get BMA mean and variance at a specific lag.
-        
-        Returns
-        -------
-        mean : float
-            BMA weighted mean γ_BMA(h)
-        within_var : float
-            Within-model variance component
-        between_var : float
-            Between-model variance component
-        """
-        predictions = np.array([m.predict(np.array([h]))[0] for m in self.fitted_models])
-        
-        # bMA mean
-        bma_mean = np.sum(self.model_weights * predictions)
-        
-        # between-model variance
-        between_var = np.sum(self.model_weights * (predictions - bma_mean)**2)
-        
-        # within-model variance (would require bootstrap samples from each model)
-        # for now, approximate as 0 or could be computed if needed
-        within_var = 0.0
-        
-        return bma_mean, within_var, between_var
-
     def summary(self) -> str:
         """Generate summary of fitted models."""
         if not self.fitted_models:
@@ -1568,37 +1453,24 @@ class VariogramModelSelector:
             for m in self.fitted_models
         )
 
-        lines = ["=" * 95]
+        lines = ["=" * 80]
         lines.append("VARIOGRAM MODEL SELECTION SUMMARY")
-        lines.append("=" * 95)
-        header = f"{'Model':<40} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10}"
+        lines.append("=" * 80)
+        header = f"{'Model':<40} {'AIC':>10} {'BIC':>10}"
         if has_msspe:
             header += f" {'MSSPE':>12}"
-        header += f" {'Weight':>8}"
         lines.append(header)
-        lines.append("-" * 95)
+        lines.append("-" * 80)
 
         # sort by AIC
-        weights = (
-            self.model_weights
-            if self.model_weights is not None
-            else [0] * len(self.fitted_models)
-        )
-        sorted_models = sorted(
-            zip(self.fitted_models, weights),
-            key=lambda x: x[0].aic
-        )
+        sorted_models = sorted(self.fitted_models, key=lambda m: m.aic)
 
-        for model, weight in sorted_models:
+        for model in sorted_models:
             name = "+".join(model.composite_model.component_names)
             if model.composite_model.include_nugget:
                 name += "+nugget"
 
-            cv_str = f"{model.cv_rmse:.4f}" if model.cv_rmse else "N/A"
-            row = (
-                f"{name:<40} {model.aic:>10.2f} {model.bic:>10.2f} "
-                f"{cv_str:>10}"
-            )
+            row = f"{name:<40} {model.aic:>10.2f} {model.bic:>10.2f}"
             if has_msspe:
                 if model.msspe is not None:
                     msspe_str = f"{model.msspe:.3f}"
@@ -1608,10 +1480,9 @@ class VariogramModelSelector:
                 else:
                     msspe_str = "N/A"
                 row += f" {msspe_str:>12}"
-            row += f" {weight:>8.3f}"
             lines.append(row)
 
-        lines.append("=" * 70)
+        lines.append("=" * 80)
 
         if self.best_model:
             lines.append("\nBEST MODEL DETAILS:")
@@ -1953,7 +1824,6 @@ class VariogramAnalysis:
         # model selection attributes
         self.best_aic = None
         self.best_bic = None
-        self.selection_criterion = None
         self.best_params = None
         self.best_model_config = None
         self.cv_mean_error_best_aic = None
@@ -1962,8 +1832,6 @@ class VariogramAnalysis:
         self.n_bins = None
         self.sigma_variogram = None
         self.best_model_func = None
-        self.best_guess = None
-        self.best_bounds = None
         self.all_variograms = None
         self.all_counts = None
         self.estimator = None
@@ -2265,657 +2133,12 @@ class VariogramAnalysis:
         self.n_bins = int(np.nanmean(all_n_bins))
         self.estimator = estimator
 
-    @staticmethod
-    def get_base_initial_guess(n: int, mean_variogram, lags, nugget: bool = False) -> np.ndarray:
-        """
-        Initial guess for variogram parameters with improved nugget estimation.
-
-        For sills: distributes the total sill evenly across components.
-        For ranges: spreads ranges linearly up to half the max lag.
-        For nugget: extrapolates to h=0 using a linear fit to the first few lags,
-                    which provides a more physically meaningful estimate than
-                    using an arbitrary fraction of the max semivariance.
-
-        Parameters
-        ----------
-        n : int
-            Number of variogram components.
-        mean_variogram : array-like
-            Empirical semivariance values.
-        lags : array-like
-            Lag distances.
-        nugget : bool
-            Whether to include a nugget parameter.
-
-        Returns
-        -------
-        p0 : ndarray
-            Initial parameter vector [C1, ..., Cn, a1, ..., an, (nugget)].
-        """
-        max_semivariance = np.max(mean_variogram)
-        half_max_lag = np.max(lags) / 2
-
-        # estimate nugget by extrapolating to h=0 from first few lags
-        if nugget:
-            # use first 3-5 valid lag points for linear extrapolation
-            n_extrap = min(5, len(lags) // 3, len(lags))
-            n_extrap = max(2, n_extrap)  # Need at least 2 points
-
-            short_lags = lags[:n_extrap]
-            short_gamma = mean_variogram[:n_extrap]
-
-            # linear fit: γ(h) = nugget + slope * h
-            # extrapolate to h=0 to get nugget estimate
-            if len(short_lags) >= 2:
-                slope, intercept = np.polyfit(short_lags, short_gamma, 1)
-                nugget_estimate = max(0.0, intercept)  # Nugget can't be negative
-                # cap nugget at 50% of max semivariance as sanity check
-                nugget_estimate = min(nugget_estimate, max_semivariance * 0.5)
-            else:
-                # fallback: use smallest lag value as upper bound
-                nugget_estimate = mean_variogram[0] * 0.5
-
-            # partial sill is what remains after nugget
-            partial_sill_total = max(max_semivariance - nugget_estimate, max_semivariance * 0.5)
-        else:
-            nugget_estimate = 0.0
-            partial_sill_total = max_semivariance
-
-        # distribute sill across components
-        C = [partial_sill_total / n] * n
-
-        # spread ranges linearly
-        a = [((half_max_lag) / 3) * (i + 1) for i in range(n)]
-
-        p0 = C + a + ([nugget_estimate] if nugget else [])
-        return np.array(p0, dtype=float)
-
-    @staticmethod
-    def pure_nugget_model(h, nugget):
-        """γ(h) for pure nugget: constant variance independent of h."""
-        return np.full_like(h, nugget)
-
-    @staticmethod
-    def spherical_model(h, *params):
-        """
-        Multi-component spherical model without nugget.
-
-        Parameters
-        ----------
-        h : array-like
-        params : [C1..Cn, a1..an] (n sills followed by n ranges)
-        """
-        n = len(params) // 2
-        C = params[:n]
-        a = params[n:]
-        model = np.zeros_like(h, dtype=float)
-        for i in range(n):
-            ai = a[i]
-            Ci = C[i]
-            mask = h <= ai
-            ratio = h[mask] / ai
-            model[mask] += Ci * (1.5 * ratio - 0.5 * ratio ** 3)
-            model[~mask] += Ci
-        return model
-
-    def spherical_model_with_nugget(self, h, *params):
-        """
-        Spherical model with nugget at the END of the parameter vector.
-
-        Parameters
-        ----------
-        params : [C1..Cn, a1..an, nugget]
-        """
-        nugget = params[-1]
-        structural = params[:-1]
-        return nugget + self.spherical_model(h, *structural)
-
-    @staticmethod
-    def bootstrap_fit_variogram(
-        lags: np.ndarray,
-        mean_vario: np.ndarray,
-        sigma_vario: np.ndarray,
-        model_func: Callable,
-        p0: np.ndarray,
-        bounds: Optional[tuple] = None,
-        n_boot: int = 100,
-        maxfev: int = 10000,
-        *,
-        seed: Optional[int] = None
-    ) -> np.ndarray:
-        """
-        Parametric bootstrap for parameter uncertainty using per-lag standard deviations.
-
-        Parameters
-        ----------
-        lags, mean_vario, sigma_vario : arrays
-        model_func : callable
-        p0 : initial params
-        bounds : bounds tuple
-        n_boot : int
-        maxfev : int
-        seed : int | None
-
-        Returns
-        -------
-        np.ndarray
-            Successful parameter vectors (rows).
-        """
-        rng = np.random.default_rng(seed)
-        # draw synthetic variograms with Gaussian noise per bin using sigma_vario.
-        noise_array = rng.normal(loc=mean_vario, scale=np.where(sigma_vario > 0, sigma_vario, 0.0), size=(n_boot, len(mean_vario)))
-
-        param_samples = []
-        n_params = len(p0)
-        bnds = bounds if bounds is not None else (-np.inf, np.inf)
-
-        for n in range(n_boot):
-            synth = noise_array[n, :]
-            try:
-                popt_synth, _ = curve_fit(
-                    model_func,
-                    lags,
-                    synth,
-                    p0=p0,
-                    sigma=None,        # Using unconditional fits to the synthetic draws
-                    bounds=bnds,
-                    maxfev=maxfev
-                )
-                param_samples.append(popt_synth)
-            except RuntimeError:
-                param_samples.append([np.nan] * n_params)
-
-        param_samples = np.array(param_samples)
-        valid = ~np.isnan(param_samples).any(axis=1)
-        return param_samples[valid]
-
-    @staticmethod
-    def _weighted_loglike_gaussian(y, yhat, sigma):
-        """
-        Log-likelihood for heteroscedastic Gaussian errors: sum over bins of
-        -0.5 * [log(2π σ_i^2) + ((y_i - ŷ_i)^2 / σ_i^2)]
-        """
-        s = np.asarray(sigma, dtype=float)
-        s = np.where(s <= 0, np.finfo(float).eps, s)
-        resid = y - yhat
-        return -0.5 * np.sum(np.log(2 * np.pi * s ** 2) + (resid ** 2) / (s ** 2))
-
-    def cross_validate_variogram(self, model_func, p0, bounds, k: int = 5, *, seed: Optional[int] = None):
-        """
-        k-fold cross-validation on (lags, mean_variogram) with provided model/bounds.
-
-        Returns
-        -------
-        dict | None
-            {'rmse','mae','me','mse'} averaged across folds, or None if all folds fail.
-        """
-        rng = np.random.default_rng(seed)
-        lags = self.lags
-        mean_variogram = self.mean_variogram
-        sigma_filtered = self.sigma_variogram
-
-        n_bins = len(lags)
-        indices = rng.permutation(n_bins)
-        fold_size = max(1, n_bins // k)
-        rmses, maes, mes, mses = [], [], [], []
-
-        for i in range(k):
-            valid_idx = indices[i * fold_size: (i + 1) * fold_size]
-            train_idx = np.setdiff1d(indices, valid_idx)
-
-            lags_train = lags[train_idx]
-            vario_train = mean_variogram[train_idx]
-            sigma_train = sigma_filtered[train_idx]
-
-            try:
-                popt, _ = curve_fit(model_func, lags_train, vario_train, p0=p0, bounds=bounds, sigma=sigma_train, absolute_sigma=True, maxfev=10000)
-            except RuntimeError:
-                continue
-
-            lags_valid = lags[valid_idx]
-            vario_valid = mean_variogram[valid_idx]
-            predictions = model_func(lags_valid, *popt)
-
-            errors = vario_valid - predictions
-            rmse = float(np.sqrt(np.mean(errors ** 2)))
-            mae = float(np.mean(np.abs(errors)))
-            me = float(np.mean(errors))
-            mse = float(np.mean(errors ** 2))
-
-            rmses.append(rmse)
-            maes.append(mae)
-            mes.append(me)
-            mses.append(mse)
-
-        if not rmses:
-            return None
-
-        return {'rmse': np.mean(rmses), 'mae': np.mean(maes), 'me': np.mean(mes), 'mse': np.mean(mses)}
-
-    def fit_best_spherical_model(
-        self,
-        sigma_type: str = 'std',
-        bounds: Optional[tuple] = None,
-        method: str = 'trf',
-        criterion: str = 'aic',
-        *,
-        seed: Optional[int] = None
-    ) -> None:
-        """
-        Fit spherical variogram models (1–3 components, optional nugget) and select the best.
-
-        Parameters
-        ----------
-        sigma_type : {'std','linear','exp','sqrt','sq'}
-            Bin weighting scheme used in curve_fit as sigma.
-        bounds : tuple | None
-            Optional (lb, ub) for parameters; if None, internal bounds are used.
-        method : str
-            curve_fit method (default 'trf').
-        criterion : {'aic', 'bic'}
-            Information criterion for model selection.
-            - 'aic': Akaike Information Criterion (default)
-            - 'bic': Bayesian Information Criterion
-        seed : int | None
-            RNG seed for randomized initial guesses.
-
-        Notes
-        -----
-        - Nugget parameter is ALWAYS last in the parameter vector.
-        """
-        rng = np.random.default_rng(seed)
-
-        if self.all_variograms is None:
-            raise RuntimeError("No variogram data. Call calculate_mean_variogram_numba() first.")
-
-        # choose weights
-        if sigma_type == 'std':
-            sigma = self.sigma_variogram
-        elif sigma_type == 'linear':
-            sigma = 1.0 / (1.0 + self.lags)
-        elif sigma_type == 'exp':
-            sigma = np.exp(-self.lags)
-        elif sigma_type == 'sqrt':
-            sigma = 1.0 / np.sqrt(1.0 + self.lags)
-        elif sigma_type == 'sq':
-            sigma = 1.0 / (1.0 + self.lags ** 2)
-        elif sigma_type == 'nugget_focus':
-            # weight short lags heavily for better nugget estimation
-            # uses exponential decay with characteristic length = 20% of max lag
-            char_length = np.max(self.lags) * 0.2
-            sigma = np.exp(-self.lags / char_length)
-            # normalize so first bin has sigma=1
-            sigma = sigma / sigma[0]
-        elif sigma_type == 'cressie':
-            # cressie's robust weighting: N_h / gamma(h)^2
-            # downweights large semivariance values which are more variable
-            sigma = self.mean_variogram**2 / np.maximum(self.mean_count, 1)
-            sigma = np.sqrt(sigma)  # curve_fit expects std dev
-        else:
-            raise ValueError(f"Unknown sigma_type '{sigma_type}'. Use 'std', 'linear', 'exp', 'sqrt', 'sq', 'nugget_focus', or 'cressie'.")
-        
-        if criterion not in ('aic', 'bic'):
-            raise ValueError(f"criterion must be 'aic' or 'bic', got '{criterion}'")
-
-        best_params = None
-        best_model = None
-        best_func = None
-        best_criterion_value = np.inf
-        best_aic = np.inf
-        best_bic = np.inf
-        best_bounds = None
-        best_guess = None
-        n_obs = len(self.lags)
-
-        lag_max = float(np.max(self.lags)) if self.lags is not None and len(self.lags) else 1.0
-        for config in (
-            {'components': 1, 'nugget': False},
-            {'components': 1, 'nugget': True},
-            {'components': 2, 'nugget': False},
-            {'components': 2, 'nugget': True},
-            {'components': 3, 'nugget': False},
-            {'components': 3, 'nugget': True},
-        ):
-            n = config['components']
-            nugget = config['nugget']
-            if n == 0:
-                model = self.pure_nugget_model
-                auto_bounds = ([0.0], [np.inf])
-                p0s = [np.array([np.max(self.mean_variogram)])]
-            else:
-                model = self.spherical_model_with_nugget if nugget else self.spherical_model
-
-                # constrain nugget upper bound to prevent overestimation
-                # nugget > 50% of total sill is unusual and often indicates
-                # fitting problems rather than True micro-scale variation
-                max_gamma = float(np.max(self.mean_variogram))
-                nugget_upper = max_gamma * 0.5  # Cap nugget at 50% of observed max
-
-                lb = [0.0] * n + [1e-6] * n + ([0.0] if nugget else [])
-                ub = [np.inf] * n + [2.0 * lag_max] * n + ([nugget_upper] if nugget else [])
-                auto_bounds = (lb, ub)
-
-                base = self.get_base_initial_guess(n, self.mean_variogram, self.lags, nugget)
-                p0s = []
-                for _ in range(5):
-                    perturb = (rng.random(len(base)) - 0.5) * 2.0 * 0.5  # +/-50%
-                    guess = np.clip(base * (1 + perturb), 1e-6, None)
-                    p0s.append(guess)
-
-            bounds_tuple = bounds if bounds is not None else auto_bounds
-
-            for p0 in p0s:
-                try:
-                    popt, _ = curve_fit(
-                        model,
-                        self.lags,
-                        self.mean_variogram,
-                        p0=p0,
-                        sigma=sigma,
-                        absolute_sigma=True,  
-                        bounds=bounds_tuple,
-                        method=method,
-                        maxfev=20000
-                    )
-                except RuntimeError:
-                    continue
-
-                yhat = model(self.lags, *popt)
-                ll = self._weighted_loglike_gaussian(self.mean_variogram, yhat, sigma)
-                k = len(popt)
-                aic = 2 * k - 2 * ll
-                bic = k * np.log(n_obs) - 2 * ll
-
-                current_criterion_value = aic if criterion == 'aic' else bic
-
-                if current_criterion_value < best_criterion_value:
-                    best_criterion_value = current_criterion_value
-                    best_aic = aic
-                    best_bic = bic
-                    best_params = popt
-                    best_model = config
-                    best_func = model
-                    best_bounds = bounds_tuple
-                    best_guess = p0
-
-        if best_params is None:
-            raise RuntimeError("No valid model fit found. Check input data for NaN values.")
-
-        self.best_params = best_params
-        self.best_model_config = best_model
-        self.best_model_func = best_func
-        self.best_aic = best_aic
-        self.best_bounds = best_bounds
-        self.best_guess = best_guess
-        self.best_bic = best_bic
-        self.selection_criterion = criterion
-        self.fitted_variogram = (
-            self.spherical_model_with_nugget if self.best_model_config['nugget']
-            else self.spherical_model
-        )(self.lags, *self.best_params)
-
-        # extract sill & range point estimates; nugget last if present
-        n = self.best_model_config['components']
-        if self.best_model_config['nugget']:
-            self.sills = self.best_params[:n]
-            self.ranges = self.best_params[n:2 * n]
-            self.best_nugget = float(self.best_params[-1])
-        else:
-            self.sills = self.best_params[:n]
-            self.ranges = self.best_params[n:2 * n]
-            self.best_nugget = None
-
-        # prepare bounds for bootstrap consistent with nugget-last convention
-        max_gamma = float(np.max(self.mean_variogram))
-        nugget_upper = max_gamma * 0.5  # Same constraint as fitting
-
-        if n == 0:
-            bounds_boot = ([0.0], [max_gamma * 1.5])
-        else:
-            lb = [0.0] * n + [1e-6] * n + ([0.0] if self.best_model_config['nugget'] else [])
-            ub = [np.inf] * n + [2.0 * lag_max] * n + ([nugget_upper] if self.best_model_config['nugget'] else [])
-            bounds_boot = (lb, ub)
-
-        # parametric bootstrap using per-bin sigma (std across runs)
-        samples = self.bootstrap_fit_variogram(
-            self.lags,
-            self.mean_variogram,
-            self.sigma_variogram,  
-            self.best_model_func,
-            self.best_params,
-            bounds=bounds_boot,
-            n_boot=500,
-            maxfev=20000,
-            seed=seed,
-        )
-        # Store bootstrap samples without appending the optimal point
-        # estimate — appending it biases percentile estimates toward
-        # the MLE (the bias is small for n_boot=500 but unnecessary).
-        if samples.size:
-            self.param_samples = samples
-        else:
-            self.param_samples = np.array([self.best_params])
-
-        # percentiles of parameters
-        # full range: 2.5th to 97.5th percentiles (robust bounds for plotting)
-        # 1σ range: 16th to 84th percentiles (darker shading)
-        if self.param_samples.size:
-            if self.best_model_config['nugget']:
-                nug_samps = self.param_samples[:, -1]
-                samp = self.param_samples[:, :-1]
-            else:
-                nug_samps = None
-                samp = self.param_samples
-
-            sill_samps = samp[:, :n]
-            range_samps = samp[:, n:2 * n]
-
-            # full range (2.5th to 97.5th percentiles)
-            self.sills_min = np.percentile(sill_samps, 2.5, axis=0)
-            self.sills_max = np.percentile(sill_samps, 97.5, axis=0)
-            self.sills_median = np.percentile(sill_samps, 50, axis=0)
-
-            # 1σ range (16th to 84th percentiles)
-            self.sills_p16 = np.percentile(sill_samps, 16, axis=0)
-            self.sills_p84 = np.percentile(sill_samps, 84, axis=0)
-
-            # full range for ranges
-            self.ranges_min = np.percentile(range_samps, 2.5, axis=0)
-            self.ranges_max = np.percentile(range_samps, 97.5, axis=0)
-            self.ranges_median = np.percentile(range_samps, 50, axis=0)
-
-            # 1σ range for ranges
-            self.ranges_p16 = np.percentile(range_samps, 16, axis=0)
-            self.ranges_p84 = np.percentile(range_samps, 84, axis=0)
-
-            if nug_samps is not None:
-                # full range for nugget
-                self.min_nugget = float(np.percentile(nug_samps, 2.5))
-                self.max_nugget = float(np.percentile(nug_samps, 97.5))
-                self.median_nugget = float(np.percentile(nug_samps, 50))
-                # 1σ range for nugget
-                self.nugget_p16 = float(np.percentile(nug_samps, 16))
-                self.nugget_p84 = float(np.percentile(nug_samps, 84))
-            else:
-                self.min_nugget = self.max_nugget = self.median_nugget = None
-                self.nugget_p16 = self.nugget_p84 = None
-        else:
-            # fallback to point estimates
-            self.sills_min = self.sills_max = self.sills_median = np.array(self.sills)
-            self.sills_p16 = self.sills_p84 = np.array(self.sills)
-            self.ranges_min = self.ranges_max = self.ranges_median = np.array(self.ranges)
-            self.ranges_p16 = self.ranges_p84 = np.array(self.ranges)
-            if self.best_model_config['nugget']:
-                self.min_nugget = self.max_nugget = self.median_nugget = self.best_nugget
-                self.nugget_p16 = self.nugget_p84 = self.best_nugget
-            else:
-                self.min_nugget = self.max_nugget = self.median_nugget = None
-                self.nugget_p16 = self.nugget_p84 = None
-
-        # compute and store cross-validation metrics on best model
-        self.cv_mean_error_best_aic = self.cross_validate_variogram(
-            self.best_model_func, self.best_params, self.best_bounds, k=5, seed=seed
-        )
-
-    def estimate_nugget_from_short_lags(
-        self,
-        n_lags: int = 5,
-        method: str = 'linear_extrap'
-    ) -> float:
-        """
-        Estimate nugget independently from short-lag behavior.
-
-        This two-stage approach first estimates the nugget from the y-intercept
-        region, then can be used to constrain full model fitting. This prevents
-        the optimizer from trading off sill for nugget inappropriately.
-
-        Think of it like this: the nugget represents instantaneous variance
-        (measurement error + micro-scale variation), which is only "visible"
-        at the shortest lags. By extrapolating to h=0 from short lags, we get
-        a more physically meaningful estimate.
-
-        Parameters
-        ----------
-        n_lags : int
-            Number of short-lag bins to use for estimation (default: 5).
-        method : str
-            Estimation method:
-            - 'linear_extrap': Linear regression extrapolated to h=0
-            - 'quadratic_extrap': Quadratic fit extrapolated to h=0
-            - 'first_lag': Use first lag value directly (conservative upper bound)
-
-        Returns
-        -------
-        float
-            Estimated nugget value.
-
-        Notes
-        -----
-        The linear extrapolation method assumes γ(h) ≈ C₀ + bh near the origin,
-        which is valid for models with a nugget (discontinuity at origin).
-
-        References
-        ----------
-        Cressie, N. (1985). Fitting variogram models by weighted least squares.
-        Journal of the International Association for Mathematical Geology, 17(5).
-        """
-        if self.mean_variogram is None:
-            raise RuntimeError("No variogram data. Call calculate_mean_variogram_numba() first.")
-
-        n_fit = min(n_lags, len(self.lags))
-        lags_short = self.lags[:n_fit]
-        gamma_short = self.mean_variogram[:n_fit]
-
-        if method == 'linear_extrap':
-            # γ(h) ≈ C₀ + bh → intercept is nugget estimate
-            slope, intercept = np.polyfit(lags_short, gamma_short, 1)
-            nugget_est = max(intercept, 0.0)
-
-        elif method == 'quadratic_extrap':
-            # γ(h) ≈ C₀ + bh + ch² → allows for curvature near origin
-            if n_fit >= 3:
-                coeffs = np.polyfit(lags_short, gamma_short, 2)
-                nugget_est = max(coeffs[2], 0.0)  # Constant term
-            else:
-                # fall back to linear if not enough points
-                slope, intercept = np.polyfit(lags_short, gamma_short, 1)
-                nugget_est = max(intercept, 0.0)
-
-        elif method == 'first_lag':
-            # conservative: first lag value is upper bound on nugget
-            # (γ(h) at small h includes both nugget and some spatial correlation)
-            nugget_est = gamma_short[0] * 0.5  # Assume ~half is nugget
-
-        else:
-            raise ValueError(f"Unknown method '{method}'. Use 'linear_extrap', 'quadratic_extrap', or 'first_lag'.")
-
-        # sanity check: nugget shouldn't exceed observed semivariance
-        max_gamma = np.max(self.mean_variogram)
-        if nugget_est > max_gamma * 0.5:
-            import warnings
-            warnings.warn(
-                f"Estimated nugget ({nugget_est:.4f}) exceeds 50% of max semivariance "
-                f"({max_gamma:.4f}). This may indicate measurement issues or that the "
-                "variogram doesn't have a true nugget. Capping at 50%.",
-                UserWarning
-            )
-            nugget_est = max_gamma * 0.5
-
-        return nugget_est
-
-    def fit_model_two_stage(
-        self,
-        n_components: int = 1,
-        nugget_method: str = 'linear_extrap',
-        nugget_tolerance: float = 0.2,
-        sigma_type: str = 'nugget_focus',
-        criterion: str = 'aic',
-        seed: Optional[int] = None,
-    ) -> None:
-        """
-        Option 4: Two-stage fitting with pre-estimated nugget.
-
-        Stage 1: Estimate nugget from short-lag extrapolation
-        Stage 2: Fit full model with nugget constrained near Stage 1 estimate
-
-        This approach prevents the common problem of the optimizer
-        overestimating the nugget by trading off with the sill.
-
-        Parameters
-        ----------
-        n_components : int
-            Number of spherical components (default: 1).
-        nugget_method : str
-            Method for Stage 1 nugget estimation (see estimate_nugget_from_short_lags).
-        nugget_tolerance : float
-            Fractional tolerance around Stage 1 estimate for Stage 2 bounds.
-            E.g., 0.2 means nugget constrained to [0.8*est, 1.2*est].
-        sigma_type : str
-            Weighting scheme for fitting (default: 'nugget_focus' for better
-            short-lag fitting).
-        criterion : str
-            Selection criterion ('aic' or 'bic').
-        seed : int, optional
-            Random seed.
-
-        Notes
-        -----
-        This method stores results in the same attributes as fit_model() for
-        compatibility with downstream analysis.
-        """
-        # stage 1: Estimate nugget
-        nugget_est = self.estimate_nugget_from_short_lags(method=nugget_method)
-
-        # stage 2: Fit with constrained nugget
-        lag_max = float(np.max(self.lags))
-        nugget_lb = max(0.0, nugget_est * (1 - nugget_tolerance))
-        nugget_ub = nugget_est * (1 + nugget_tolerance)
-
-        # build bounds with constrained nugget
-        n = n_components
-        lb = [0.0] * n + [1e-6] * n + [nugget_lb]
-        ub = [np.inf] * n + [2.0 * lag_max] * n + [nugget_ub]
-        constrained_bounds = (lb, ub)
-
-        # now call fit_model with the constrained bounds
-        self.fit_model(
-            criterion=criterion,
-            sigma_type=sigma_type,
-            bounds=constrained_bounds,
-            seed=seed,
-        )
-
-        # store the Stage 1 estimate for reference
-        self.stage1_nugget_estimate = nugget_est
-
     def fit_best_model_auto(
         self,
         model_types: Optional[List[str]] = None,
-        max_components: int = 2,
+        max_components: int = 1,
         include_nugget: bool = True,
         criterion: str = 'msspe',
-        compute_cv: bool = False,
-        cv_folds: int = 5,
         n_bootstrap: int = 500,
         seed: Optional[int] = None,
         min_pairs: Optional[int] = 30,
@@ -2931,12 +2154,12 @@ class VariogramAnalysis:
         ----------
         model_types : list of str, optional
             Model types to consider. Default: ['spherical', 'exponential',
-            'gaussian', 'matern'].
+            'matern'].
         max_components : int
-            Maximum number of nested components (default: 2, max: 3).
+            Maximum number of nested components (default: 1, max: 3).
         include_nugget : bool
             Whether to include nugget effect in all candidate models.
-        criterion : {'aic', 'bic', 'cv', 'msspe'}
+        criterion : {'aic', 'bic', 'msspe'}
             Selection criterion.  Default is ``'msspe'``, which selects
             the model whose kriging LOOCV MSSPE is closest to 1.0
             (|MSSPE − 1| minimised).  This directly evaluates whether
@@ -2951,10 +2174,6 @@ class VariogramAnalysis:
 
             Requires spatial data from ``sample_raster()`` or
             ``calculate_mean_variogram_numba()``.
-        compute_cv : bool
-            Whether to compute variogram k-fold CV scores.
-        cv_folds : int
-            Number of CV folds.
         n_bootstrap : int
             Number of bootstrap resamples for parameter uncertainty.
         seed : int, optional
@@ -3019,7 +2238,7 @@ class VariogramAnalysis:
             compute_msspe = True
 
         if model_types is None:
-            model_types = ['spherical', 'exponential', 'gaussian', 'matern']
+            model_types = ['spherical', 'exponential', 'matern']
 
         # validate model_types
         available = MODEL_REGISTRY.list_models()
@@ -3054,9 +2273,6 @@ class VariogramAnalysis:
             max_components=min(max_components, 3),
             include_nugget=include_nugget,
             include_unbounded=bool(selector.UNBOUNDED_MODELS),
-            compute_cv=compute_cv,
-            cv_folds=cv_folds,
-            seed=seed,
         )
 
         if not selector.fitted_models:
@@ -3266,7 +2482,7 @@ class VariogramAnalysis:
                 self.min_nugget = self.max_nugget = self.median_nugget = None
                 self.nugget_p16 = self.nugget_p84 = None
 
-        self.cv_mean_error_best_aic = {'rmse': fitted.cv_rmse} if fitted.cv_rmse else None
+        self.cv_mean_error_best_aic = None
 
         # transfer MSSPE diagnostics
         self.best_msspe = fitted.msspe
@@ -3275,9 +2491,9 @@ class VariogramAnalysis:
     def get_model_comparison_summary(self) -> str:
         """Get a summary of all fitted models for comparison.
 
-        Returns formatted table with AIC, BIC, CV-RMSE, MSSPE, and
-        Akaike weights.  MSSPE column is included when at least one
-        candidate has been evaluated with kriging LOOCV.
+        Returns formatted table with AIC, BIC, and MSSPE.
+        MSSPE column is included when at least one candidate
+        has been evaluated with kriging LOOCV.
         """
         if not hasattr(self, 'model_selector') or self.model_selector is None:
             raise RuntimeError("No model comparison available. Call fit_best_model_auto() first.")
@@ -3289,26 +2505,23 @@ class VariogramAnalysis:
             m.msspe is not None for m in selector.fitted_models
         )
 
-        lines = ["=" * 105]
+        lines = ["=" * 80]
         lines.append("VARIOGRAM MODEL SELECTION SUMMARY")
-        lines.append("=" * 105)
-        header = f"{'Model':<40} {'AIC':>10} {'BIC':>10} {'CV-RMSE':>10}"
+        lines.append("=" * 80)
+        header = f"{'Model':<40} {'AIC':>10} {'BIC':>10}"
         if has_msspe:
             header += f" {'MSSPE':>12}"
-        header += f" {'Weight':>10}"
         lines.append(header)
-        lines.append("-" * 105)
+        lines.append("-" * 80)
 
-        weights = selector.model_weights if selector.model_weights is not None else [0] * len(selector.fitted_models)
-        sorted_models = sorted(zip(selector.fitted_models, weights), key=lambda x: x[0].aic)
+        sorted_models = sorted(selector.fitted_models, key=lambda x: x.aic)
 
-        for model, weight in sorted_models:
+        for model in sorted_models:
             name = "+".join(model.composite_model.component_names)
             if model.composite_model.include_nugget:
                 name += "+nugget"
-            cv_str = f"{model.cv_rmse:.4f}" if model.cv_rmse else "N/A"
             marker = " *" if model is selector.best_model else ""
-            row = f"{name:<40} {model.aic:>10.2f} {model.bic:>10.2f} {cv_str:>10}"
+            row = f"{name:<40} {model.aic:>10.2f} {model.bic:>10.2f}"
             if has_msspe:
                 if model.msspe is not None:
                     msspe_str = f"{model.msspe:.3f}"
@@ -3318,26 +2531,11 @@ class VariogramAnalysis:
                 else:
                     msspe_str = "N/A"
                 row += f" {msspe_str:>12}"
-            row += f" {weight:>10.4f}{marker}"
+            row += marker
             lines.append(row)
 
-        lines.append("=" * 95)
+        lines.append("=" * 80)
         return "\n".join(lines)
-    
-    def get_bma_variogram_function(self) -> Callable:
-        """Get Bayesian Model Averaged variogram function.
-
-        Computes γ_BMA(h) = Σᵢ wᵢ · γᵢ(h) where wᵢ are Akaike weights.
-
-        References
-        ----------
-        Hoeting, J.A., et al. (1999). Bayesian Model Averaging: A Tutorial.
-        Statistical Science, 14(4), 382-417.
-        """
-        if not hasattr(self, 'model_selector') or self.model_selector is None:
-            raise RuntimeError("No model selector available. Call fit_best_model_auto() first.")
-
-        return self.model_selector.get_bma_variogram()
     
     # ── kriging-based cross-validation ──────────────────────────────
 
@@ -3525,7 +2723,7 @@ class VariogramAnalysis:
         max_lag_multiplier: float = 1 / 3,
         *,
         model_types: Optional[List[str]] = None,
-        max_components: int = 2,
+        max_components: int = 1,
         include_nugget: bool = True,
         bounded_only_combinations: bool = True,
         criterion: str = 'msspe',
@@ -3568,9 +2766,9 @@ class VariogramAnalysis:
             Maximum lag as fraction of domain diagonal.
         model_types : list of str, optional
             Model types to try (default: spherical, exponential,
-            gaussian, matern).
+            matern).
         max_components : int
-            Maximum number of nested components (default 2, max 3).
+            Maximum number of nested components (default 1, max 3).
         include_nugget : bool
             Whether to include nugget variants in candidates.
         bounded_only_combinations : bool
@@ -3622,7 +2820,7 @@ class VariogramAnalysis:
         51, 137–157.
         """
         if model_types is None:
-            model_types = ['spherical', 'exponential', 'gaussian', 'matern']
+            model_types = ['spherical', 'exponential', 'matern']
 
         # reproducible child seeds
         ss = np.random.SeedSequence(seed)
@@ -3701,8 +2899,6 @@ class VariogramAnalysis:
                     include_nugget=include_nugget,
                     include_unbounded=bool(selector.UNBOUNDED_MODELS),
                     bounded_only_combinations=bounded_only_combinations,
-                    compute_cv=False,
-                    seed=run_seed,
                 )
 
                 if not selector.fitted_models:
@@ -3964,21 +3160,13 @@ class VariogramAnalysis:
         axs[1].legend(handles=legend_elements, loc='upper right')
 
         # add model info to title
-        rmse_str = ""
-        if isinstance(self.cv_mean_error_best_aic, dict):
-            rmse = self.cv_mean_error_best_aic.get('rmse', None)
-            if rmse is not None:
-                rmse_str = f'RMSE (CV): {rmse:.4f}'
-        axs[1].set_title(rmse_str)
+        title_str = ""
+        if hasattr(self, 'best_msspe') and self.best_msspe is not None:
+            title_str = f'MSSPE: {self.best_msspe:.3f}'
+        axs[1].set_title(title_str)
         plt.setp(axs[0].get_xticklabels(), visible=False)
         plt.tight_layout()
         return fig
 
-    # alias for backward compatibility
-    def plot_best_spherical_model(self):
-        """Alias for plot_best_model() for backward compatibility."""
-        return self.plot_best_model()
 
-
-# class RegionalUncertaintyEstimator:
 
