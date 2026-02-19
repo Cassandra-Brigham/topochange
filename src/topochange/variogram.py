@@ -3090,11 +3090,15 @@ class VariogramAnalysis:
         system once, then extract every LOO error and variance directly
         from the inverse.  For point *i*::
 
-            ê_i  = [A⁻¹ z̃]_i  /  [A⁻¹]_{ii}
-            σ²_i = 1 / [A⁻¹]_{ii}
+            ê_i  = −[K⁻¹ z̃]_i  /  [K⁻¹]_{ii}
+            σ²_i = −1 / [K⁻¹]_{ii}
 
-        where A is the (n+1)×(n+1) augmented semivariance matrix and
-        z̃ = [z₁, …, z_n, 0]ᵀ.
+        where K is the (n+1)×(n+1) augmented **covariance** matrix
+        and z̃ = [z₁, …, z_n, 0]ᵀ.  The covariance form is required
+        because the semivariance form produces an indefinite system
+        whose inverse has negative diagonal entries, yielding negative
+        kriging variances.  The covariance matrix is obtained via
+        C(h) = C(0) − γ(h).
 
         Parameters
         ----------
@@ -3127,16 +3131,18 @@ class VariogramAnalysis:
 
         Notes
         -----
-        The ordinary kriging augmented system for *n* data points::
+        The ordinary kriging augmented covariance system::
 
-            ⎡ Γ   𝟏 ⎤ ⎡ λ ⎤   ⎡ γ₀ ⎤
+            ⎡ C   𝟏 ⎤ ⎡ λ ⎤   ⎡ c₀ ⎤
             ⎣ 𝟏ᵀ  0 ⎦ ⎣ μ ⎦ = ⎣  1 ⎦
 
-        The virtual LOO identity avoids forming *n* sub-systems.
-        Instead, a single matrix inversion yields all LOO diagnostics.
-        This is the standard approach in geostatistics for efficient
-        cross-validation (Dubrule, 1983; Davis, 1987; Pang et al.,
-        2023).
+        where C_{ij} = C(0) − γ(h_{ij}) is the covariance.  The
+        virtual LOO identity avoids forming *n* sub-systems.  Instead,
+        a single matrix inversion yields all LOO diagnostics.  The
+        diagonal entries [K⁻¹]_{ii} are negative for a valid covariance
+        system, so the sign flips in the formulas produce positive
+        kriging variances.  This is the standard approach in
+        geostatistics (Dubrule, 1983; Davis, 1987; Pang et al., 2023).
 
         References
         ----------
@@ -3184,60 +3190,86 @@ class VariogramAnalysis:
             dy = coords[:, 1:2] - coords[:, 1:2].T
             dist_matrix = np.sqrt(dx**2 + dy**2)
 
-        # ── semivariance matrix ──
+        # ── semivariance matrix → covariance matrix ──
+        #
+        # The Dubrule (1983) virtual LOO identity must be applied to
+        # the COVARIANCE form of the kriging system, not the
+        # semivariance form.  The augmented semivariance system
+        # A = [Γ 1; 1' 0] is an indefinite saddle-point matrix whose
+        # inverse has *negative* diagonal entries — giving negative
+        # kriging variances if used naïvely.
+        #
+        # The covariance form K = [C 1; 1' 0] has a positive-definite
+        # upper-left block, and the Dubrule identity with K yields:
+        #
+        #   ê_i  = −[K⁻¹ z̃]_i  /  [K⁻¹]_{ii}
+        #   σ²_i = −1 / [K⁻¹]_{ii}
+        #
+        # where [K⁻¹]_{ii} < 0, making σ² > 0 as required.
+        #
+        # Conversion: C(h) = C(0) − γ(h), where C(0) is the total
+        # sill (a-priori variance) = γ(∞) for stationary models.
+
         gamma_matrix = variogram_func(dist_matrix)
 
-        # ── build augmented ordinary-kriging system ──
-        #    A = ⎡ Γ   𝟏 ⎤   z̃ = [z₁, …, z_n, 0]ᵀ
+        # total sill: evaluate γ at a very large distance
+        C0 = float(variogram_func(np.array([1e10]))[0])
+        if C0 <= 0 or not np.isfinite(C0):
+            # fallback: use the maximum observed semivariance
+            C0 = float(np.nanmax(gamma_matrix))
+        if C0 <= 0 or not np.isfinite(C0):
+            return KrigingLOOCVResult(
+                msspe=np.nan, mean_error=np.nan, rmse=np.nan,
+                mean_standardized_error=np.nan, n_points=0, n_failed=n,
+            )
+
+        # covariance matrix
+        cov_matrix = C0 - gamma_matrix
+
+        # ── build augmented covariance kriging system ──
+        #    K = ⎡ C   𝟏 ⎤   z̃ = [z₁, …, z_n, 0]ᵀ
         #        ⎣ 𝟏ᵀ  0 ⎦
         m = n + 1
-        A = np.empty((m, m))
-        A[:n, :n] = gamma_matrix
-        A[:n, n] = 1.0
-        A[n, :n] = 1.0
-        A[n, n] = 0.0
+        K = np.empty((m, m))
+        K[:n, :n] = cov_matrix
+        K[:n, n] = 1.0
+        K[n, :n] = 1.0
+        K[n, n] = 0.0
 
         z_aug = np.zeros(m)
         z_aug[:n] = values
 
         # ── invert once → all LOO diagnostics ──
-        #
-        # The augmented kriging semivariance system mixes γ(h) entries
-        # (which can be very small, e.g. O(10⁻³) for mm-scale
-        # topographic changes) with Lagrange-multiplier entries of 1.0.
-        # This makes the matrix poorly conditioned for np.linalg.inv.
-        #
-        # We use the SVD-based pseudoinverse (pinv) which handles
-        # ill-conditioning gracefully by zeroing out singular values
-        # below a threshold, rather than amplifying numerical noise.
         try:
-            A_inv = np.linalg.pinv(A, rcond=1e-12)
+            K_inv = np.linalg.pinv(K, rcond=1e-12)
         except np.linalg.LinAlgError:
             return KrigingLOOCVResult(
-                msspe=np.nan,
-                mean_error=np.nan,
-                rmse=np.nan,
-                mean_standardized_error=np.nan,
-                n_points=0,
-                n_failed=n,
+                msspe=np.nan, mean_error=np.nan, rmse=np.nan,
+                mean_standardized_error=np.nan, n_points=0, n_failed=n,
             )
 
-        # Virtual LOO identity (Dubrule, 1983):
-        #   ê_i  = [A⁻¹ z̃]_i  /  [A⁻¹]_{ii}
-        #   σ²_i = 1 / [A⁻¹]_{ii}
-        A_inv_z = A_inv @ z_aug          # (m,)
-        diag_A_inv = np.diag(A_inv)[:n]  # first n diagonal entries
+        # Virtual LOO identity (Dubrule, 1983) — covariance form:
+        #   ê_i  = −[K⁻¹ z̃]_i  /  [K⁻¹]_{ii}
+        #   σ²_i = −1 / [K⁻¹]_{ii}
+        #
+        # The diagonal [K⁻¹]_{ii} is NEGATIVE for a valid covariance
+        # system, so the minus signs yield positive variances.
+        K_inv_z = K_inv @ z_aug           # (m,)
+        diag_K_inv = np.diag(K_inv)[:n]   # first n diagonal entries
 
-        # guard against zero/negative diagonal (numerically singular)
-        eps = max(np.finfo(float).eps, 1e-15 * np.max(np.abs(diag_A_inv)))
-        valid_diag = np.abs(diag_A_inv) > eps
+        # guard against zero diagonal (numerically singular)
+        eps = max(np.finfo(float).eps,
+                  1e-15 * np.max(np.abs(diag_K_inv)))
+        valid_diag = np.abs(diag_K_inv) > eps
         n_failed = int(np.sum(~valid_diag))
 
         errors = np.full(n, np.nan)
         variances = np.full(n, np.nan)
 
-        errors[valid_diag] = A_inv_z[:n][valid_diag] / diag_A_inv[valid_diag]
-        variances[valid_diag] = 1.0 / diag_A_inv[valid_diag]
+        errors[valid_diag] = (
+            -K_inv_z[:n][valid_diag] / diag_K_inv[valid_diag]
+        )
+        variances[valid_diag] = -1.0 / diag_K_inv[valid_diag]
 
         # ── aggregate diagnostics ──
         valid = (valid_diag
@@ -3250,12 +3282,9 @@ class VariogramAnalysis:
 
         if n_valid == 0:
             return KrigingLOOCVResult(
-                msspe=np.nan,
-                mean_error=np.nan,
-                rmse=np.nan,
+                msspe=np.nan, mean_error=np.nan, rmse=np.nan,
                 mean_standardized_error=np.nan,
-                n_points=0,
-                n_failed=n_failed,
+                n_points=0, n_failed=n_failed,
             )
 
         sigma = np.sqrt(v)
