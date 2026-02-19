@@ -130,6 +130,174 @@ class FittedVariogramModel:
 
 
 @dataclass
+class EmpiricalVariogram:
+    """Container for an empirical variogram computed from spatial data.
+
+    Holds the lag-binned semivariance estimates, pair counts, and
+    spread across multiple independent sampling realizations.
+    Returned by :meth:`VariogramAnalysis.compute_empirical_variogram`.
+
+    Attributes
+    ----------
+    lags : ndarray
+        Lag-bin centres (same units as input coordinates).
+    median_variogram : ndarray
+        Median semivariance per lag bin across realizations.
+    mean_variogram : ndarray
+        Mean semivariance per lag bin (for WLS fitting input).
+    pair_counts : ndarray
+        Mean number of point pairs per lag bin.
+    sigma : ndarray
+        Per-bin standard deviation across realizations (useful as
+        WLS weight input).
+    p2_5 : ndarray
+        2.5th percentile per bin (lower 2σ bound).
+    p16 : ndarray
+        16th percentile per bin (lower 1σ bound).
+    p84 : ndarray
+        84th percentile per bin (upper 1σ bound).
+    p97_5 : ndarray
+        97.5th percentile per bin (upper 2σ bound).
+    n_runs : int
+        Number of independent realizations averaged.
+    n_bins : int
+        Effective number of lag bins.
+    estimator : str
+        Which estimator was used (``'matheron'`` or
+        ``'cressie_hawkins'``).
+    sample_coords : ndarray or None
+        Coordinates from the last sampling realization (shape (n, 2)).
+    sample_values : ndarray or None
+        Values from the last sampling realization (shape (n,)).
+    all_variograms : ndarray or None
+        Full matrix of per-run semivariance estimates (n_runs × n_lags).
+    all_counts : ndarray or None
+        Full matrix of per-run pair counts.
+    """
+
+    lags: np.ndarray
+    median_variogram: np.ndarray
+    mean_variogram: np.ndarray
+    pair_counts: np.ndarray
+    sigma: np.ndarray
+    p2_5: np.ndarray
+    p16: np.ndarray
+    p84: np.ndarray
+    p97_5: np.ndarray
+    n_runs: int
+    n_bins: int
+    estimator: str
+    sample_coords: Optional[np.ndarray] = None
+    sample_values: Optional[np.ndarray] = None
+    all_variograms: Optional[np.ndarray] = None
+    all_counts: Optional[np.ndarray] = None
+
+    def plot(self, ax=None, show_spread: bool = True, show_counts: bool = True):
+        """Plot the empirical variogram with two-level uncertainty shading.
+
+        Mirrors the style of
+        :meth:`VariogramAnalysis.plot_best_model`:
+
+        - **Top panel**: bar chart of mean pair counts per lag bin.
+        - **Bottom panel**: median binned semivariance (blue dots)
+          with 1σ (68 %, darker) and 2σ (95 %, lighter) spread
+          envelopes across realizations.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw on.  If *None*, creates a new two-panel
+            figure.  When an external axis is supplied, only the
+            variogram panel is drawn (no pair-count panel).
+        show_spread : bool, default True
+            Shade the 1σ and 2σ envelopes across realizations.
+        show_counts : bool, default True
+            Show the pair-count bar chart above the variogram.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        from matplotlib.patches import Patch
+        from matplotlib.lines import Line2D
+
+        if ax is not None:
+            fig = ax.get_figure()
+            axs = [None, ax]  # [count_ax, vario_ax]
+            show_counts = False
+        else:
+            fig, axs = plt.subplots(
+                2, 1,
+                gridspec_kw={'height_ratios': [1, 3]},
+                figsize=(10, 8),
+                sharex=True,
+            )
+
+        # ── bar width ──
+        if len(self.lags) > 1:
+            bar_width = (self.lags[1] - self.lags[0]) * 0.9
+        else:
+            bar_width = (self.lags[0] if len(self.lags) else 1.0) * 0.9
+
+        # ── top panel: pair counts ──
+        if show_counts:
+            valid_c = (~np.isnan(self.pair_counts)) & (self.pair_counts > 0)
+            axs[0].bar(
+                self.lags[valid_c], self.pair_counts[valid_c],
+                width=bar_width, color='orange', alpha=0.5,
+            )
+            axs[0].set_ylabel('Mean Count')
+            axs[0].tick_params(labelbottom=False)
+
+        # ── bottom panel: empirical variogram ──
+        ax_v = axs[1] if show_counts else (axs[1] if axs[0] is None else axs[0])
+
+        # median binned values
+        ax_v.plot(
+            self.lags, self.median_variogram,
+            'o-', color='blue', markersize=4, zorder=5,
+            label='Median variogram',
+        )
+
+        # spread envelopes
+        if show_spread and self.n_runs > 1:
+            # 2σ (95 %) — light shading
+            ax_v.fill_between(
+                self.lags, self.p2_5, self.p97_5,
+                color='blue', alpha=0.1,
+            )
+            # 1σ (68 %) — darker shading
+            ax_v.fill_between(
+                self.lags, self.p16, self.p84,
+                color='blue', alpha=0.3,
+            )
+
+        ax_v.set_xlabel('Lag Distance')
+        ax_v.set_ylabel('Semivariance')
+        ax_v.set_title(
+            f'Empirical variogram ({self.estimator}, '
+            f'{self.n_runs} run{"s" if self.n_runs > 1 else ""})'
+        )
+
+        # legend
+        legend_elements = [
+            Line2D([0], [0], marker='o', color='blue',
+                   label='Median variogram', linestyle='-', markersize=4),
+        ]
+        if show_spread and self.n_runs > 1:
+            legend_elements += [
+                Patch(facecolor='blue', alpha=0.3, label='1σ spread (68 %)'),
+                Patch(facecolor='blue', alpha=0.1, label='2σ spread (95 %)'),
+            ]
+        ax_v.legend(handles=legend_elements, loc='lower right')
+
+        if show_counts:
+            plt.setp(axs[0].get_xticklabels(), visible=False)
+        plt.tight_layout()
+        return fig
+
+
+@dataclass
 class KrigingLOOCVResult:
     """Results from leave-one-out kriging cross-validation.
 
@@ -2148,6 +2316,118 @@ class VariogramAnalysis:
         self.all_counts = count_arr
         self.n_bins = int(np.nanmean(all_n_bins))
         self.estimator = estimator
+
+    def compute_empirical_variogram(
+        self,
+        area_side: float,
+        samples_per_area: float,
+        max_samples: int,
+        bin_width: float,
+        max_n_bins: int,
+        n_runs: int = 10,
+        max_lag_multiplier: float = 1 / 3,
+        *,
+        seed: Optional[int] = None,
+        estimator: str = 'matheron',
+    ) -> 'EmpiricalVariogram':
+        """Compute an empirical variogram and return it as a dataclass.
+
+        This is the recommended entry point for computing an empirical
+        variogram.  Unlike ``calculate_mean_variogram_numba()``, it
+        returns an :class:`EmpiricalVariogram` object that bundles all
+        results and provides a ``plot()`` method.  No fitting is
+        performed — call :meth:`fit_best_model_auto` separately if
+        needed.
+
+        Internally this calls ``calculate_mean_variogram_numba()`` to
+        populate the legacy attributes, so downstream code that reads
+        ``self.mean_variogram`` etc. continues to work.
+
+        Parameters
+        ----------
+        area_side : float
+            Side length of the random sampling square (map units).
+        samples_per_area : float
+            Sampling density (points per area_side²).
+        max_samples : int
+            Hard cap on total sample points per realization.
+        bin_width : float
+            Lag bin width (same units as coordinates).
+        max_n_bins : int
+            Maximum number of lag bins.
+        n_runs : int, default 10
+            Number of independent variogram realizations to average.
+            More runs → smoother mean and tighter spread estimate.
+        max_lag_multiplier : float, default 1/3
+            Maximum lag as fraction of the sampling extent.
+        seed : int, optional
+            Base seed for reproducibility.
+        estimator : {'matheron', 'cressie_hawkins'}, default 'matheron'
+            ``'matheron'`` — classical method-of-moments:
+            γ̂(h) = (1/2N) Σ [Z(xᵢ) − Z(xⱼ)]².
+            ``'cressie_hawkins'`` — robust fourth-root estimator
+            (Cressie & Hawkins, 1980) that downweights outlier
+            pairs.
+
+        Returns
+        -------
+        EmpiricalVariogram
+            Dataclass with ``lags``, ``mean_variogram``,
+            ``pair_counts``, ``sigma``, ``err_low``, ``err_high``,
+            plus a ``plot()`` method.
+
+        Examples
+        --------
+        >>> va = VariogramAnalysis(rdh)
+        >>> emp = va.compute_empirical_variogram(
+        ...     area_side=1000, samples_per_area=1.0,
+        ...     max_samples=10000, bin_width=50, max_n_bins=40,
+        ...     n_runs=20, estimator='matheron',
+        ... )
+        >>> emp.plot()          # quick look — no fitting needed
+        >>> emp.mean_variogram  # access the raw array
+        """
+        # Delegate to legacy method (populates self.mean_variogram etc.)
+        self.calculate_mean_variogram_numba(
+            area_side=area_side,
+            samples_per_area=samples_per_area,
+            max_samples=max_samples,
+            bin_width=bin_width,
+            max_n_bins=max_n_bins,
+            n_runs=n_runs,
+            max_lag_multiplier=max_lag_multiplier,
+            seed=seed,
+            estimator=estimator,
+        )
+
+        # Compute percentile bounds for the EmpiricalVariogram
+        with np.errstate(all='ignore'):
+            valid = ~np.isnan(np.nanmean(self.all_variograms, axis=0))
+            p2_5 = np.nanpercentile(self.all_variograms, 2.5, axis=0)[valid]
+            p16 = np.nanpercentile(self.all_variograms, 16, axis=0)[valid]
+            median = np.nanmedian(self.all_variograms, axis=0)[valid]
+            p84 = np.nanpercentile(self.all_variograms, 84, axis=0)[valid]
+            p97_5 = np.nanpercentile(self.all_variograms, 97.5, axis=0)[valid]
+
+        rdh = self.raster_data_handler
+        return EmpiricalVariogram(
+            lags=self.lags.copy(),
+            median_variogram=median,
+            mean_variogram=self.mean_variogram.copy(),
+            pair_counts=self.mean_count.copy(),
+            sigma=self.sigma_variogram.copy(),
+            p2_5=p2_5,
+            p16=p16,
+            p84=p84,
+            p97_5=p97_5,
+            n_runs=n_runs,
+            n_bins=self.n_bins,
+            estimator=estimator,
+            sample_coords=rdh.coords.copy() if rdh.coords is not None else None,
+            sample_values=rdh.samples.copy() if rdh.samples is not None else None,
+            all_variograms=self.all_variograms.copy(),
+            all_counts=self.all_counts.copy(),
+        )
 
     def fit_best_model_auto(
         self,

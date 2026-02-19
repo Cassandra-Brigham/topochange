@@ -14,6 +14,7 @@ from .variogram import (
     VariogramAnalysis,
     VariogramModelSelector,
     FittedVariogramModel,
+    EmpiricalVariogram,
     KrigingLOOCVResult,
 )
 from .uncertainty import RegionalUncertaintyEstimator, DerivativeUncertaintyEstimator
@@ -74,6 +75,7 @@ __all__ = [
     "VariogramAnalysis",
     "VariogramModelSelector",
     "FittedVariogramModel",
+    "EmpiricalVariogram",
     "MODEL_REGISTRY",
     "VariogramModelRegistry",
     "CompositeVariogramModel",
