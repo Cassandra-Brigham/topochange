@@ -663,6 +663,79 @@ class VariogramModelSelector:
 
         return guesses[:n_restarts]
 
+    # ── range separation enforcement ─────────────────────────────
+
+    #: Minimum ratio between successive practical ranges in a
+    #: multi-component model.  Two components whose practical ranges
+    #: are closer than this factor are nearly non-identifiable:
+    #: the optimizer can trade sill between them freely.  A 3×
+    #: separation ensures each component captures a distinct spatial
+    #: scale, consistent with the physical error-source hierarchy
+    #: in topographic differencing (meter-scale misclassification →
+    #: hundred-meter-scale flight-line striping → kilometre-scale
+    #: calibration bias).
+    #:
+    #: No standard numerical rule exists in the literature; the
+    #: constraint is a practical identifiability guard.  Gringarten
+    #: & Deutsch (2001) and Webster & Oliver (2007) recommend that
+    #: nested structures represent "distinct scales" without
+    #: specifying a ratio.  3× is conservative: with spherical
+    #: models, two components with ranges a and 3a have their
+    #: transition zones overlapping in only the first third of the
+    #: longer component's range — enough for the optimizer to
+    #: distinguish them.
+    MIN_RANGE_SEPARATION: float = 3.0
+
+    @staticmethod
+    def _get_practical_ranges(
+        model: CompositeVariogramModel,
+        params: np.ndarray,
+    ) -> List[float]:
+        """Extract practical (effective) ranges from fitted params.
+
+        The practical range is the distance at which the model reaches
+        ~95% of its sill.  For spherical models this equals the range
+        parameter; for exponential models it is 3× the range parameter.
+
+        Returns a list of practical ranges for bounded components that
+        have a 'range' parameter, in component order.
+        """
+        model.set_params(params)
+        practical = []
+        for i, spec in enumerate(model._components):
+            if spec.is_bounded and 'range' in spec.param_names:
+                range_idx = spec.param_names.index('range')
+                comp_params = model.get_component_params(i)
+                raw_range = comp_params[range_idx]
+                prf = spec.practical_range_factor
+                if prf is not None and prf > 0:
+                    practical.append(raw_range * prf)
+                else:
+                    practical.append(raw_range)
+        return practical
+
+    def _passes_range_separation(
+        self,
+        model: CompositeVariogramModel,
+        params: np.ndarray,
+    ) -> bool:
+        """Check whether fitted practical ranges satisfy separation.
+
+        For single-component models this always returns True.
+        For multi-component models, the sorted practical ranges must
+        satisfy  r_{i+1} / r_i  >=  MIN_RANGE_SEPARATION.
+        """
+        practical = self._get_practical_ranges(model, params)
+        if len(practical) <= 1:
+            return True
+        ordered = sorted(practical)
+        for j in range(len(ordered) - 1):
+            if ordered[j] < np.finfo(float).eps:
+                return False  # degenerate zero range
+            if ordered[j + 1] / ordered[j] < self.MIN_RANGE_SEPARATION:
+                return False
+        return True
+
     # ── core model fitting ───────────────────────────────────────
 
     def fit_model(
@@ -679,6 +752,12 @@ class VariogramModelSelector:
         in an asymmetric window around the pre-estimate (−50% / +80%,
         with a floor of 15% of max semivariance).  This prevents the
         common failure mode where the optimizer trades sill for nugget.
+
+        For multi-component models, fits that violate the minimum
+        practical-range separation (``MIN_RANGE_SEPARATION``, default
+        3×) are rejected.  This prevents the optimizer from collapsing
+        two components onto the same spatial scale, which causes
+        parameter non-identifiability.
 
         Parameters
         ----------
@@ -750,6 +829,12 @@ class VariogramModelSelector:
                     bounds=bounds,
                     maxfev=maxfev,
                 )
+
+                # ── range separation check ──
+                # Reject fits where multi-component practical ranges
+                # are not sufficiently separated (non-identifiable).
+                if not self._passes_range_separation(model, popt):
+                    continue
 
                 # compute RSS
                 model.set_params(popt)
