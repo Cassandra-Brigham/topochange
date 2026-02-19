@@ -970,7 +970,15 @@ class VariogramModelSelector:
     #: transition zones overlapping in only the first third of the
     #: longer component's range — enough for the optimizer to
     #: distinguish them.
-    MIN_RANGE_SEPARATION: float = 3.0
+    MIN_RANGE_SEPARATION: float = 2.0
+
+    #: Minimum practical range as a fraction of the first lag.
+    #: Components with practical range below this threshold are
+    #: degenerate — they contribute semivariance entirely at sub-bin
+    #: scales, acting as nugget surrogates rather than genuine spatial
+    #: structure.  A floor of 1.0 × bin_width ensures every component
+    #: contributes spatially resolvable structure.
+    MIN_RANGE_FRACTION: float = 1.0
 
     @staticmethod
     def _get_practical_ranges(
@@ -1010,8 +1018,24 @@ class VariogramModelSelector:
         For single-component models this always returns True.
         For multi-component models, the sorted practical ranges must
         satisfy  r_{i+1} / r_i  >=  MIN_RANGE_SEPARATION.
+
+        Also rejects any component whose practical range falls below
+        ``MIN_RANGE_FRACTION × bin_width`` — such components contribute
+        variance entirely at sub-bin scales, acting as nugget surrogates
+        rather than spatially resolvable structure.
         """
         practical = self._get_practical_ranges(model, params)
+
+        # minimum practical range floor (bin-width based)
+        if len(self.lags) >= 2:
+            bin_width = float(self.lags[1] - self.lags[0])
+        else:
+            bin_width = float(self.lags[0]) if len(self.lags) == 1 else 1.0
+        min_range = self.MIN_RANGE_FRACTION * bin_width
+        for pr in practical:
+            if pr < min_range:
+                return False
+
         if len(practical) <= 1:
             return True
         ordered = sorted(practical)
@@ -1284,6 +1308,7 @@ class VariogramModelSelector:
         max_components: int = 2,
         include_nugget: bool = True,
         include_unbounded: bool = True,
+        bounded_only_combinations: bool = True,
         compute_cv: bool = False,
         cv_folds: int = 5,
         seed: Optional[int] = None,
@@ -1298,6 +1323,10 @@ class VariogramModelSelector:
             Include nugget in all models.
         include_unbounded : bool
             Include non-stationary models.
+        bounded_only_combinations : bool
+            If True (default), unbounded models are only tried as single
+            components.  If False, bounded + unbounded combinations are
+            also generated (e.g. spherical + linear + nugget).
         compute_cv : bool
             Whether to compute variogram k-fold CV scores.
             Default False — variogram k-fold CV randomly shuffles
@@ -1314,6 +1343,7 @@ class VariogramModelSelector:
             max_components=max_components,
             include_nugget=include_nugget,
             include_unbounded=include_unbounded,
+            bounded_only_combinations=bounded_only_combinations,
         )
 
         self.fitted_models = []
@@ -3497,6 +3527,7 @@ class VariogramAnalysis:
         model_types: Optional[List[str]] = None,
         max_components: int = 2,
         include_nugget: bool = True,
+        bounded_only_combinations: bool = True,
         criterion: str = 'msspe',
         msspe_n_subset: int = 500,
         msspe_n_runs: int = 5,
@@ -3542,6 +3573,11 @@ class VariogramAnalysis:
             Maximum number of nested components (default 2, max 3).
         include_nugget : bool
             Whether to include nugget variants in candidates.
+        bounded_only_combinations : bool
+            If True (default), unbounded models (linear, power) are
+            only tried as single-component models.  Set to False to
+            allow bounded + unbounded combinations (e.g. spherical +
+            linear + nugget) for variograms that don't reach a sill.
         criterion : str
             Selection criterion (default 'msspe').
         msspe_n_subset : int
@@ -3664,6 +3700,7 @@ class VariogramAnalysis:
                     max_components=min(max_components, 3),
                     include_nugget=include_nugget,
                     include_unbounded=bool(selector.UNBOUNDED_MODELS),
+                    bounded_only_combinations=bounded_only_combinations,
                     compute_cv=False,
                     seed=run_seed,
                 )
@@ -3708,7 +3745,8 @@ class VariogramAnalysis:
                 # ── 4. Extract parameters ──
                 model = best.composite_model
                 params = best.params
-                desc = model.description()
+                # structural description for grouping (no parameter values)
+                struct_desc = model.structural_description()
 
                 # extract sills, ranges, nugget, nu
                 sills_r = []
@@ -3744,7 +3782,7 @@ class VariogramAnalysis:
                     emp_padded = emp_vario
 
                 record = {
-                    'model_description': desc,
+                    'model_description': struct_desc,
                     'component_names': list(model.component_names),
                     'include_nugget': model.include_nugget,
                     'params': params.copy(),
@@ -3768,7 +3806,7 @@ class VariogramAnalysis:
                 if verbose:
                     msspe_str = (f"MSSPE={best.msspe:.3f}" if best.msspe is not None
                                  else "MSSPE=N/A")
-                    print(f"{desc}  {msspe_str}")
+                    print(f"{struct_desc}  {msspe_str}")
 
             except Exception as e:
                 n_failed += 1

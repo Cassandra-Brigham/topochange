@@ -410,6 +410,18 @@ class CompositeVariogramModel:
         
         return cov_func
     
+    def structural_description(self) -> str:
+        """Model structure without parameter values, for grouping.
+
+        Returns a string like ``'spherical + exponential + nugget'``
+        that identifies the model *family* regardless of fitted
+        parameter values.
+        """
+        parts = [spec.name for spec in self._components]
+        if self.include_nugget:
+            parts.append('nugget')
+        return ' + '.join(parts)
+
     def description(self) -> str:
         """Generate human-readable model description."""
         parts = []
