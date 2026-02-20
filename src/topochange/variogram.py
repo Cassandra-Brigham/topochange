@@ -1493,6 +1493,40 @@ class VariogramModelSelector:
         popt, pcov, rss, best_warnings = best_result
         model.set_params(popt)
 
+        # ── boundary detection ──
+        # Warn when fitted parameters land within 2% of their bounds.
+        # This almost always indicates the optimizer wanted to go
+        # further but was blocked — the fitted model is suspect.
+        lower_bounds, upper_bounds = bounds
+        param_names = model.param_names
+        for i, (val, lb, ub) in enumerate(
+            zip(popt, lower_bounds, upper_bounds)
+        ):
+            span = ub - lb
+            if span <= 0:
+                continue
+            name = param_names[i] if i < len(param_names) else f"param[{i}]"
+            if (val - lb) / span < 0.02:
+                msg = (
+                    f"WARNING: {model.structural_description()} "
+                    f"parameter '{name}' ({val:.4g}) is at its "
+                    f"lower bound ({lb:.4g}). The fit may be "
+                    f"poorly constrained."
+                )
+                warnings.warn(msg)
+                best_warnings.append(msg)
+            elif (ub - val) / span < 0.02:
+                msg = (
+                    f"WARNING: {model.structural_description()} "
+                    f"parameter '{name}' ({val:.4g}) is at its "
+                    f"upper bound ({ub:.4g}). The variogram may "
+                    f"not reach a sill within the observed lag "
+                    f"range — consider increasing max_lag or "
+                    f"treating this estimate with caution."
+                )
+                warnings.warn(msg)
+                best_warnings.append(msg)
+
         # compute information criteria
         n = len(self.lags)
         k = model.n_params
@@ -1612,9 +1646,8 @@ class VariogramModelSelector:
         self.best_model = self.fitted_models[best_idx]
 
         # emit any diagnostic warnings from the selected model
-        import warnings as _warnings
         for w in self.best_model.warnings:
-            _warnings.warn(w, UserWarning, stacklevel=2)
+            warnings.warn(w, UserWarning, stacklevel=2)
 
         return self.best_model
     
@@ -3668,9 +3701,30 @@ class VariogramAnalysis:
                     for rkey in ('range', 'wavelength'):
                         if rkey in spec.param_names:
                             ridx = spec.param_names.index(rkey)
-                            ranges_r.append(
-                                comp_params[ridx] * (spec.practical_range_factor or 1.0)
-                            )
+                            raw_range = comp_params[ridx]
+                            # Compute effective (practical) range.
+                            # For Matérn, practical_range_factor is None
+                            # because it depends on ν: effective range
+                            # ≈ range × √(2ν) × 2.7 (distance to 95%
+                            # of sill).  For all others, use the fixed
+                            # factor.
+                            prf = spec.practical_range_factor
+                            if prf is None and 'nu' in spec.param_names:
+                                nu_idx_local = spec.param_names.index('nu')
+                                nu_local = comp_params[nu_idx_local]
+                                # Matérn effective range (95% of sill):
+                                # approx 2.7 * range * sqrt(2*nu) for
+                                # typical nu.  Simplified: use the
+                                # scipy kv-based factor, but a good
+                                # approximation is 3*range for nu≤0.5,
+                                # range*sqrt(8*nu) for nu>0.5.
+                                if nu_local <= 0.5:
+                                    prf = 3.0
+                                else:
+                                    prf = float(np.sqrt(8 * nu_local))
+                            elif prf is None:
+                                prf = 1.0
+                            ranges_r.append(raw_range * prf)
                             break
                     if 'nu' in spec.param_names:
                         nu_idx = spec.param_names.index('nu')

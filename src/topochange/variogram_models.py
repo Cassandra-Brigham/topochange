@@ -412,19 +412,39 @@ class VariogramModelRegistry:
         """Register all standard models."""
         
         # helper for default guesses and bounds
-        def _bounded_guess(lags, variogram):
-            max_gamma = np.nanmax(variogram)
-            max_lag = np.nanmax(lags)
-            return [max_gamma * 0.9, max_lag / 3]
+        # ── range bound helpers ──────────────────────────────────────
+        # We bound the **effective (practical) range** — the distance at
+        # which γ(h) essentially reaches the sill — to half the observed
+        # lag domain.  The empirical variogram is unreliable beyond this
+        # point (Journel & Huijbregts, 1978, Mining Geostatistics).
+        #
+        # Because each model's raw "range" parameter relates to the
+        # effective range by a factor (practical_range_factor), we set
+        #
+        #     raw_range_upper = max_lag / (2 × practical_range_factor)
+        #
+        # so that effective_range_upper = max_lag / 2 for every model.
 
-        def _bounded_bounds(lags, variogram):
-            # sill: 3× max semivariance 
-            max_gamma = np.nanmax(variogram) * 3
-            # range: constrain to the observed lag domain
-            max_lag = np.nanmax(lags)
-            return ([0, 1e-6], [max_gamma, max_lag])
-        
-        # spherical
+        def _make_bounded_guess(prf):
+            """Create initial-guess function for a model with the given
+            practical_range_factor."""
+            def _guess(lags, variogram):
+                max_gamma = np.nanmax(variogram)
+                max_lag = np.nanmax(lags)
+                # initial raw-range guess: ~1/3 of effective-range ceiling
+                return [max_gamma * 0.9, max_lag / (3 * prf)]
+            return _guess
+
+        def _make_bounded_bounds(prf):
+            """Create bounds function for a model with the given
+            practical_range_factor."""
+            def _bounds(lags, variogram):
+                max_gamma = np.nanmax(variogram) * 3
+                max_lag = np.nanmax(lags)
+                return ([0, 1e-6], [max_gamma, max_lag / (2 * prf)])
+            return _bounds
+
+        # spherical  (practical_range_factor = 1.0)
         spherical_spec = VariogramModelSpec(
             name='spherical',
             func=spherical,
@@ -435,11 +455,11 @@ class VariogramModelRegistry:
             description="Spherical model: reaches sill exactly at range. "
                        "Common for sedimentary deposits."
         )
-        spherical_spec._default_guess = _bounded_guess
-        spherical_spec._bounds = _bounded_bounds
+        spherical_spec._default_guess = _make_bounded_guess(1.0)
+        spherical_spec._bounds = _make_bounded_bounds(1.0)
         self._models['spherical'] = spherical_spec
-        
-        # exponential
+
+        # exponential  (practical_range_factor = 3.0)
         exp_spec = VariogramModelSpec(
             name='exponential',
             func=exponential,
@@ -450,11 +470,11 @@ class VariogramModelRegistry:
             description="Exponential model: asymptotic approach to sill. "
                        "Practical range = 3 × range parameter."
         )
-        exp_spec._default_guess = _bounded_guess
-        exp_spec._bounds = _bounded_bounds
+        exp_spec._default_guess = _make_bounded_guess(3.0)
+        exp_spec._bounds = _make_bounded_bounds(3.0)
         self._models['exponential'] = exp_spec
-        
-        # Gaussian
+
+        # Gaussian  (practical_range_factor = 1.73)
         gauss_spec = VariogramModelSpec(
             name='gaussian',
             func=gaussian,
@@ -465,20 +485,29 @@ class VariogramModelRegistry:
             description="Gaussian model: very smooth variation. "
                        "WARNING: May cause numerical instability without nugget."
         )
-        gauss_spec._default_guess = _bounded_guess
-        gauss_spec._bounds = _bounded_bounds
+        gauss_spec._default_guess = _make_bounded_guess(1.73)
+        gauss_spec._bounds = _make_bounded_bounds(1.73)
         self._models['gaussian'] = gauss_spec
-        
-        # Matérn
+
+        # Matérn  (practical_range_factor depends on ν)
+        # Since ν is optimised jointly with range, we use a conservative
+        # factor of 3.0 (same as exponential, which is Matérn with
+        # ν = 0.5) to prevent the effective range from exceeding the
+        # half-lag ceiling even at low ν.
+        _matern_prf_conservative = 3.0
+
         def _matern_guess(lags, variogram):
             max_gamma = np.nanmax(variogram)
             max_lag = np.nanmax(lags)
-            return [max_gamma * 0.9, max_lag / 3, 1.5]  # Default nu=1.5
-        
+            return [max_gamma * 0.9,
+                    max_lag / (3 * _matern_prf_conservative),
+                    1.5]  # default nu=1.5
+
         def _matern_bounds(lags, variogram):
             max_gamma = np.nanmax(variogram) * 3
             max_lag = np.nanmax(lags)
-            return ([0, 1e-6, 0.1], [max_gamma, max_lag, 5.0])
+            return ([0, 1e-6, 0.1],
+                    [max_gamma, max_lag / (2 * _matern_prf_conservative), 5.0])
         
         matern_spec = VariogramModelSpec(
             name='matern',
@@ -505,7 +534,9 @@ class VariogramModelRegistry:
         def _damped_hole_bounds(lags, variogram):
             max_gamma = np.nanmax(variogram) * 3
             max_lag = np.nanmax(lags)
-            return ([0, 1e-6, 1e-6], [max_gamma, max_lag, max_lag])
+            # damped hole: practical_range_factor = 1.0 for range,
+            # wavelength also bounded to half-lag
+            return ([0, 1e-6, 1e-6], [max_gamma, max_lag / 2, max_lag / 2])
 
         def _damped_hole_validate(params):
             """Validate positive definiteness constraint for damped hole effect.
