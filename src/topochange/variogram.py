@@ -3206,8 +3206,12 @@ class VariogramAnalysis:
         Invert once to get Q = A**-1.  Then for every point *i*::
 
             LOO error:     e_{-i} = -(Q[i,:n] . z) / Q[i,i]
-            LOO variance:  sigma2_{-i} = 1 / Q[i,i]
+            LOO variance:  sigma2_{-i} = -1 / Q[i,i]   (Q[i,i] < 0)
             SSPE_i:        e_{-i}**2 / sigma2_{-i}
+
+        Note: because A uses the semivariance matrix (not covariance),
+        Q[i,i] < 0 for valid variogram models.  The negative sign in
+        the variance formula ensures σ² > 0.
 
         and MSSPE = mean(SSPE_i).
 
@@ -3230,9 +3234,10 @@ class VariogramAnalysis:
            warning is issued.  Individual unstable points are
            filtered by the diagonal check below.
 
-        4. *Diagonal filter*: LOO points where Q[i,i] <= 0 are
-           excluded (these indicate local numerical instability in
-           the inversion, typically < 1% of points).
+        4. *Diagonal filter*: LOO points where Q[i,i] >= 0 are
+           excluded (for the semivariance formulation, Q[i,i] < 0
+           is the valid condition; Q[i,i] >= 0 indicates local
+           numerical instability, typically < 1% of points).
 
         References
         ----------
@@ -3342,13 +3347,20 @@ class VariogramAnalysis:
         # Q_diag[i] = Q[i,i] for the n data points (not the
         #             Lagrange multiplier row).
         # LOO error:     e_{-i} = -(Q[i,:n] . z) / Q[i,i]
-        # LOO variance:  sigma2_{-i} = 1 / Q[i,i]
+        # LOO variance:  sigma2_{-i} = -1 / Q[i,i]
+        #
+        # Sign convention: because A is built from the *semivariance*
+        # matrix Γ (not the covariance matrix C), the diagonal of
+        # Q = A⁻¹ is negative for valid variogram models.  The LOO
+        # kriging variance is σ²_{-i} = −1/Q[i,i], which is positive
+        # when Q[i,i] < 0.  The LOO error formula is unchanged
+        # because the sign cancels: e_{-i} = −(Q[i,:n]·z)/Q[i,i].
         Q_diag = np.diag(Q)[:n]
         Qz = Q[:n, :n] @ values          # shape (n,)
 
-        # Filter out numerically unstable points (Q[i,i] <= 0
+        # Filter out numerically unstable points (Q[i,i] >= 0
         # means the LOO variance would be non-positive).
-        valid = Q_diag > 0
+        valid = Q_diag < 0
         n_failed = int(np.sum(~valid))
 
         if not np.any(valid):
@@ -3358,7 +3370,7 @@ class VariogramAnalysis:
         Q_diag_v = Q_diag[valid]
 
         errors = -Qz_v / Q_diag_v        # LOO prediction errors
-        variances = 1.0 / Q_diag_v       # LOO kriging variances
+        variances = -1.0 / Q_diag_v      # LOO kriging variances
         sigma = np.sqrt(variances)
         n_valid = int(np.sum(valid))
 
