@@ -4364,15 +4364,8 @@ class SingleVariogram:
 
         # empirical variogram attributes (populated by compute_empirical_variogram)
         self.lags: Optional[np.ndarray] = None
-        self.mean_variogram: Optional[np.ndarray] = None
-        self.median_variogram: Optional[np.ndarray] = None
+        self.variogram: Optional[np.ndarray] = None
         self.pair_counts: Optional[np.ndarray] = None
-        self.sigma: Optional[np.ndarray] = None
-        self.p2_5: Optional[np.ndarray] = None
-        self.p16: Optional[np.ndarray] = None
-        self.p84: Optional[np.ndarray] = None
-        self.p97_5: Optional[np.ndarray] = None
-        self.n_runs: int = 0
         self.n_bins: int = 0
         self.estimator: Optional[str] = None
         self.sample_coords: Optional[np.ndarray] = None
@@ -4453,16 +4446,16 @@ class SingleVariogram:
         max_samples: int,
         bin_width: float,
         max_lag_multiplier: float = 1 / 3,
-        n_runs: int = 10,
         *,
         seed: Optional[int] = None,
         estimator: str = "matheron",
         return_sample: bool = False,
     ) -> None:
-        """Compute empirical variogram from multiple independent samples.
+        """Compute a single empirical variogram from one spatial sample.
 
-        Repeatedly samples the raster, computes binned semivariance,
-        and stores the mean / median / percentile envelopes.
+        Draws one random sample from the raster, computes pairwise
+        lag-binned semivariance, and stores the result.  For ensemble
+        averaging across multiple samples, use :class:`GridVariogram`.
 
         Parameters
         ----------
@@ -4471,20 +4464,18 @@ class SingleVariogram:
         samples_per_area : float
             Sampling density (points per area_side²).
         max_samples : int
-            Hard cap on samples per realisation.
+            Hard cap on sample points.
         bin_width : float
             Lag bin width (same units as coordinates).
         max_lag_multiplier : float
             Maximum lag as a fraction of the spatial extent diagonal.
-        n_runs : int
-            Number of independent realisations to average.
         seed : int, optional
-            Base seed for reproducibility.
+            RNG seed for reproducibility.
         estimator : {'matheron', 'cressie_hawkins'}
             Semivariance estimator.
         return_sample : bool
-            If True, retain the last realisation's coordinates and values
-            (useful for downstream MSSPE computation).
+            If True, retain the sampled coordinates and values
+            (needed for downstream MSSPE computation in ``fit_model``).
         """
         if estimator not in self.ESTIMATORS:
             raise ValueError(
@@ -4500,74 +4491,29 @@ class SingleVariogram:
         diag = np.sqrt(x_extent ** 2 + y_extent ** 2)
         max_lag = float(diag * max_lag_multiplier)
 
-        max_n_bins = int(np.ceil(max_lag / bin_width)) + 1
-
-        # child seeds for reproducibility
-        ss = np.random.SeedSequence(seed)
-        child_seeds = ss.spawn(n_runs)
-
-        all_variograms = np.full((n_runs, max_n_bins), np.nan)
-        all_counts = np.full((n_runs, max_n_bins), np.nan)
-
-        last_coords = None
-        last_values = None
-
-        for run in range(n_runs):
-            run_seed = int(child_seeds[run].generate_state(1)[0])
-            bin_counts, gamma, n_bins_run, coords, values = (
-                self._single_variogram_run(
-                    area_side, samples_per_area, max_samples,
-                    bin_width, max_lag, estimator, seed=run_seed,
-                )
+        # sample and compute
+        bin_counts, gamma, n_bins_run, coords, values = (
+            self._single_variogram_run(
+                area_side, samples_per_area, max_samples,
+                bin_width, max_lag, estimator, seed=seed,
             )
-            n_copy = min(len(gamma), max_n_bins)
-            all_variograms[run, :n_copy] = gamma[:n_copy]
-            all_counts[run, :n_copy] = bin_counts[:n_copy]
-            last_coords = coords
-            last_values = values
-
-        # aggregate across runs
-        with np.errstate(all="ignore"):
-            mean_vario = np.nanmean(all_variograms, axis=0)
-            median_vario = np.nanmedian(all_variograms, axis=0)
-            sigma_vario = np.nanstd(all_variograms, axis=0)
-            mean_counts = np.nanmean(all_counts, axis=0)
-            p2_5 = np.nanpercentile(all_variograms, 2.5, axis=0)
-            p16 = np.nanpercentile(all_variograms, 16, axis=0)
-            p84 = np.nanpercentile(all_variograms, 84, axis=0)
-            p97_5 = np.nanpercentile(all_variograms, 97.5, axis=0)
-
-        # floor zero-sigma bins
-        positive_sigma = sigma_vario[sigma_vario > 0]
-        sigma_floor = (
-            float(np.median(positive_sigma) * 0.1)
-            if len(positive_sigma) > 0
-            else float(np.finfo(float).eps)
         )
-        sigma_vario[sigma_vario <= 0] = sigma_floor
 
         # keep only valid (non-NaN) bins
-        valid = ~np.isnan(mean_vario)
+        valid = ~np.isnan(gamma)
         n_kept = int(np.sum(valid))
 
-        self.mean_variogram = mean_vario[valid]
-        self.median_variogram = median_vario[valid]
-        self.pair_counts = mean_counts[valid]
-        self.sigma = sigma_vario[valid]
-        self.p2_5 = p2_5[valid]
-        self.p16 = p16[valid]
-        self.p84 = p84[valid]
-        self.p97_5 = p97_5[valid]
+        self.variogram = gamma[valid]
+        self.pair_counts = bin_counts[valid].astype(float)
         self.lags = np.linspace(
             bin_width / 2, bin_width * n_kept - bin_width / 2, n_kept
         )
-        self.n_runs = n_runs
         self.n_bins = n_kept
         self.estimator = estimator
 
-        if return_sample and last_coords is not None:
-            self.sample_coords = last_coords
-            self.sample_values = last_values
+        if return_sample:
+            self.sample_coords = coords
+            self.sample_values = values
 
     # ── model fitting ───────────────────────────────────────────────
 
@@ -4839,7 +4785,7 @@ class SingleVariogram:
             Criteria table with columns: model, AIC, BIC, MSSPE, MSSPE_std,
             params, sorted by |MSSPE - 1|.
         """
-        if self.lags is None or self.mean_variogram is None:
+        if self.lags is None or self.variogram is None:
             raise RuntimeError(
                 "No empirical variogram. "
                 "Call compute_empirical_variogram() first."
@@ -4849,8 +4795,7 @@ class SingleVariogram:
             model_types = list(self.BOUNDED_MODELS)
 
         lags = self.lags
-        variogram = self.mean_variogram
-        sigma = self.sigma
+        variogram = self.variogram
         pair_counts = self.pair_counts
 
         # compute Cressie weights
@@ -4887,7 +4832,7 @@ class SingleVariogram:
         self.fitted_models = []
         for cand in candidates:
             result = self._fit_single_composite_model(
-                cand, lags, variogram, sigma, weights
+                cand, lags, variogram, None, weights
             )
             if result is not None:
                 self.fitted_models.append(result)
@@ -5029,13 +4974,12 @@ class SingleVariogram:
         -------
         matplotlib.figure.Figure
         """
-        if self.lags is None or self.mean_variogram is None:
+        if self.lags is None or self.variogram is None:
             raise RuntimeError(
                 "No variogram data. "
                 "Call compute_empirical_variogram() first."
             )
 
-        from matplotlib.patches import Patch
         from matplotlib.lines import Line2D
 
         fig, axs = plt.subplots(
@@ -5056,23 +5000,18 @@ class SingleVariogram:
             lags[valid_c], self.pair_counts[valid_c],
             width=bar_width, color="orange", alpha=0.5,
         )
-        axs[0].set_ylabel("Mean Count")
+        axs[0].set_ylabel("Pair Count")
         axs[0].tick_params(labelbottom=False)
 
         # ── bottom panel: variogram ──
         ax = axs[1]
 
-        # median variogram points
+        # empirical variogram points
         ax.plot(
-            lags, self.median_variogram,
+            lags, self.variogram,
             "o-", color="blue", markersize=4, zorder=5,
-            label="Median variogram",
+            label="Empirical variogram",
         )
-
-        # spread envelopes
-        if self.n_runs > 1:
-            ax.fill_between(lags, self.p2_5, self.p97_5, color="blue", alpha=0.1)
-            ax.fill_between(lags, self.p16, self.p84, color="blue", alpha=0.3)
 
         # ── overlay fitted model ──
         if include_model and self.best_model is not None:
@@ -5110,13 +5049,8 @@ class SingleVariogram:
         # legend
         handles = [
             Line2D([0], [0], marker="o", color="blue",
-                   linestyle="-", markersize=4, label="Median variogram"),
+                   linestyle="-", markersize=4, label="Empirical variogram"),
         ]
-        if self.n_runs > 1:
-            handles.extend([
-                Patch(facecolor="blue", alpha=0.3, label="1σ spread (68%)"),
-                Patch(facecolor="blue", alpha=0.1, label="2σ spread (95%)"),
-            ])
         if include_model and self.best_model is not None:
             handles.append(
                 Line2D([0], [0], color="darkred", linewidth=2.2,
@@ -5126,8 +5060,7 @@ class SingleVariogram:
 
         if not include_model:
             ax.set_title(
-                f"Empirical variogram ({self.estimator}, "
-                f'{self.n_runs} run{"s" if self.n_runs > 1 else ""})',
+                f"Empirical variogram ({self.estimator})",
             )
 
         plt.tight_layout()
@@ -5442,8 +5375,8 @@ class GridVariogram:
         all_counts_arr = np.full((len(self.variograms), n_lags), np.nan)
 
         for i, sv in enumerate(self.variograms):
-            n = min(len(sv.median_variogram), n_lags)
-            all_emp[i, :n] = sv.median_variogram[:n]
+            n = min(len(sv.variogram), n_lags)
+            all_emp[i, :n] = sv.variogram[:n]
             all_counts_arr[i, :n] = sv.pair_counts[:n]
 
         with np.errstate(all="ignore"):
@@ -5649,7 +5582,105 @@ class EmpiricalVariogram:
 
 
 class StatisticalAnalysis:
-    """Deprecated stub for backward compatibility."""
+    """Statistical utilities for exploratory plotting and bootstrap uncertainty.
+
+    Backward-compatible re-implementation of the original class.
+    """
+
     def __init__(self, raster_data_handler: RasterDataHandler):
         self.raster_data_handler = raster_data_handler
+
+    def plot_data_stats(self, filtered: bool = True):
+        """Plot histogram of raster values with basic statistics annotated.
+
+        Parameters
+        ----------
+        filtered : bool
+            If True, clip to 1st-99th percentiles for visualisation only.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        from scipy import stats as sp_stats
+
+        data = self.raster_data_handler.data_array
+        if data is None or len(data) == 0:
+            raise ValueError(
+                "No data available to plot. Call load_raster() first."
+            )
+
+        mean = np.mean(data)
+        median = np.median(data)
+        mode_result = sp_stats.mode(data, nan_policy="omit", keepdims=False)
+        mode_vals = np.atleast_1d(mode_result.mode).astype(float)
+        q1 = np.percentile(data, 25)
+        q3 = np.percentile(data, 75)
+        p1 = np.percentile(data, 1)
+        p99 = np.percentile(data, 99)
+        minimum = np.min(data)
+        maximum = np.max(data)
+
+        plot_data = data[(data >= p1) & (data <= p99)] if filtered else data
+
+        fig, ax = plt.subplots()
+        ax.hist(plot_data, bins=60, density=False, alpha=0.6, color="g")
+        ax.axvline(mean, color="r", linestyle="dashed", linewidth=1, label="Mean")
+        ax.axvline(median, color="b", linestyle="dashed", linewidth=1, label="Median")
+        for i, m in enumerate(mode_vals):
+            ax.axvline(
+                m, color="purple", linestyle="dashed", linewidth=1,
+                label="Mode" if i == 0 else "_nolegend_",
+            )
+
+        mode_str = ", ".join([f"{m:.3f}" for m in mode_vals])
+        textstr = "\n".join((
+            f"Mean: {mean:.3f}",
+            f"Median: {median:.3f}",
+            f"Mode(s): {mode_str}",
+            f"Min: {minimum:.3f}  Max: {maximum:.3f}",
+            f"Q1: {q1:.3f}  Q3: {q3:.3f}",
+        ))
+        props = dict(boxstyle="round", facecolor="wheat", alpha=0.5)
+        ax.text(
+            0.05, 0.95, textstr, transform=ax.transAxes, fontsize=10,
+            verticalalignment="top", bbox=props,
+        )
+        ax.set_xlabel(f"Vertical Difference ({self.raster_data_handler.unit})")
+        ax.set_ylabel("Count")
+        ax.set_title("Histogram of differencing results with exploratory statistics")
+        ax.legend()
+        plt.tight_layout()
+        return fig
+
+    def bootstrap_uncertainty_subsample(
+        self, n_bootstrap: int = 1000, subsample_proportion: float = 0.1
+    ) -> float:
+        """Estimate uncertainty of the median via bootstrap on random subsamples.
+
+        Parameters
+        ----------
+        n_bootstrap : int
+            Number of bootstrap resamples.
+        subsample_proportion : float
+            Fraction of data per resample.
+
+        Returns
+        -------
+        float
+            Standard deviation of bootstrap medians.
+        """
+        data = self.raster_data_handler.data_array
+        if data is None or len(data) == 0:
+            raise ValueError(
+                "No data available for bootstrap. Call load_raster() first."
+            )
+
+        subsample_size = max(1, int(round(subsample_proportion * len(data))))
+        rng = np.random.default_rng()
+        bootstrap_medians = np.zeros(n_bootstrap)
+        for i in range(n_bootstrap):
+            sample = rng.choice(data, size=subsample_size, replace=True)
+            bootstrap_medians[i] = np.median(sample)
+        return float(np.std(bootstrap_medians))
 
