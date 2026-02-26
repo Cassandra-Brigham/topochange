@@ -4703,43 +4703,48 @@ class SingleVariogram:
         C = total_sill - gamma_mat
         np.fill_diagonal(C, total_sill)
 
-        n_failed = 0
-        errors = []
-        std_errors = []
+        # ── Optimised LOO via single matrix inversion ──
+        # Instead of solving n separate (n-1)×(n-1) systems [O(n⁴)],
+        # invert C once [O(n³)] and use the identity:
+        #   LOO error_i     = (C⁻¹ z)_i  /  (C⁻¹)_ii
+        #   LOO variance_i  = 1 / (C⁻¹)_ii
+        #
+        # References:
+        #   Ripley, B.D. (1981). Spatial Statistics. Wiley. §4.4.
+        #   Cressie, N. (1993). Statistics for Spatial Data. §5.6.
+        try:
+            C_inv = np.linalg.inv(C)
+        except np.linalg.LinAlgError:
+            return KrigingLOOCVResult(
+                msspe=np.nan, mean_error=np.nan, rmse=np.nan,
+                mean_standardized_error=np.nan,
+                n_points=0, n_failed=n,
+            )
 
-        for i in range(n):
-            # leave out point i
-            mask = np.ones(n, dtype=bool)
-            mask[i] = False
-            C_sub = C[np.ix_(mask, mask)]
-            c_vec = C[mask, i]
-            try:
-                lam = np.linalg.solve(C_sub, c_vec)
-                z_hat = lam @ values[mask]
-                sigma2_k = total_sill - lam @ c_vec
-                sigma2_k = max(sigma2_k, 1e-12)
-                err = values[i] - z_hat
-                errors.append(err)
-                std_errors.append(err / np.sqrt(sigma2_k))
-            except np.linalg.LinAlgError:
-                n_failed += 1
-                continue
+        C_inv_z = C_inv @ values
+        diag_C_inv = np.diag(C_inv)
 
-        if len(errors) == 0:
+        # guard against zero/negative diagonal entries
+        valid = diag_C_inv > 1e-12
+        n_failed = int(np.sum(~valid))
+
+        if not np.any(valid):
             return KrigingLOOCVResult(
                 msspe=np.nan, mean_error=np.nan, rmse=np.nan,
                 mean_standardized_error=np.nan,
                 n_points=0, n_failed=n_failed,
             )
 
-        errors = np.array(errors)
-        std_errors = np.array(std_errors)
+        errors = C_inv_z[valid] / diag_C_inv[valid]
+        sigma2_k = 1.0 / diag_C_inv[valid]
+        std_errors = errors / np.sqrt(sigma2_k)
+
         return KrigingLOOCVResult(
             msspe=float(np.mean(std_errors ** 2)),
             mean_error=float(np.mean(errors)),
             rmse=float(np.sqrt(np.mean(errors ** 2))),
             mean_standardized_error=float(np.mean(std_errors)),
-            n_points=len(errors),
+            n_points=int(np.sum(valid)),
             n_failed=n_failed,
         )
 
@@ -4748,18 +4753,18 @@ class SingleVariogram:
         model_types: Optional[List[str]] = None,
         include_nugget: bool = True,
         max_components: int = 1,
+        criterion: str = "msspe",
         msspe_n_subset: int = 500,
         msspe_n_runs: int = 10,
         msspe_prefilter: int = 0,
         *,
         seed: Optional[int] = None,
     ) -> pd.DataFrame:
-        """Fit candidate variogram models and select the best via MSSPE.
+        """Fit candidate variogram models and select the best.
 
         Fits all combinations of ``model_types`` (up to ``max_components``
-        nested structures), computes AIC/BIC for each, then evaluates
-        MSSPE via kriging leave-one-out cross-validation.  The best model
-        is selected as the one with MSSPE closest to 1.0.
+        nested structures), computes AIC/BIC for each, and optionally
+        evaluates MSSPE via kriging leave-one-out cross-validation.
 
         Parameters
         ----------
@@ -4770,8 +4775,18 @@ class SingleVariogram:
             Whether to generate with-nugget and without-nugget variants.
         max_components : int
             Maximum nested structures per candidate (1–3).
+        criterion : {'msspe', 'aic', 'bic'}
+            Model selection criterion.
+
+            - ``'msspe'``: select the model whose kriging LOOCV MSSPE is
+              closest to 1.0 (|MSSPE − 1| minimised).  Requires spatial
+              sample data (``return_sample=True`` in
+              ``compute_empirical_variogram``).
+            - ``'aic'``: select by minimum Akaike Information Criterion.
+            - ``'bic'``: select by minimum Bayesian Information Criterion.
         msspe_n_subset : int
-            Points per LOOCV evaluation.
+            Points per LOOCV evaluation (only used when
+            ``criterion='msspe'``).
         msspe_n_runs : int
             Independent LOOCV repetitions for stable MSSPE.
         msspe_prefilter : int
@@ -4782,8 +4797,8 @@ class SingleVariogram:
         Returns
         -------
         pd.DataFrame
-            Criteria table with columns: model, AIC, BIC, MSSPE, MSSPE_std,
-            params, sorted by |MSSPE - 1|.
+            Criteria table with columns: model, AIC, BIC, MSSPE,
+            MSSPE_std, params, sorted by the chosen criterion.
         """
         if self.lags is None or self.variogram is None:
             raise RuntimeError(
@@ -4842,15 +4857,18 @@ class SingleVariogram:
                 "No models successfully fitted. Check input data."
             )
 
-        # ── compute MSSPE ──
-        if self.sample_coords is None or self.sample_values is None:
+        # ── compute MSSPE (only when criterion requires it) ──
+        compute_msspe = criterion == "msspe"
+        if compute_msspe and (self.sample_coords is None or self.sample_values is None):
             warnings.warn(
                 "No spatial sample available for MSSPE computation. "
                 "Re-run compute_empirical_variogram with return_sample=True. "
-                "Selecting best model by AIC instead.",
+                "Falling back to AIC selection.",
                 UserWarning,
             )
-        else:
+            compute_msspe = False
+
+        if compute_msspe:
             coords = self.sample_coords
             values = self.sample_values
 
@@ -4915,12 +4933,16 @@ class SingleVariogram:
         has_msspe = any(
             m["msspe"] is not None for m in self.fitted_models
         )
-        if has_msspe:
+
+        if criterion == "msspe" and has_msspe:
             scores = [
                 abs(m["msspe"] - 1.0) if m["msspe"] is not None else np.inf
                 for m in self.fitted_models
             ]
+        elif criterion == "bic":
+            scores = [m["bic"] for m in self.fitted_models]
         else:
+            # default to AIC (also used as fallback when MSSPE unavailable)
             scores = [m["aic"] for m in self.fitted_models]
 
         best_idx = int(np.argmin(scores))
@@ -4938,13 +4960,17 @@ class SingleVariogram:
                 "params": m["params"].tolist(),
             })
         df = pd.DataFrame(rows)
-        if has_msspe:
+
+        # sort by the chosen criterion
+        if criterion == "msspe" and has_msspe:
             df["abs_MSSPE_minus_1"] = df["MSSPE"].apply(
                 lambda x: abs(x - 1.0) if x is not None and np.isfinite(x) else np.inf
             )
             df = df.sort_values("abs_MSSPE_minus_1").drop(
                 columns="abs_MSSPE_minus_1"
             )
+        elif criterion == "bic":
+            df = df.sort_values("BIC")
         else:
             df = df.sort_values("AIC")
         df = df.reset_index(drop=True)
@@ -5127,6 +5153,7 @@ class GridVariogram:
         model_types: Optional[List[str]] = None,
         include_nugget: bool = True,
         max_components: int = 1,
+        criterion: str = "msspe",
         msspe_n_subset: int = 500,
         msspe_n_runs: int = 10,
         msspe_prefilter: int = 0,
@@ -5150,6 +5177,9 @@ class GridVariogram:
         fit_model : bool
             If True, run :meth:`SingleVariogram.fit_model` on each
             realisation and aggregate model selection results.
+        criterion : {'msspe', 'aic', 'bic'}
+            Model selection criterion passed to each
+            :meth:`SingleVariogram.fit_model`.
         model_types, include_nugget, max_components, msspe_n_subset,
         msspe_n_runs, msspe_prefilter
             Passed through to :meth:`SingleVariogram.fit_model`.
@@ -5176,7 +5206,7 @@ class GridVariogram:
                     max_lag_multiplier=max_lag_multiplier,
                     seed=run_seed,
                     estimator=estimator,
-                    return_sample=fit_model,
+                    return_sample=(fit_model and criterion == "msspe"),
                 )
 
                 if fit_model:
@@ -5184,6 +5214,7 @@ class GridVariogram:
                         model_types=model_types,
                         include_nugget=include_nugget,
                         max_components=max_components,
+                        criterion=criterion,
                         msspe_n_subset=msspe_n_subset,
                         msspe_n_runs=msspe_n_runs,
                         msspe_prefilter=msspe_prefilter,
