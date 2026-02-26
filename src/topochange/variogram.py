@@ -5248,58 +5248,98 @@ class GridVariogram:
             self._aggregate_model_results()
 
     def _aggregate_model_results(self) -> None:
-        """Tally model selection counts and compute central parameters."""
-        from collections import Counter
+        """Aggregate ALL candidate results across ALL realisations.
 
-        descriptions = []
+        Instead of only tallying the "winner" from each realisation, this
+        method collects every fitted candidate from every realisation and
+        groups them by model description.  For each model structure it
+        computes:
+
+        - **count**: how many realisations successfully fitted this structure
+        - **average AIC ± std**
+        - **average BIC ± std**
+        - **average MSSPE ± std** (where available)
+        - **parameter medians ± spread** (16th/84th percentiles)
+
+        The *central model* is the structure with the **highest count**
+        across realisations.  If there is a tie, the model whose mean
+        MSSPE is closest to 1.0 wins.
+        """
+        from collections import defaultdict
+
+        # ── collect every candidate from every realisation ──────────
+        # keyed by model description → list of fitted-model dicts
+        by_description: Dict[str, list] = defaultdict(list)
+
         for sv in self.variograms:
-            if sv.best_model is not None:
-                descriptions.append(sv.best_model["description"])
+            if not hasattr(sv, "fitted_models") or sv.fitted_models is None:
+                continue
+            for fm in sv.fitted_models:
+                desc = fm["description"]
+                by_description[desc].append(fm)
 
-        if not descriptions:
+        if not by_description:
             return
 
-        counts = Counter(descriptions)
-        n_ok = len(descriptions)
-        self.model_counts = dict(counts)
-        self.model_fractions = {k: v / n_ok for k, v in counts.items()}
+        n_ok = len(self.variograms)
 
-        # identify the modal (most-selected) model
-        self.central_model_name = counts.most_common(1)[0][0]
+        # ── build summary table (one row per model structure) ──────
+        summary_rows = []
+        for desc, records in by_description.items():
+            aics = np.array([r["aic"] for r in records])
+            bics = np.array([r["bic"] for r in records])
+            msspes = np.array([
+                r["msspe"] if r["msspe"] is not None else np.nan
+                for r in records
+            ])
+            count = len(records)
 
-        # gather parameters from realisations that selected the modal model
-        modal_records = []
-        for sv in self.variograms:
-            if (sv.best_model is not None
-                    and sv.best_model["description"] == self.central_model_name):
-                model = sv.best_model["model"]
-                params = sv.best_model["params"]
-                model.set_params(params)
+            row: Dict[str, Any] = {
+                "model": desc,
+                "count": count,
+                "fraction": count / n_ok,
+                "AIC_mean": float(np.mean(aics)),
+                "AIC_std": float(np.std(aics)),
+                "BIC_mean": float(np.mean(bics)),
+                "BIC_std": float(np.std(bics)),
+            }
 
-                record: Dict[str, float] = {}
+            valid_msspe = msspes[np.isfinite(msspes)]
+            if len(valid_msspe) > 0:
+                row["MSSPE_mean"] = float(np.mean(valid_msspe))
+                row["MSSPE_std"] = float(np.std(valid_msspe))
+            else:
+                row["MSSPE_mean"] = None
+                row["MSSPE_std"] = None
+
+            # ── parameter statistics for this model structure ──
+            param_records: List[Dict[str, float]] = []
+            for r in records:
+                model = r["model"]
+                model.set_params(r["params"])
+                rec: Dict[str, float] = {}
                 for i, spec in enumerate(model._components):
                     comp_params = model.get_component_params(i)
                     for j, pname in enumerate(spec.param_names):
                         key = f"{model.component_names[i]}_{pname}"
-                        record[key] = float(comp_params[j])
+                        rec[key] = float(comp_params[j])
                 if model.include_nugget:
-                    record["nugget"] = float(model.get_nugget())
-                modal_records.append(record)
+                    rec["nugget"] = float(model.get_nugget())
+                param_records.append(rec)
 
-        # compute median ± spread for each parameter
-        if modal_records:
-            all_keys = set()
-            for rec in modal_records:
+            # summarise each parameter
+            all_keys: set = set()
+            for rec in param_records:
                 all_keys.update(rec.keys())
 
-            self.central_params = {}
+            param_stats: Dict[str, Dict[str, float]] = {}
             for key in sorted(all_keys):
                 vals = np.array([
-                    rec.get(key, np.nan) for rec in modal_records
+                    rec.get(key, np.nan) for rec in param_records
                 ])
                 vals = vals[np.isfinite(vals)]
                 if len(vals) > 0:
-                    self.central_params[key] = {
+                    param_stats[key] = {
                         "median": float(np.median(vals)),
                         "std": float(np.std(vals)),
                         "p16": float(np.percentile(vals, 16)),
@@ -5308,23 +5348,51 @@ class GridVariogram:
                         "p97_5": float(np.percentile(vals, 97.5)),
                         "count": len(vals),
                     }
+            row["param_stats"] = param_stats
+            summary_rows.append(row)
 
-        # build combined criteria table
-        rows = []
-        for sv in self.variograms:
-            if sv.best_model is not None:
-                bm = sv.best_model
-                rows.append({
-                    "model": bm["description"],
-                    "AIC": bm["aic"],
-                    "BIC": bm["bic"],
-                    "MSSPE": bm["msspe"],
-                    "MSSPE_std": bm["msspe_std"],
-                })
-        self.all_criteria = pd.DataFrame(rows)
+        # sort by count descending, then by |MSSPE − 1| ascending
+        def _sort_key(row):
+            msspe = row["MSSPE_mean"]
+            msspe_dist = abs(msspe - 1.0) if msspe is not None and np.isfinite(msspe) else np.inf
+            return (-row["count"], msspe_dist)
+
+        summary_rows.sort(key=_sort_key)
+
+        # ── store aggregated attributes ────────────────────────────
+        self.model_counts = {r["model"]: r["count"] for r in summary_rows}
+        self.model_fractions = {r["model"]: r["fraction"] for r in summary_rows}
+
+        # central model = top of sorted list (highest count, MSSPE tiebreaker)
+        self.central_model_name = summary_rows[0]["model"]
+        self.central_params = summary_rows[0]["param_stats"]
+
+        # full summary table as DataFrame (without param_stats column)
+        df_rows = []
+        for r in summary_rows:
+            df_rows.append({
+                "model": r["model"],
+                "count": r["count"],
+                "fraction": r["fraction"],
+                "AIC_mean": r["AIC_mean"],
+                "AIC_std": r["AIC_std"],
+                "BIC_mean": r["BIC_mean"],
+                "BIC_std": r["BIC_std"],
+                "MSSPE_mean": r["MSSPE_mean"],
+                "MSSPE_std": r["MSSPE_std"],
+            })
+        self.all_criteria = pd.DataFrame(df_rows)
+
+        # store the full summary rows (with param_stats) for programmatic access
+        self._summary_rows = summary_rows
 
     def summary(self) -> str:
-        """Human-readable summary of ensemble results."""
+        """Human-readable summary of ensemble results.
+
+        Displays the full aggregated table of all candidate model
+        structures across all realisations, followed by the central
+        model and its parameter statistics.
+        """
         lines = ["=" * 72, "GRID VARIOGRAM ENSEMBLE RESULTS", "=" * 72]
         n_ok = len(self.variograms)
         lines.append(
@@ -5333,24 +5401,49 @@ class GridVariogram:
         )
         lines.append("")
 
-        if self.model_counts:
-            lines.append("MODEL SELECTION FREQUENCY")
-            lines.append("-" * 50)
-            for desc, frac in sorted(
-                self.model_fractions.items(), key=lambda x: -x[1]
-            ):
-                cnt = self.model_counts[desc]
-                lines.append(f"  {desc:<40s}  {cnt:3d} ({frac:5.1%})")
+        # ── aggregated model table ──
+        if self.all_criteria is not None and len(self.all_criteria) > 0:
+            lines.append("MODEL STRUCTURE SUMMARY (across all realisations)")
+            lines.append("-" * 90)
+            header = (
+                f"  {'Model':<40s}  {'Count':>5s}  {'Frac':>6s}  "
+                f"{'AIC_mean':>10s}  {'AIC_std':>8s}  "
+                f"{'MSSPE_mean':>10s}  {'MSSPE_std':>9s}"
+            )
+            lines.append(header)
+            lines.append("-" * 90)
+            for _, row in self.all_criteria.iterrows():
+                msspe_str = (
+                    f"{row['MSSPE_mean']:10.4f}"
+                    if row["MSSPE_mean"] is not None and np.isfinite(row["MSSPE_mean"])
+                    else "       N/A"
+                )
+                msspe_std_str = (
+                    f"{row['MSSPE_std']:9.4f}"
+                    if row["MSSPE_std"] is not None and np.isfinite(row["MSSPE_std"])
+                    else "      N/A"
+                )
+                lines.append(
+                    f"  {row['model']:<40s}  {row['count']:5d}  "
+                    f"{row['fraction']:5.1%}  "
+                    f"{row['AIC_mean']:10.1f}  {row['AIC_std']:8.1f}  "
+                    f"{msspe_str}  {msspe_std_str}"
+                )
             lines.append("")
+
+        # ── central model + parameter stats ──
+        if self.central_model_name is not None:
+            cnt = self.model_counts.get(self.central_model_name, 0)
+            lines.append(
+                f"CENTRAL MODEL: {self.central_model_name}  "
+                f"(count={cnt}/{n_ok})"
+            )
 
         if self.central_params:
             lines.append(
-                f"CENTRAL MODEL: {self.central_model_name}"
-            )
-            lines.append(
                 "PARAMETER SUMMARY (median [16th, 84th])"
             )
-            lines.append("-" * 50)
+            lines.append("-" * 60)
             for key, stats in self.central_params.items():
                 lines.append(
                     f"  {key:<25s}  {stats['median']:10.4f}  "
@@ -5388,7 +5481,11 @@ class GridVariogram:
             raise RuntimeError("No variograms. Call run() first.")
 
         if (include_central_model or include_all_models):
-            if not any(sv.best_model is not None for sv in self.variograms):
+            has_fits = any(
+                hasattr(sv, "fitted_models") and sv.fitted_models
+                for sv in self.variograms
+            )
+            if not has_fits:
                 raise RuntimeError(
                     "Model fitting required. "
                     "Re-run with fit_model=True."
@@ -5478,18 +5575,22 @@ class GridVariogram:
 
         # ── central (modal) model curve ──
         if include_central_model and self.central_model_name is not None:
-            # find a reference realisation with the modal model
-            ref_sv = None
+            # find a reference fitted model dict that matches the central name
+            ref_fm = None
             for sv in self.variograms:
-                if (sv.best_model is not None
-                        and sv.best_model["description"] == self.central_model_name):
-                    ref_sv = sv
+                if not hasattr(sv, "fitted_models") or sv.fitted_models is None:
+                    continue
+                for fm in sv.fitted_models:
+                    if fm["description"] == self.central_model_name:
+                        ref_fm = fm
+                        break
+                if ref_fm is not None:
                     break
 
-            if ref_sv is not None and self.central_params is not None:
-                model = ref_sv.best_model["model"]
+            if ref_fm is not None and self.central_params is not None:
+                model = ref_fm["model"]
                 # set median parameters
-                median_params = ref_sv.best_model["params"].copy()
+                median_params = ref_fm["params"].copy()
                 # overwrite with central values where available
                 param_idx = 0
                 for i, spec in enumerate(model._components):
