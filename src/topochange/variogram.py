@@ -5281,9 +5281,14 @@ class GridVariogram:
 
         # ── 1. tally best-model selections ─────────────────────────
         best_descriptions: List[str] = []
+        # also collect the best-model dicts keyed by description
+        best_by_description: Dict[str, list] = defaultdict(list)
+
         for sv in self.variograms:
             if sv.best_model is not None:
-                best_descriptions.append(sv.best_model["description"])
+                desc = sv.best_model["description"]
+                best_descriptions.append(desc)
+                best_by_description[desc].append(sv.best_model)
 
         if not best_descriptions:
             return
@@ -5299,6 +5304,44 @@ class GridVariogram:
                 continue
             for fm in sv.fitted_models:
                 by_description[fm["description"]].append(fm)
+
+        # ── helper: extract param dict from a fitted-model record ──
+        def _extract_params(fm_dict) -> Dict[str, float]:
+            model = fm_dict["model"]
+            model.set_params(fm_dict["params"])
+            rec: Dict[str, float] = {}
+            for i, spec in enumerate(model._components):
+                comp_params = model.get_component_params(i)
+                for j, pname in enumerate(spec.param_names):
+                    key = f"{model.component_names[i]}_{pname}"
+                    rec[key] = float(comp_params[j])
+            if model.include_nugget:
+                rec["nugget"] = float(model.get_nugget())
+            return rec
+
+        def _summarise_params(
+            param_records: List[Dict[str, float]],
+        ) -> Dict[str, Dict[str, float]]:
+            all_keys: set = set()
+            for rec in param_records:
+                all_keys.update(rec.keys())
+            stats: Dict[str, Dict[str, float]] = {}
+            for key in sorted(all_keys):
+                vals = np.array([
+                    rec.get(key, np.nan) for rec in param_records
+                ])
+                vals = vals[np.isfinite(vals)]
+                if len(vals) > 0:
+                    stats[key] = {
+                        "median": float(np.median(vals)),
+                        "std": float(np.std(vals)),
+                        "p16": float(np.percentile(vals, 16)),
+                        "p84": float(np.percentile(vals, 84)),
+                        "p2_5": float(np.percentile(vals, 2.5)),
+                        "p97_5": float(np.percentile(vals, 97.5)),
+                        "count": len(vals),
+                    }
+            return stats
 
         # ── 3. build summary table (one row per model structure) ───
         summary_rows = []
@@ -5332,42 +5375,20 @@ class GridVariogram:
                 row["MSSPE_mean"] = None
                 row["MSSPE_std"] = None
 
-            # ── parameter statistics for this model structure ──
-            param_records: List[Dict[str, float]] = []
-            for r in records:
-                model = r["model"]
-                model.set_params(r["params"])
-                rec: Dict[str, float] = {}
-                for i, spec in enumerate(model._components):
-                    comp_params = model.get_component_params(i)
-                    for j, pname in enumerate(spec.param_names):
-                        key = f"{model.component_names[i]}_{pname}"
-                        rec[key] = float(comp_params[j])
-                if model.include_nugget:
-                    rec["nugget"] = float(model.get_nugget())
-                param_records.append(rec)
+            # param stats from ALL fitted instances (for table display)
+            row["param_stats"] = _summarise_params(
+                [_extract_params(r) for r in records]
+            )
 
-            all_keys: set = set()
-            for rec in param_records:
-                all_keys.update(rec.keys())
+            # param stats from only BEST-selected instances (for central model)
+            best_records = best_by_description.get(desc, [])
+            if best_records:
+                row["best_param_stats"] = _summarise_params(
+                    [_extract_params(r) for r in best_records]
+                )
+            else:
+                row["best_param_stats"] = {}
 
-            param_stats: Dict[str, Dict[str, float]] = {}
-            for key in sorted(all_keys):
-                vals = np.array([
-                    rec.get(key, np.nan) for rec in param_records
-                ])
-                vals = vals[np.isfinite(vals)]
-                if len(vals) > 0:
-                    param_stats[key] = {
-                        "median": float(np.median(vals)),
-                        "std": float(np.std(vals)),
-                        "p16": float(np.percentile(vals, 16)),
-                        "p84": float(np.percentile(vals, 84)),
-                        "p2_5": float(np.percentile(vals, 2.5)),
-                        "p97_5": float(np.percentile(vals, 97.5)),
-                        "count": len(vals),
-                    }
-            row["param_stats"] = param_stats
             summary_rows.append(row)
 
         # ── 4. sort by best_count desc, then |MSSPE − 1| asc ──────
@@ -5392,7 +5413,8 @@ class GridVariogram:
 
         # central model = highest best_count, MSSPE tiebreaker
         self.central_model_name = summary_rows[0]["model"]
-        self.central_params = summary_rows[0]["param_stats"]
+        # use parameters only from realisations where it won
+        self.central_params = summary_rows[0]["best_param_stats"]
 
         # DataFrame (without param_stats column)
         df_rows = []
