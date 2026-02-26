@@ -5082,7 +5082,7 @@ class GridVariogram:
     ----------
     raster_data_handler : RasterDataHandler
         Provides raster data and sampling.
-    n_models : int
+    n_realizations : int
         Number of independent SingleVariogram realisations to run.
 
     References
@@ -5097,10 +5097,10 @@ class GridVariogram:
     def __init__(
         self,
         raster_data_handler: RasterDataHandler,
-        n_models: int = 50,
+        n_realizations: int = 50,
     ):
         self.rdh = raster_data_handler
-        self.n_models = n_models
+        self.n_realizations = n_realizations
 
         # per-realisation SingleVariogram objects
         self.variograms: List[SingleVariogram] = []
@@ -5121,7 +5121,6 @@ class GridVariogram:
         max_samples: int,
         bin_width: float,
         max_lag_multiplier: float = 1 / 3,
-        n_runs: int = 10,
         estimator: str = "matheron",
         # model fitting parameters
         fit_model: bool = True,
@@ -5137,10 +5136,15 @@ class GridVariogram:
     ) -> None:
         """Run the ensemble of SingleVariogram realisations.
 
+        Each realisation draws one independent spatial sample, computes
+        one empirical variogram, and (optionally) fits models.  The
+        number of realisations is set by ``n_realizations`` at
+        construction time.
+
         Parameters
         ----------
         area_side, samples_per_area, max_samples, bin_width,
-        max_lag_multiplier, n_runs, estimator
+        max_lag_multiplier, estimator
             Passed through to
             :meth:`SingleVariogram.compute_empirical_variogram`.
         fit_model : bool
@@ -5155,12 +5159,12 @@ class GridVariogram:
             Print progress.
         """
         ss = np.random.SeedSequence(seed)
-        child_seeds = ss.spawn(self.n_models)
+        child_seeds = ss.spawn(self.n_realizations)
 
         self.variograms = []
         self.n_failed = 0
 
-        for i in range(self.n_models):
+        for i in range(self.n_realizations):
             run_seed = int(child_seeds[i].generate_state(1)[0])
             sv = SingleVariogram(self.rdh)
             try:
@@ -5170,7 +5174,6 @@ class GridVariogram:
                     max_samples=max_samples,
                     bin_width=bin_width,
                     max_lag_multiplier=max_lag_multiplier,
-                    n_runs=n_runs,
                     seed=run_seed,
                     estimator=estimator,
                     return_sample=fit_model,
@@ -5196,17 +5199,17 @@ class GridVariogram:
                         msspe = sv.best_model.get("msspe")
                         msspe_str = f"MSSPE={msspe:.3f}" if msspe is not None else "MSSPE=N/A"
                         status = f"{desc}  {msspe_str}"
-                    print(f"  [{i + 1}/{self.n_models}] {status}")
+                    print(f"  [{i + 1}/{self.n_realizations}] {status}")
 
             except Exception as e:
                 self.n_failed += 1
                 if verbose:
-                    print(f"  [{i + 1}/{self.n_models}] FAILED: {e}")
+                    print(f"  [{i + 1}/{self.n_realizations}] FAILED: {e}")
                 continue
 
         if not self.variograms:
             raise RuntimeError(
-                f"All {self.n_models} realisations failed."
+                f"All {self.n_realizations} realisations failed."
             )
 
         # ── aggregate results ──
@@ -5294,7 +5297,7 @@ class GridVariogram:
         lines = ["=" * 72, "GRID VARIOGRAM ENSEMBLE RESULTS", "=" * 72]
         n_ok = len(self.variograms)
         lines.append(
-            f"Realisations: {self.n_models} total, "
+            f"Realisations: {self.n_realizations} total, "
             f"{n_ok} successful, {self.n_failed} failed"
         )
         lines.append("")
