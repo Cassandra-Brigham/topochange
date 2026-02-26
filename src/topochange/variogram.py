@@ -5248,42 +5248,59 @@ class GridVariogram:
             self._aggregate_model_results()
 
     def _aggregate_model_results(self) -> None:
-        """Aggregate ALL candidate results across ALL realisations.
+        """Aggregate candidate results across all realisations.
 
-        Instead of only tallying the "winner" from each realisation, this
-        method collects every fitted candidate from every realisation and
-        groups them by model description.  For each model structure it
-        computes:
+        Two things are tracked separately:
 
-        - **count**: how many realisations successfully fitted this structure
-        - **average AIC ± std**
-        - **average BIC ± std**
-        - **average MSSPE ± std** (where available)
-        - **parameter medians ± spread** (16th/84th percentiles)
+        1. **Best-model counts** — how many realisations selected each
+           model structure as the winner.  This drives central model
+           selection (highest count, MSSPE as tiebreaker).
+        2. **Criteria averages** — AIC, BIC, MSSPE, and parameters
+           averaged across *all* realisations that fitted each structure
+           (not just the ones where it won).  This gives a fuller picture
+           of each structure's quality.
 
-        The *central model* is the structure with the **highest count**
-        across realisations.  If there is a tie, the model whose mean
-        MSSPE is closest to 1.0 wins.
+        Attributes set
+        --------------
+        model_counts : dict
+            {description: n_times_selected_as_best}
+        model_fractions : dict
+            {description: fraction_of_realisations_selected_as_best}
+        central_model_name : str
+            The modal best-model (highest count, MSSPE tiebreaker).
+        central_params : dict
+            Parameter statistics for the central model (from *all*
+            realisations that fitted it, not just wins).
+        all_criteria : pd.DataFrame
+            One row per model structure with best-count, average
+            AIC/BIC/MSSPE, and spread.
         """
-        from collections import defaultdict
+        from collections import Counter, defaultdict
 
-        # ── collect every candidate from every realisation ──────────
-        # keyed by model description → list of fitted-model dicts
+        n_ok = len(self.variograms)
+
+        # ── 1. tally best-model selections ─────────────────────────
+        best_descriptions: List[str] = []
+        for sv in self.variograms:
+            if sv.best_model is not None:
+                best_descriptions.append(sv.best_model["description"])
+
+        if not best_descriptions:
+            return
+
+        best_counts = Counter(best_descriptions)
+
+        # ── 2. collect ALL candidates from ALL realisations ────────
+        # keyed by description → list of fitted-model dicts
         by_description: Dict[str, list] = defaultdict(list)
 
         for sv in self.variograms:
             if not hasattr(sv, "fitted_models") or sv.fitted_models is None:
                 continue
             for fm in sv.fitted_models:
-                desc = fm["description"]
-                by_description[desc].append(fm)
+                by_description[fm["description"]].append(fm)
 
-        if not by_description:
-            return
-
-        n_ok = len(self.variograms)
-
-        # ── build summary table (one row per model structure) ──────
+        # ── 3. build summary table (one row per model structure) ───
         summary_rows = []
         for desc, records in by_description.items():
             aics = np.array([r["aic"] for r in records])
@@ -5292,12 +5309,15 @@ class GridVariogram:
                 r["msspe"] if r["msspe"] is not None else np.nan
                 for r in records
             ])
-            count = len(records)
+
+            n_fitted = len(records)
+            n_best = best_counts.get(desc, 0)
 
             row: Dict[str, Any] = {
                 "model": desc,
-                "count": count,
-                "fraction": count / n_ok,
+                "best_count": n_best,
+                "best_fraction": n_best / n_ok,
+                "fitted_count": n_fitted,
                 "AIC_mean": float(np.mean(aics)),
                 "AIC_std": float(np.std(aics)),
                 "BIC_mean": float(np.mean(bics)),
@@ -5327,7 +5347,6 @@ class GridVariogram:
                     rec["nugget"] = float(model.get_nugget())
                 param_records.append(rec)
 
-            # summarise each parameter
             all_keys: set = set()
             for rec in param_records:
                 all_keys.update(rec.keys())
@@ -5351,29 +5370,38 @@ class GridVariogram:
             row["param_stats"] = param_stats
             summary_rows.append(row)
 
-        # sort by count descending, then by |MSSPE − 1| ascending
+        # ── 4. sort by best_count desc, then |MSSPE − 1| asc ──────
         def _sort_key(row):
             msspe = row["MSSPE_mean"]
-            msspe_dist = abs(msspe - 1.0) if msspe is not None and np.isfinite(msspe) else np.inf
-            return (-row["count"], msspe_dist)
+            msspe_dist = (
+                abs(msspe - 1.0)
+                if msspe is not None and np.isfinite(msspe)
+                else np.inf
+            )
+            return (-row["best_count"], msspe_dist)
 
         summary_rows.sort(key=_sort_key)
 
-        # ── store aggregated attributes ────────────────────────────
-        self.model_counts = {r["model"]: r["count"] for r in summary_rows}
-        self.model_fractions = {r["model"]: r["fraction"] for r in summary_rows}
+        # ── 5. store aggregated attributes ─────────────────────────
+        self.model_counts = {
+            r["model"]: r["best_count"] for r in summary_rows
+        }
+        self.model_fractions = {
+            r["model"]: r["best_fraction"] for r in summary_rows
+        }
 
-        # central model = top of sorted list (highest count, MSSPE tiebreaker)
+        # central model = highest best_count, MSSPE tiebreaker
         self.central_model_name = summary_rows[0]["model"]
         self.central_params = summary_rows[0]["param_stats"]
 
-        # full summary table as DataFrame (without param_stats column)
+        # DataFrame (without param_stats column)
         df_rows = []
         for r in summary_rows:
             df_rows.append({
                 "model": r["model"],
-                "count": r["count"],
-                "fraction": r["fraction"],
+                "best_count": r["best_count"],
+                "best_fraction": r["best_fraction"],
+                "fitted_count": r["fitted_count"],
                 "AIC_mean": r["AIC_mean"],
                 "AIC_std": r["AIC_std"],
                 "BIC_mean": r["BIC_mean"],
@@ -5383,7 +5411,7 @@ class GridVariogram:
             })
         self.all_criteria = pd.DataFrame(df_rows)
 
-        # store the full summary rows (with param_stats) for programmatic access
+        # full summary rows (with param_stats) for programmatic access
         self._summary_rows = summary_rows
 
     def summary(self) -> str:
@@ -5404,14 +5432,15 @@ class GridVariogram:
         # ── aggregated model table ──
         if self.all_criteria is not None and len(self.all_criteria) > 0:
             lines.append("MODEL STRUCTURE SUMMARY (across all realisations)")
-            lines.append("-" * 90)
+            lines.append("-" * 100)
             header = (
-                f"  {'Model':<40s}  {'Count':>5s}  {'Frac':>6s}  "
+                f"  {'Model':<40s}  {'Best':>4s}  {'Frac':>6s}  "
+                f"{'Fitted':>6s}  "
                 f"{'AIC_mean':>10s}  {'AIC_std':>8s}  "
                 f"{'MSSPE_mean':>10s}  {'MSSPE_std':>9s}"
             )
             lines.append(header)
-            lines.append("-" * 90)
+            lines.append("-" * 100)
             for _, row in self.all_criteria.iterrows():
                 msspe_str = (
                     f"{row['MSSPE_mean']:10.4f}"
@@ -5424,8 +5453,9 @@ class GridVariogram:
                     else "      N/A"
                 )
                 lines.append(
-                    f"  {row['model']:<40s}  {row['count']:5d}  "
-                    f"{row['fraction']:5.1%}  "
+                    f"  {row['model']:<40s}  {row['best_count']:4d}  "
+                    f"{row['best_fraction']:5.1%}  "
+                    f"{row['fitted_count']:6d}  "
                     f"{row['AIC_mean']:10.1f}  {row['AIC_std']:8.1f}  "
                     f"{msspe_str}  {msspe_std_str}"
                 )
@@ -5436,7 +5466,7 @@ class GridVariogram:
             cnt = self.model_counts.get(self.central_model_name, 0)
             lines.append(
                 f"CENTRAL MODEL: {self.central_model_name}  "
-                f"(count={cnt}/{n_ok})"
+                f"(selected best in {cnt}/{n_ok} realisations)"
             )
 
         if self.central_params:
