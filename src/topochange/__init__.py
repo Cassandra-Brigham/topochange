@@ -10,12 +10,16 @@ from .pointcloudpair import PointCloudPair
 
 from .variogram import (
     RasterDataHandler,
-    StatisticalAnalysis,
-    VariogramAnalysis,
-    VariogramModelSelector,
-    FittedVariogramModel,
-    EmpiricalVariogram,
+    SingleVariogram,
+    GridVariogram,
     KrigingLOOCVResult,
+    AggregatedLOOCVResult,
+    # backward-compatibility stubs
+    VariogramAnalysis,
+    FittedVariogramModel,
+    VariogramModelSelector,
+    EmpiricalVariogram,
+    StatisticalAnalysis,
 )
 from .uncertainty import RegionalUncertaintyEstimator, DerivativeUncertaintyEstimator
 from .variogram_models import MODEL_REGISTRY, VariogramModelRegistry
@@ -71,11 +75,10 @@ __all__ = [
     "save_transformed_las",
     "compute_alignment_quality",
     "RasterDataHandler",
-    "StatisticalAnalysis",
-    "VariogramAnalysis",
-    "VariogramModelSelector",
-    "FittedVariogramModel",
-    "EmpiricalVariogram",
+    "SingleVariogram",
+    "GridVariogram",
+    "KrigingLOOCVResult",
+    "AggregatedLOOCVResult",
     "MODEL_REGISTRY",
     "VariogramModelRegistry",
     "CompositeVariogramModel",
