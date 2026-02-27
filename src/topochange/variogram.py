@@ -4571,6 +4571,11 @@ class SingleVariogram:
     ) -> Optional[Dict[str, Any]]:
         """Fit one composite model via multi-start WLS.
 
+        Uses Cressie (1985) weights w_i = N(h_i) / gamma_hat(h_i)^2
+        passed through ``weights``.  These are converted to ``sigma``
+        values for ``scipy.optimize.curve_fit`` so that the optimiser
+        minimises the weighted residual sum of squares directly.
+
         Returns a dict with keys: 'model', 'params', 'rss', 'aic', 'bic',
         'warnings', or None if fitting fails entirely.
         """
@@ -4589,6 +4594,19 @@ class SingleVariogram:
             model.set_params(np.array(params))
             return model(h)
 
+        # ── Convert Cressie weights to sigma for curve_fit ──
+        # curve_fit minimises Σ (r_i / σ_i)²; we want Σ w_i r_i²,
+        # so σ_i = 1 / √w_i.  Guard against zero / negative weights.
+        if sigma is None and weights is not None:
+            safe_w = np.where(
+                np.isfinite(weights) & (weights > 0),
+                weights,
+                np.finfo(float).eps,
+            )
+            sigma_from_weights = 1.0 / np.sqrt(safe_w)
+        else:
+            sigma_from_weights = sigma
+
         rng = np.random.default_rng()
         guesses = self._generate_multistart_guesses(
             p0_base, bounds, n_restarts, rng
@@ -4601,19 +4619,13 @@ class SingleVariogram:
             try:
                 popt, pcov = curve_fit(
                     model_func, lags, variogram,
-                    p0=p0, sigma=sigma,
-                    absolute_sigma=sigma is not None,
+                    p0=p0, sigma=sigma_from_weights,
+                    absolute_sigma=True,
                     bounds=bounds, maxfev=maxfev,
                 )
                 model.set_params(popt)
                 residuals = variogram - model(lags)
-                if sigma is not None:
-                    safe_sigma = np.where(
-                        np.isfinite(sigma) & (sigma > 0), sigma, np.inf
-                    )
-                    rss = float(np.sum((residuals / safe_sigma) ** 2))
-                else:
-                    rss = float(np.sum(weights * residuals ** 2))
+                rss = float(np.sum(weights * residuals ** 2))
 
                 if rss < best_rss:
                     best_rss = rss
@@ -4627,22 +4639,17 @@ class SingleVariogram:
         popt, pcov, rss = best_result
         model.set_params(popt)
         k = model.n_params
+        n_eff = len(lags)
 
-        # information criteria
-        if sigma is not None:
-            finite_mask = np.isfinite(sigma) & (sigma > 0)
-            n_eff = int(np.sum(finite_mask))
-            sig = sigma[finite_mask]
-            res = (variogram - model(lags))[finite_mask]
-            ll = -0.5 * np.sum(np.log(2 * np.pi * sig ** 2) + res ** 2 / sig ** 2)
-            aic = 2 * k - 2 * ll
-            bic = k * np.log(max(n_eff, 1)) - 2 * ll
-        else:
-            n_eff = len(lags)
-            aic = n_eff * np.log(rss / max(n_eff, 1)) + 2 * k
-            bic = n_eff * np.log(rss / max(n_eff, 1)) + k * np.log(max(n_eff, 1))
+        # ── Pseudo-AIC/BIC for WLS ──
+        # Following Cressie (1985) / Webster & Oliver (2007): use the
+        # weighted RSS as the pseudo-deviance for model ranking.
+        # These are not proper likelihoods but are valid for relative
+        # comparison among candidates fitted with the same weights.
+        aic = n_eff * np.log(rss / max(n_eff, 1)) + 2 * k
+        bic = n_eff * np.log(rss / max(n_eff, 1)) + k * np.log(max(n_eff, 1))
 
-        # AICc (small-sample corrected)
+        # AICc (small-sample corrected; Burnham & Anderson, 2002)
         denom = max(n_eff - k - 1, 1)
         aicc = float(aic) + 2 * k * (k + 1) / denom
 
@@ -4662,464 +4669,464 @@ class SingleVariogram:
             "fitting_method": "wls",
         }
 
-    # ── REML fitting ─────────────────────────────────────────────
-
-    @staticmethod
-    def _build_trend_matrix(
-        coords: np.ndarray,
-        trend_order: int = 0,
-    ) -> np.ndarray:
-        """Build the trend design matrix F for given coordinates.
-
-        Follows the convention used by geoR's ``likfit`` function
-        (Ribeiro & Diggle, 2001), where ``trend`` = ``"cte"``
-        corresponds to ``trend_order=0``, ``"1st"`` to
-        ``trend_order=1``, and ``"2nd"`` to ``trend_order=2``.
-
-        Parameters
-        ----------
-        coords : (n, 2) array
-            Spatial coordinates.
-        trend_order : {0, 1, 2}
-            Polynomial order of the spatial trend.
-
-            - 0: constant mean only, F = [1] (p=1).
-            - 1: linear, F = [1, x, y] (p=3).
-            - 2: quadratic, F = [1, x, y, x², xy, y²] (p=6).
-
-        Returns
-        -------
-        F : (n, p) array
-            Design matrix.
-
-        References
-        ----------
-        Ribeiro, P.J. & Diggle, P.J. (2001). geoR: A package for
-        geostatistical analysis. *R-NEWS*, 1(2), 14–18.
-        """
-        n = len(coords)
-        x = coords[:, 0]
-        y = coords[:, 1]
-
-        if trend_order == 0:
-            return np.ones((n, 1))
-        elif trend_order == 1:
-            return np.column_stack([np.ones(n), x, y])
-        elif trend_order == 2:
-            return np.column_stack([
-                np.ones(n), x, y, x ** 2, x * y, y ** 2,
-            ])
-        else:
-            raise ValueError(
-                f"trend_order must be 0, 1, or 2, got {trend_order}"
-            )
-
-    @staticmethod
-    def _reml_neg_log_likelihood(
-        params: np.ndarray,
-        model: CompositeVariogramModel,
-        dist_matrix: np.ndarray,
-        values: np.ndarray,
-        F: np.ndarray,
-    ) -> float:
-        """Profiled REML negative log-likelihood.
-
-        The total variance σ² is profiled out analytically,
-        so the optimiser only searches over the correlation
-        structure (ranges, nugget-to-sill ratio).  This exactly
-        mirrors geoR's ``likGRF.R`` computation::
-
-            V      <- correlation matrix (diagonal = 1)
-            ivx    <- solve(V, xmat)
-            xivx   <- crossprod(ivx, xmat)
-            betahat <- solve(xivx, crossprod(ivx, z))
-            res    <- z - xmat %*% betahat
-            ssres  <- drop(crossprod(res, solve(V, res)))
-            choldet <- sum(log(diag(chol(xivx))))
-            negloglik <- ((n-p)/2)*log(ssres)
-                         + log_det_V_half + choldet
-
-        The profiled REML NLL (up to a constant) is::
-
-            (n-p)/2 · log(r'V⁻¹r) + ½ log|V| + ½ log|F'V⁻¹F|
-
-        where V = C / σ² is the normalised correlation matrix,
-        and σ̂² = r'V⁻¹r / (n-p) is the profiled MLE of the
-        total variance.
-
-        Working with the unit-scale V rather than C eliminates
-        scale-dependent conditioning problems that cause Cholesky
-        failures when the sill is far from the data variance.
-
-        Parameters
-        ----------
-        params : (k,) array
-            Variogram model parameters (sill, range, ... nugget).
-            Only the *ratios* of the sill components affect V;
-            the absolute scale is recovered from the profile.
-        model : CompositeVariogramModel
-            Model whose ``__call__`` returns γ(h).
-        dist_matrix : (n, n) array
-            Pre-computed pairwise distances.
-        values : (n,) array
-            Observed values at sample locations.
-        F : (n, p) array
-            Trend design matrix.
-
-        Returns
-        -------
-        float
-            Negative profiled REML log-likelihood (to minimise).
-
-        References
-        ----------
-        Patterson, H.D. & Thompson, R. (1971). Recovery of inter-block
-        information when block sizes are unequal. *Biometrika*, 58,
-        545–554.
-
-        Ribeiro, P.J. & Diggle, P.J. (2001). geoR: A package for
-        geostatistical analysis. *R-NEWS*, 1(2), 14–18.
-        Source: ``github.com/rundel/geoR/blob/master/R/likGRF.R``
-
-        Cressie, N. (1993). *Statistics for Spatial Data*, rev. ed.,
-        Wiley. §2.6.
-        """
-        from scipy.linalg import cho_factor, cho_solve
-
-        n = len(values)
-        p = F.shape[1]
-        model.set_params(params)
-
-        # total sill (used only as a normalising constant)
-        total_sill = model.get_total_sill()
-        if total_sill is None or total_sill <= 0:
-            return 1e20
-
-        # ── normalised correlation matrix V = C / σ² ──
-        # C(h) = total_sill - γ(h),  V = C / total_sill
-        # V_ii = 1,  V_ij = 1 - γ(h_ij) / total_sill
-        gamma_matrix = model(dist_matrix)
-        V = 1.0 - gamma_matrix / total_sill
-
-        # jitter on unit-scale diagonal for numerical stability
-        np.fill_diagonal(V, 1.0 + 1e-6)
-
-        # Cholesky of V (unit-scale → much better conditioned)
-        try:
-            cho = cho_factor(V, lower=True, check_finite=False)
-        except np.linalg.LinAlgError:
-            return 1e20
-
-        # log|V|
-        log_det_V = 2.0 * np.sum(np.log(np.diag(cho[0])))
-
-        # ── batch-solve V⁻¹[F | z] ──
-        Fz = np.empty((n, p + 1))
-        Fz[:, :p] = F
-        Fz[:, p] = values
-        V_inv_Fz = cho_solve(cho, Fz, check_finite=False)
-
-        V_inv_F = V_inv_Fz[:, :p]   # (n, p)
-        V_inv_z = V_inv_Fz[:, p]     # (n,)
-
-        # ── F'V⁻¹F  and its log-determinant ──
-        FtVinvF = F.T @ V_inv_F
-        try:
-            cho_small = cho_factor(FtVinvF, lower=True, check_finite=False)
-        except np.linalg.LinAlgError:
-            return 1e20
-        log_det_FtVinvF = 2.0 * np.sum(np.log(np.diag(cho_small[0])))
-
-        # ── GLS trend: β̂ = (F'V⁻¹F)⁻¹ F'V⁻¹z ──
-        FtVinvz = F.T @ V_inv_z
-        beta_hat = cho_solve(cho_small, FtVinvz, check_finite=False)
-
-        # ── r'V⁻¹r  (profiled sufficient statistic) ──
-        V_inv_r = V_inv_z - V_inv_F @ beta_hat
-        r = values - F @ beta_hat
-        ssres = r @ V_inv_r           # r'V⁻¹r
-
-        if ssres <= 0:
-            return 1e20
-
-        # ── profiled REML NLL (constant terms dropped) ──
-        # σ̂² = ssres / (n-p)  →  (n-p) log(σ̂²) = (n-p) log(ssres/(n-p))
-        # = (n-p) log(ssres) - (n-p) log(n-p)  [second term is constant]
-        nll = 0.5 * (
-            (n - p) * np.log(ssres)
-            + log_det_V
-            + log_det_FtVinvF
-        )
-
-        if not np.isfinite(nll):
-            return 1e20
-
-        return float(nll)
-
-    _TREND_LABELS = {0: "cte", 1: "1st", 2: "2nd"}
-
-    def _fit_single_composite_model_reml(
-        self,
-        model: CompositeVariogramModel,
-        coords: np.ndarray,
-        values: np.ndarray,
-        dist_matrix: np.ndarray,
-        lags: np.ndarray,
-        variogram: np.ndarray,
-        trend_order: int = 0,
-        n_restarts: int = 3,
-    ) -> Optional[Dict[str, Any]]:
-        """Fit one composite model via profiled REML.
-
-        Adapts the joint trend + covariance estimation approach
-        from geoR's ``likfit`` (Ribeiro & Diggle, 2001).  Both
-        the trend coefficients β *and* the total variance σ² are
-        profiled out analytically — the optimiser only searches
-        over correlation parameters (ranges, nugget-to-sill ratio).
-
-        After optimisation, σ̂² = r'V⁻¹r / (n-p) is recovered
-        from the profile and used to rescale the model parameters
-        to their absolute values.
-
-        Parameters
-        ----------
-        model : CompositeVariogramModel
-            Candidate model to fit.
-        coords : (n, 2) array
-            Spatial coordinates of sample points.
-        values : (n,) array
-            Observed values at sample locations.
-        dist_matrix : (n, n) array
-            Pre-computed pairwise distance matrix.
-        lags, variogram : arrays
-            Empirical variogram (used only for generating initial
-            guesses and bounds, not for fitting).
-        trend_order : {0, 1, 2}
-            Polynomial trend order.  0 = constant mean (p=1),
-            1 = linear in x,y (p=3), 2 = quadratic (p=6).
-            Matches geoR's ``"cte"`` / ``"1st"`` / ``"2nd"``.
-        n_restarts : int
-            Number of multi-start optimisations.
-
-        Returns
-        -------
-        dict or None
-            Fitted model dict with keys: model, params, param_cov,
-            aic, aicc, bic, reml_nll, trend_order, trend_coefficients,
-            description, etc.
-            None if all optimisation attempts fail.
-
-        References
-        ----------
-        Ribeiro, P.J. & Diggle, P.J. (2001). geoR: A package for
-        geostatistical analysis. *R-NEWS*, 1(2), 14–18.
-        Source: ``github.com/rundel/geoR/blob/master/R/likGRF.R``
-        """
-        from scipy.optimize import minimize
-        from scipy.linalg import cho_factor, cho_solve
-
-        # ── build trend design matrix ──
-        F = self._build_trend_matrix(coords, trend_order)
-        p = F.shape[1]  # number of trend parameters
-
-        p0_base = model.default_guess(lags, variogram)
-        bounds_pair = model.bounds(lags, variogram)
-        lb = np.array(bounds_pair[0])
-        ub = np.array(bounds_pair[1])
-
-        # For REML, relax the nugget cap — the profiled likelihood
-        # can properly estimate any nugget-to-sill ratio, including
-        # data that is predominantly nugget (pure noise).
-        if model.include_nugget:
-            nugget_idx = model.n_params - 1
-            max_gamma = np.nanmax(variogram)
-            ub[nugget_idx] = max_gamma * 3.0    # allow nugget up to 3× max γ
-
-            # nugget pre-estimation
-            nugget_pre = self._estimate_nugget_from_short_lags(lags, variogram)
-            p0_base[nugget_idx] = np.clip(
-                nugget_pre, lb[nugget_idx], ub[nugget_idx]
-            )
-
-        # scipy bounds format
-        sp_bounds = list(zip(lb, ub))
-
-        # generate multi-start guesses
-        rng = np.random.default_rng()
-        guesses = self._generate_multistart_guesses(
-            p0_base, (list(lb), list(ub)), n_restarts, rng
-        )
-
-        best_result = None
-        best_nll = np.inf
-        n = len(values)
-
-        for p0 in guesses:
-            try:
-                res = minimize(
-                    self._reml_neg_log_likelihood,
-                    p0,
-                    args=(model, dist_matrix, values, F),
-                    method="L-BFGS-B",
-                    bounds=sp_bounds,
-                    options={"maxiter": 500, "ftol": 1e-10},
-                )
-                # Accept any result with a finite NLL better than
-                # what we've seen — don't require res.success, as
-                # L-BFGS-B may report non-convergence even when it
-                # has found a good point (common for flat directions
-                # in the profiled likelihood).
-                if np.isfinite(res.fun) and res.fun < best_nll:
-                    best_nll = res.fun
-                    best_result = res
-            except Exception:
-                continue
-
-        if best_result is None:
-            return None
-
-        # ── recover σ̂² from the profiled likelihood ──
-        # The optimiser found the correlation shape; now we
-        # compute the optimal total variance analytically.
-        popt = best_result.x
-        nll_profiled = best_result.fun
-        model.set_params(popt)
-
-        total_sill_opt = model.get_total_sill()
-        if total_sill_opt is None or total_sill_opt <= 0:
-            return None
-
-        # Build V (normalised correlation matrix) at the optimum
-        gamma_matrix = model(dist_matrix)
-        V = 1.0 - gamma_matrix / total_sill_opt
-        np.fill_diagonal(V, 1.0 + 1e-6)
-
-        try:
-            cho = cho_factor(V, lower=True, check_finite=False)
-        except np.linalg.LinAlgError:
-            return None
-
-        # Solve V⁻¹[F | z]
-        Fz = np.empty((n, p + 1))
-        Fz[:, :p] = F
-        Fz[:, p] = values
-        V_inv_Fz = cho_solve(cho, Fz, check_finite=False)
-        V_inv_F = V_inv_Fz[:, :p]
-        V_inv_z = V_inv_Fz[:, p]
-
-        FtVinvF = F.T @ V_inv_F
-        try:
-            cho_small = cho_factor(FtVinvF, lower=True, check_finite=False)
-        except np.linalg.LinAlgError:
-            return None
-
-        FtVinvz = F.T @ V_inv_z
-        beta_hat = cho_solve(cho_small, FtVinvz, check_finite=False)
-
-        r = values - F @ beta_hat
-        V_inv_r = V_inv_z - V_inv_F @ beta_hat
-        ssres = float(r @ V_inv_r)
-
-        n_reml = n - p
-        sigma2_hat = ssres / n_reml       # profiled MLE of total variance
-
-        # ── diagnostic: check σ̂² is consistent with data variance ──
-        data_var = float(np.var(values))
-        if data_var > 0:
-            _sv_ratio = sigma2_hat / data_var
-            if _sv_ratio < 0.33 or _sv_ratio > 3.0:
-                warnings.warn(
-                    f"REML σ̂²={sigma2_hat:.4g} differs substantially "
-                    f"from sample variance={data_var:.4g} "
-                    f"(ratio={_sv_ratio:.2f}). "
-                    f"This may indicate a data/model mismatch. "
-                    f"Model: {model.structural_description()}, "
-                    f"trend_order={trend_order}, "
-                    f"scale_factor={sigma2_hat/total_sill_opt:.4g}",
-                    UserWarning,
-                    stacklevel=2,
-                )
-
-        # ── rescale model parameters to true absolute values ──
-        # The optimiser found the shape (ratios); σ̂² gives the scale.
-        scale_factor = sigma2_hat / total_sill_opt
-        rescaled_params = popt.copy()
-        # Scale each sill parameter and the nugget by the same factor
-        for i, spec in enumerate(model._components):
-            if spec.has_sill:
-                comp_slice = model._param_slices[
-                    model.component_names[i]
-                    if model.component_names.count(model.component_names[i]) == 1
-                    else f"{model.component_names[i]}_{i}"
-                ]
-                rescaled_params[comp_slice.start] *= scale_factor
-        if model.include_nugget:
-            nug_idx = model._param_slices['nugget'].start
-            rescaled_params[nug_idx] *= scale_factor
-
-        model.set_params(rescaled_params)
-        popt = rescaled_params
-
-        k_cov = model.n_params       # covariance parameters
-        k_total = k_cov + p           # total estimated parameters
-
-        # ── full REML NLL at the optimum (for AIC/BIC) ──
-        # profiled NLL was: (n-p)/2 log(ssres) + ½ log|V| + ½ log|F'V⁻¹F|
-        # full NLL adds: (n-p)/2 (1 + log(2π) - log(n-p))
-        log_det_V = 2.0 * np.sum(np.log(np.diag(cho[0])))
-        log_det_FtVinvF = 2.0 * np.sum(np.log(np.diag(cho_small[0])))
-        full_nll = 0.5 * (
-            n_reml * (1.0 + np.log(2 * np.pi))
-            + n_reml * np.log(sigma2_hat)
-            + log_det_V
-            + log_det_FtVinvF
-        )
-        reml_ll = -full_nll
-        aic = 2 * k_total - 2 * reml_ll
-        bic = k_total * np.log(n_reml) - 2 * reml_ll
-        denom = max(n_reml - k_total - 1, 1)
-        aicc = aic + 2 * k_total * (k_total + 1) / denom
-
-        # parameter covariance from inverse Hessian
-        # (correlation parameters only — approximate)
-        param_cov = None
-        if hasattr(best_result, "hess_inv"):
-            hi = best_result.hess_inv
-            if hasattr(hi, "todense"):
-                param_cov = np.array(hi.todense())
-            else:
-                param_cov = np.array(hi)
-        if param_cov is None:
-            param_cov = np.full((k_cov, k_cov), np.nan)
-
-        # ── build description including trend ──
-        trend_label = self._TREND_LABELS.get(trend_order, f"poly{trend_order}")
-        base_desc = model.structural_description()
-        if trend_order > 0:
-            description = f"{base_desc} | trend={trend_label}"
-        else:
-            description = base_desc
-
-        return {
-            "model": model,
-            "params": popt,
-            "param_cov": param_cov,
-            "rss": np.nan,  # not applicable for REML
-            "aic": float(aic),
-            "aicc": float(aicc),
-            "bic": float(bic),
-            "reml_nll": float(full_nll),
-            "msspe": None,
-            "msspe_std": None,
-            "msspe_n_runs": 0,
-            "description": description,
-            "trend_order": trend_order,
-            "trend_coefficients": beta_hat,
-            "n_trend_params": p,
-            "sigma2_hat": float(sigma2_hat),
-            "warnings": [],
-            "fitting_method": "reml",
-        }
+    # # ── REML fitting ─────────────────────────────────────────────
+
+    # @staticmethod
+    # def _build_trend_matrix(
+    #     coords: np.ndarray,
+    #     trend_order: int = 0,
+    # ) -> np.ndarray:
+    #     """Build the trend design matrix F for given coordinates.
+
+    #     Follows the convention used by geoR's ``likfit`` function
+    #     (Ribeiro & Diggle, 2001), where ``trend`` = ``"cte"``
+    #     corresponds to ``trend_order=0``, ``"1st"`` to
+    #     ``trend_order=1``, and ``"2nd"`` to ``trend_order=2``.
+
+    #     Parameters
+    #     ----------
+    #     coords : (n, 2) array
+    #         Spatial coordinates.
+    #     trend_order : {0, 1, 2}
+    #         Polynomial order of the spatial trend.
+
+    #         - 0: constant mean only, F = [1] (p=1).
+    #         - 1: linear, F = [1, x, y] (p=3).
+    #         - 2: quadratic, F = [1, x, y, x², xy, y²] (p=6).
+
+    #     Returns
+    #     -------
+    #     F : (n, p) array
+    #         Design matrix.
+
+    #     References
+    #     ----------
+    #     Ribeiro, P.J. & Diggle, P.J. (2001). geoR: A package for
+    #     geostatistical analysis. *R-NEWS*, 1(2), 14–18.
+    #     """
+    #     n = len(coords)
+    #     x = coords[:, 0]
+    #     y = coords[:, 1]
+
+    #     if trend_order == 0:
+    #         return np.ones((n, 1))
+    #     elif trend_order == 1:
+    #         return np.column_stack([np.ones(n), x, y])
+    #     elif trend_order == 2:
+    #         return np.column_stack([
+    #             np.ones(n), x, y, x ** 2, x * y, y ** 2,
+    #         ])
+    #     else:
+    #         raise ValueError(
+    #             f"trend_order must be 0, 1, or 2, got {trend_order}"
+    #         )
+
+    # @staticmethod
+    # def _reml_neg_log_likelihood(
+    #     params: np.ndarray,
+    #     model: CompositeVariogramModel,
+    #     dist_matrix: np.ndarray,
+    #     values: np.ndarray,
+    #     F: np.ndarray,
+    # ) -> float:
+    #     """Profiled REML negative log-likelihood.
+
+    #     The total variance σ² is profiled out analytically,
+    #     so the optimiser only searches over the correlation
+    #     structure (ranges, nugget-to-sill ratio).  This exactly
+    #     mirrors geoR's ``likGRF.R`` computation::
+
+    #         V      <- correlation matrix (diagonal = 1)
+    #         ivx    <- solve(V, xmat)
+    #         xivx   <- crossprod(ivx, xmat)
+    #         betahat <- solve(xivx, crossprod(ivx, z))
+    #         res    <- z - xmat %*% betahat
+    #         ssres  <- drop(crossprod(res, solve(V, res)))
+    #         choldet <- sum(log(diag(chol(xivx))))
+    #         negloglik <- ((n-p)/2)*log(ssres)
+    #                      + log_det_V_half + choldet
+
+    #     The profiled REML NLL (up to a constant) is::
+
+    #         (n-p)/2 · log(r'V⁻¹r) + ½ log|V| + ½ log|F'V⁻¹F|
+
+    #     where V = C / σ² is the normalised correlation matrix,
+    #     and σ̂² = r'V⁻¹r / (n-p) is the profiled MLE of the
+    #     total variance.
+
+    #     Working with the unit-scale V rather than C eliminates
+    #     scale-dependent conditioning problems that cause Cholesky
+    #     failures when the sill is far from the data variance.
+
+    #     Parameters
+    #     ----------
+    #     params : (k,) array
+    #         Variogram model parameters (sill, range, ... nugget).
+    #         Only the *ratios* of the sill components affect V;
+    #         the absolute scale is recovered from the profile.
+    #     model : CompositeVariogramModel
+    #         Model whose ``__call__`` returns γ(h).
+    #     dist_matrix : (n, n) array
+    #         Pre-computed pairwise distances.
+    #     values : (n,) array
+    #         Observed values at sample locations.
+    #     F : (n, p) array
+    #         Trend design matrix.
+
+    #     Returns
+    #     -------
+    #     float
+    #         Negative profiled REML log-likelihood (to minimise).
+
+    #     References
+    #     ----------
+    #     Patterson, H.D. & Thompson, R. (1971). Recovery of inter-block
+    #     information when block sizes are unequal. *Biometrika*, 58,
+    #     545–554.
+
+    #     Ribeiro, P.J. & Diggle, P.J. (2001). geoR: A package for
+    #     geostatistical analysis. *R-NEWS*, 1(2), 14–18.
+    #     Source: ``github.com/rundel/geoR/blob/master/R/likGRF.R``
+
+    #     Cressie, N. (1993). *Statistics for Spatial Data*, rev. ed.,
+    #     Wiley. §2.6.
+    #     """
+    #     from scipy.linalg import cho_factor, cho_solve
+
+    #     n = len(values)
+    #     p = F.shape[1]
+    #     model.set_params(params)
+
+    #     # total sill (used only as a normalising constant)
+    #     total_sill = model.get_total_sill()
+    #     if total_sill is None or total_sill <= 0:
+    #         return 1e20
+
+    #     # ── normalised correlation matrix V = C / σ² ──
+    #     # C(h) = total_sill - γ(h),  V = C / total_sill
+    #     # V_ii = 1,  V_ij = 1 - γ(h_ij) / total_sill
+    #     gamma_matrix = model(dist_matrix)
+    #     V = 1.0 - gamma_matrix / total_sill
+
+    #     # jitter on unit-scale diagonal for numerical stability
+    #     np.fill_diagonal(V, 1.0 + 1e-6)
+
+    #     # Cholesky of V (unit-scale → much better conditioned)
+    #     try:
+    #         cho = cho_factor(V, lower=True, check_finite=False)
+    #     except np.linalg.LinAlgError:
+    #         return 1e20
+
+    #     # log|V|
+    #     log_det_V = 2.0 * np.sum(np.log(np.diag(cho[0])))
+
+    #     # ── batch-solve V⁻¹[F | z] ──
+    #     Fz = np.empty((n, p + 1))
+    #     Fz[:, :p] = F
+    #     Fz[:, p] = values
+    #     V_inv_Fz = cho_solve(cho, Fz, check_finite=False)
+
+    #     V_inv_F = V_inv_Fz[:, :p]   # (n, p)
+    #     V_inv_z = V_inv_Fz[:, p]     # (n,)
+
+    #     # ── F'V⁻¹F  and its log-determinant ──
+    #     FtVinvF = F.T @ V_inv_F
+    #     try:
+    #         cho_small = cho_factor(FtVinvF, lower=True, check_finite=False)
+    #     except np.linalg.LinAlgError:
+    #         return 1e20
+    #     log_det_FtVinvF = 2.0 * np.sum(np.log(np.diag(cho_small[0])))
+
+    #     # ── GLS trend: β̂ = (F'V⁻¹F)⁻¹ F'V⁻¹z ──
+    #     FtVinvz = F.T @ V_inv_z
+    #     beta_hat = cho_solve(cho_small, FtVinvz, check_finite=False)
+
+    #     # ── r'V⁻¹r  (profiled sufficient statistic) ──
+    #     V_inv_r = V_inv_z - V_inv_F @ beta_hat
+    #     r = values - F @ beta_hat
+    #     ssres = r @ V_inv_r           # r'V⁻¹r
+
+    #     if ssres <= 0:
+    #         return 1e20
+
+    #     # ── profiled REML NLL (constant terms dropped) ──
+    #     # σ̂² = ssres / (n-p)  →  (n-p) log(σ̂²) = (n-p) log(ssres/(n-p))
+    #     # = (n-p) log(ssres) - (n-p) log(n-p)  [second term is constant]
+    #     nll = 0.5 * (
+    #         (n - p) * np.log(ssres)
+    #         + log_det_V
+    #         + log_det_FtVinvF
+    #     )
+
+    #     if not np.isfinite(nll):
+    #         return 1e20
+
+    #     return float(nll)
+
+    # _TREND_LABELS = {0: "cte", 1: "1st", 2: "2nd"}
+
+    # def _fit_single_composite_model_reml(
+    #     self,
+    #     model: CompositeVariogramModel,
+    #     coords: np.ndarray,
+    #     values: np.ndarray,
+    #     dist_matrix: np.ndarray,
+    #     lags: np.ndarray,
+    #     variogram: np.ndarray,
+    #     trend_order: int = 0,
+    #     n_restarts: int = 3,
+    # ) -> Optional[Dict[str, Any]]:
+    #     """Fit one composite model via profiled REML.
+
+    #     Adapts the joint trend + covariance estimation approach
+    #     from geoR's ``likfit`` (Ribeiro & Diggle, 2001).  Both
+    #     the trend coefficients β *and* the total variance σ² are
+    #     profiled out analytically — the optimiser only searches
+    #     over correlation parameters (ranges, nugget-to-sill ratio).
+
+    #     After optimisation, σ̂² = r'V⁻¹r / (n-p) is recovered
+    #     from the profile and used to rescale the model parameters
+    #     to their absolute values.
+
+    #     Parameters
+    #     ----------
+    #     model : CompositeVariogramModel
+    #         Candidate model to fit.
+    #     coords : (n, 2) array
+    #         Spatial coordinates of sample points.
+    #     values : (n,) array
+    #         Observed values at sample locations.
+    #     dist_matrix : (n, n) array
+    #         Pre-computed pairwise distance matrix.
+    #     lags, variogram : arrays
+    #         Empirical variogram (used only for generating initial
+    #         guesses and bounds, not for fitting).
+    #     trend_order : {0, 1, 2}
+    #         Polynomial trend order.  0 = constant mean (p=1),
+    #         1 = linear in x,y (p=3), 2 = quadratic (p=6).
+    #         Matches geoR's ``"cte"`` / ``"1st"`` / ``"2nd"``.
+    #     n_restarts : int
+    #         Number of multi-start optimisations.
+
+    #     Returns
+    #     -------
+    #     dict or None
+    #         Fitted model dict with keys: model, params, param_cov,
+    #         aic, aicc, bic, reml_nll, trend_order, trend_coefficients,
+    #         description, etc.
+    #         None if all optimisation attempts fail.
+
+    #     References
+    #     ----------
+    #     Ribeiro, P.J. & Diggle, P.J. (2001). geoR: A package for
+    #     geostatistical analysis. *R-NEWS*, 1(2), 14–18.
+    #     Source: ``github.com/rundel/geoR/blob/master/R/likGRF.R``
+    #     """
+    #     from scipy.optimize import minimize
+    #     from scipy.linalg import cho_factor, cho_solve
+
+    #     # ── build trend design matrix ──
+    #     F = self._build_trend_matrix(coords, trend_order)
+    #     p = F.shape[1]  # number of trend parameters
+
+    #     p0_base = model.default_guess(lags, variogram)
+    #     bounds_pair = model.bounds(lags, variogram)
+    #     lb = np.array(bounds_pair[0])
+    #     ub = np.array(bounds_pair[1])
+
+    #     # For REML, relax the nugget cap — the profiled likelihood
+    #     # can properly estimate any nugget-to-sill ratio, including
+    #     # data that is predominantly nugget (pure noise).
+    #     if model.include_nugget:
+    #         nugget_idx = model.n_params - 1
+    #         max_gamma = np.nanmax(variogram)
+    #         ub[nugget_idx] = max_gamma * 3.0    # allow nugget up to 3× max γ
+
+    #         # nugget pre-estimation
+    #         nugget_pre = self._estimate_nugget_from_short_lags(lags, variogram)
+    #         p0_base[nugget_idx] = np.clip(
+    #             nugget_pre, lb[nugget_idx], ub[nugget_idx]
+    #         )
+
+    #     # scipy bounds format
+    #     sp_bounds = list(zip(lb, ub))
+
+    #     # generate multi-start guesses
+    #     rng = np.random.default_rng()
+    #     guesses = self._generate_multistart_guesses(
+    #         p0_base, (list(lb), list(ub)), n_restarts, rng
+    #     )
+
+    #     best_result = None
+    #     best_nll = np.inf
+    #     n = len(values)
+
+    #     for p0 in guesses:
+    #         try:
+    #             res = minimize(
+    #                 self._reml_neg_log_likelihood,
+    #                 p0,
+    #                 args=(model, dist_matrix, values, F),
+    #                 method="L-BFGS-B",
+    #                 bounds=sp_bounds,
+    #                 options={"maxiter": 500, "ftol": 1e-10},
+    #             )
+    #             # Accept any result with a finite NLL better than
+    #             # what we've seen — don't require res.success, as
+    #             # L-BFGS-B may report non-convergence even when it
+    #             # has found a good point (common for flat directions
+    #             # in the profiled likelihood).
+    #             if np.isfinite(res.fun) and res.fun < best_nll:
+    #                 best_nll = res.fun
+    #                 best_result = res
+    #         except Exception:
+    #             continue
+
+    #     if best_result is None:
+    #         return None
+
+    #     # ── recover σ̂² from the profiled likelihood ──
+    #     # The optimiser found the correlation shape; now we
+    #     # compute the optimal total variance analytically.
+    #     popt = best_result.x
+    #     nll_profiled = best_result.fun
+    #     model.set_params(popt)
+
+    #     total_sill_opt = model.get_total_sill()
+    #     if total_sill_opt is None or total_sill_opt <= 0:
+    #         return None
+
+    #     # Build V (normalised correlation matrix) at the optimum
+    #     gamma_matrix = model(dist_matrix)
+    #     V = 1.0 - gamma_matrix / total_sill_opt
+    #     np.fill_diagonal(V, 1.0 + 1e-6)
+
+    #     try:
+    #         cho = cho_factor(V, lower=True, check_finite=False)
+    #     except np.linalg.LinAlgError:
+    #         return None
+
+    #     # Solve V⁻¹[F | z]
+    #     Fz = np.empty((n, p + 1))
+    #     Fz[:, :p] = F
+    #     Fz[:, p] = values
+    #     V_inv_Fz = cho_solve(cho, Fz, check_finite=False)
+    #     V_inv_F = V_inv_Fz[:, :p]
+    #     V_inv_z = V_inv_Fz[:, p]
+
+    #     FtVinvF = F.T @ V_inv_F
+    #     try:
+    #         cho_small = cho_factor(FtVinvF, lower=True, check_finite=False)
+    #     except np.linalg.LinAlgError:
+    #         return None
+
+    #     FtVinvz = F.T @ V_inv_z
+    #     beta_hat = cho_solve(cho_small, FtVinvz, check_finite=False)
+
+    #     r = values - F @ beta_hat
+    #     V_inv_r = V_inv_z - V_inv_F @ beta_hat
+    #     ssres = float(r @ V_inv_r)
+
+    #     n_reml = n - p
+    #     sigma2_hat = ssres / n_reml       # profiled MLE of total variance
+
+    #     # ── diagnostic: check σ̂² is consistent with data variance ──
+    #     data_var = float(np.var(values))
+    #     if data_var > 0:
+    #         _sv_ratio = sigma2_hat / data_var
+    #         if _sv_ratio < 0.33 or _sv_ratio > 3.0:
+    #             warnings.warn(
+    #                 f"REML σ̂²={sigma2_hat:.4g} differs substantially "
+    #                 f"from sample variance={data_var:.4g} "
+    #                 f"(ratio={_sv_ratio:.2f}). "
+    #                 f"This may indicate a data/model mismatch. "
+    #                 f"Model: {model.structural_description()}, "
+    #                 f"trend_order={trend_order}, "
+    #                 f"scale_factor={sigma2_hat/total_sill_opt:.4g}",
+    #                 UserWarning,
+    #                 stacklevel=2,
+    #             )
+
+    #     # ── rescale model parameters to true absolute values ──
+    #     # The optimiser found the shape (ratios); σ̂² gives the scale.
+    #     scale_factor = sigma2_hat / total_sill_opt
+    #     rescaled_params = popt.copy()
+    #     # Scale each sill parameter and the nugget by the same factor
+    #     for i, spec in enumerate(model._components):
+    #         if spec.has_sill:
+    #             comp_slice = model._param_slices[
+    #                 model.component_names[i]
+    #                 if model.component_names.count(model.component_names[i]) == 1
+    #                 else f"{model.component_names[i]}_{i}"
+    #             ]
+    #             rescaled_params[comp_slice.start] *= scale_factor
+    #     if model.include_nugget:
+    #         nug_idx = model._param_slices['nugget'].start
+    #         rescaled_params[nug_idx] *= scale_factor
+
+    #     model.set_params(rescaled_params)
+    #     popt = rescaled_params
+
+    #     k_cov = model.n_params       # covariance parameters
+    #     k_total = k_cov + p           # total estimated parameters
+
+    #     # ── full REML NLL at the optimum (for AIC/BIC) ──
+    #     # profiled NLL was: (n-p)/2 log(ssres) + ½ log|V| + ½ log|F'V⁻¹F|
+    #     # full NLL adds: (n-p)/2 (1 + log(2π) - log(n-p))
+    #     log_det_V = 2.0 * np.sum(np.log(np.diag(cho[0])))
+    #     log_det_FtVinvF = 2.0 * np.sum(np.log(np.diag(cho_small[0])))
+    #     full_nll = 0.5 * (
+    #         n_reml * (1.0 + np.log(2 * np.pi))
+    #         + n_reml * np.log(sigma2_hat)
+    #         + log_det_V
+    #         + log_det_FtVinvF
+    #     )
+    #     reml_ll = -full_nll
+    #     aic = 2 * k_total - 2 * reml_ll
+    #     bic = k_total * np.log(n_reml) - 2 * reml_ll
+    #     denom = max(n_reml - k_total - 1, 1)
+    #     aicc = aic + 2 * k_total * (k_total + 1) / denom
+
+    #     # parameter covariance from inverse Hessian
+    #     # (correlation parameters only — approximate)
+    #     param_cov = None
+    #     if hasattr(best_result, "hess_inv"):
+    #         hi = best_result.hess_inv
+    #         if hasattr(hi, "todense"):
+    #             param_cov = np.array(hi.todense())
+    #         else:
+    #             param_cov = np.array(hi)
+    #     if param_cov is None:
+    #         param_cov = np.full((k_cov, k_cov), np.nan)
+
+    #     # ── build description including trend ──
+    #     trend_label = self._TREND_LABELS.get(trend_order, f"poly{trend_order}")
+    #     base_desc = model.structural_description()
+    #     if trend_order > 0:
+    #         description = f"{base_desc} | trend={trend_label}"
+    #     else:
+    #         description = base_desc
+
+    #     return {
+    #         "model": model,
+    #         "params": popt,
+    #         "param_cov": param_cov,
+    #         "rss": np.nan,  # not applicable for REML
+    #         "aic": float(aic),
+    #         "aicc": float(aicc),
+    #         "bic": float(bic),
+    #         "reml_nll": float(full_nll),
+    #         "msspe": None,
+    #         "msspe_std": None,
+    #         "msspe_n_runs": 0,
+    #         "description": description,
+    #         "trend_order": trend_order,
+    #         "trend_coefficients": beta_hat,
+    #         "n_trend_params": p,
+    #         "sigma2_hat": float(sigma2_hat),
+    #         "warnings": [],
+    #         "fitting_method": "reml",
+    #     }
 
     @staticmethod
     def _kriging_loocv(
@@ -5219,9 +5226,6 @@ class SingleVariogram:
         include_nugget: bool = True,
         max_components: int = 1,
         criterion: str = "aicc",
-        fitting_method: str = "reml",
-        reml_n_subset: int = 500,
-        trend_orders: Optional[List[int]] = None,
         msspe_n_subset: int = 500,
         msspe_n_runs: int = 10,
         msspe_prefilter: int = 0,
@@ -5231,16 +5235,10 @@ class SingleVariogram:
         """Fit candidate variogram models and select the best.
 
         Fits all combinations of ``model_types`` (up to ``max_components``
-        nested structures) using either Weighted Least Squares on the
-        binned empirical variogram or Restricted Maximum Likelihood on
-        the spatial sample.
+        nested structures) via Weighted Least Squares on the binned
+        empirical variogram using Cressie (1985) weights:
 
-        When ``fitting_method='reml'``, each covariance candidate is
-        fitted under every requested ``trend_orders``, and AICc (or
-        the chosen criterion) selects jointly across covariance
-        structure *and* trend order.  This follows the workflow used
-        by geoR's ``likfit`` (Ribeiro & Diggle, 2001): fit each
-        (trend, covariance) combination, compare AIC/BIC.
+            w_i = N(h_i) / gamma_hat(h_i)^2
 
         Parameters
         ----------
@@ -5262,35 +5260,6 @@ class SingleVariogram:
               closest to 1.0.  Requires spatial sample data
               (``return_sample=True`` in
               ``compute_empirical_variogram``).
-        fitting_method : {'reml', 'wls'}
-            How to fit models to the data.
-
-            - ``'reml'``: Restricted Maximum Likelihood — fits the
-              covariance model directly to the spatial sample points.
-              Jointly estimates trend and covariance via profiled
-              likelihood.  Gives theoretically valid AIC/BIC and
-              parameter uncertainty from the Hessian.  Requires
-              spatial sample data (``return_sample=True``).
-            - ``'wls'``: Weighted Least Squares — fits the model to the
-              binned empirical variogram using Cressie (1985) weights.
-              Does not estimate trend (assumes stationarity).
-        reml_n_subset : int
-            Subsample size for REML fitting (only used when
-            ``fitting_method='reml'``).  REML requires O(n³)
-            computation per likelihood evaluation; 500 is a good
-            trade-off between information and speed.
-        trend_orders : list of int, optional
-            Polynomial trend orders to try when
-            ``fitting_method='reml'``.  Each covariance candidate is
-            fitted under each trend order, and the information
-            criterion selects jointly.
-
-            - 0: constant mean (p=1).
-            - 1: linear in x, y (p=3).
-            - 2: quadratic in x, y (p=6).
-
-            Default: ``[0, 1]`` (try constant and linear).
-            Ignored when ``fitting_method='wls'``.
         msspe_n_subset : int
             Points per LOOCV evaluation (only used when
             ``criterion='msspe'``).
@@ -5308,8 +5277,9 @@ class SingleVariogram:
 
         References
         ----------
-        Ribeiro, P.J. & Diggle, P.J. (2001). geoR: A package for
-        geostatistical analysis. *R-NEWS*, 1(2), 14–18.
+        Cressie, N. (1985). Fitting variogram models by weighted least
+        squares. *Journal of the International Association for
+        Mathematical Geology*, 17(5), 563–586.
         """
         if self.lags is None or self.variogram is None:
             raise RuntimeError(
@@ -5317,73 +5287,15 @@ class SingleVariogram:
                 "Call compute_empirical_variogram() first."
             )
 
-        use_reml = fitting_method == "reml"
-
-        # REML requires spatial sample
-        if use_reml and (self.sample_coords is None or self.sample_values is None):
-            warnings.warn(
-                "No spatial sample available for REML fitting. "
-                "Re-run compute_empirical_variogram with return_sample=True. "
-                "Falling back to WLS.",
-                UserWarning,
-            )
-            use_reml = False
-
         if model_types is None:
             model_types = list(self.BOUNDED_MODELS)
-
-        if trend_orders is None:
-            trend_orders = [0, 1] if use_reml else [0]
 
         lags = self.lags
         variogram = self.variogram
         pair_counts = self.pair_counts
 
-        # ── prepare REML data (subsample + distance matrix) ──
-        reml_coords = None
-        reml_values = None
-        reml_dist = None
-
-        if use_reml:
-            coords_full = self.sample_coords
-            values_full = self.sample_values
-            n_full = len(values_full)
-
-            # subsample for computational tractability
-            if n_full > reml_n_subset:
-                rng = np.random.default_rng(seed)
-                idx = rng.choice(n_full, reml_n_subset, replace=False)
-                reml_coords = coords_full[idx]
-                reml_values = values_full[idx]
-            else:
-                reml_coords = coords_full
-                reml_values = values_full
-
-            # precompute distance matrix
-            dx = reml_coords[:, 0:1] - reml_coords[:, 0:1].T
-            dy = reml_coords[:, 1:2] - reml_coords[:, 1:2].T
-            reml_dist = np.sqrt(dx ** 2 + dy ** 2)
-
-            # ── diagnostic: compare REML sample variance with
-            #    empirical variogram to catch data mismatches early ──
-            _reml_var = float(np.var(reml_values))
-            _emp_max = float(np.nanmax(variogram))
-            if _reml_var > 0 and _emp_max > 0:
-                _ratio = _emp_max / _reml_var
-                if _ratio > 3.0 or _ratio < 0.33:
-                    warnings.warn(
-                        f"REML sample variance ({_reml_var:.4g}) differs "
-                        f"substantially from empirical variogram max "
-                        f"({_emp_max:.4g}), ratio={_ratio:.2f}. "
-                        f"The sample_values used for REML may not match "
-                        f"the data used to compute the empirical variogram. "
-                        f"n_reml={len(reml_values)}, "
-                        f"n_full={n_full}.",
-                        UserWarning,
-                        stacklevel=2,
-                    )
-
-        # ── prepare WLS weights (always needed for initial guesses) ──
+        # ── prepare Cressie (1985) WLS weights ──
+        # w_i = N(h_i) / γ̂(h_i)²
         gamma_sq = np.square(variogram)
         gamma_sq = np.where(
             gamma_sq < np.finfo(float).eps, np.finfo(float).eps, gamma_sq
@@ -5421,35 +5333,17 @@ class SingleVariogram:
                     except ValueError:
                         continue
 
-        # ── fit each candidate ──
-        # For REML, each covariance candidate is fitted under every
-        # requested trend order — joint selection across (trend, cov).
-        # This mirrors the geoR workflow of calling likfit() with
-        # different trend= settings and comparing AIC/BIC.
+        # ── fit each candidate via multi-start WLS ──
         self.fitted_models = []
         for cand in candidates:
-            if use_reml:
-                for t_order in trend_orders:
-                    # deep-copy the model so each (cov, trend) combo
-                    # gets its own independent model object
-                    import copy
-                    cand_copy = copy.deepcopy(cand)
-                    result = self._fit_single_composite_model_reml(
-                        cand_copy, reml_coords, reml_values, reml_dist,
-                        lags, variogram, trend_order=t_order,
-                    )
-                    if result is not None:
-                        self.fitted_models.append(result)
-            else:
-                result = self._fit_single_composite_model(
-                    cand, lags, variogram, None, weights
-                )
-                if result is not None:
-                    # WLS has no trend estimation
-                    result["trend_order"] = 0
-                    result["trend_coefficients"] = np.array([np.nan])
-                    result["n_trend_params"] = 1
-                    self.fitted_models.append(result)
+            result = self._fit_single_composite_model(
+                cand, lags, variogram, None, weights
+            )
+            if result is not None:
+                result["trend_order"] = 0
+                result["trend_coefficients"] = np.array([np.nan])
+                result["n_trend_params"] = 1
+                self.fitted_models.append(result)
 
         if not self.fitted_models:
             raise RuntimeError(
@@ -5560,7 +5454,6 @@ class SingleVariogram:
                 "MSSPE": m["msspe"],
                 "MSSPE_std": m["msspe_std"],
                 "params": m["params"].tolist(),
-                "fitting_method": m.get("fitting_method", "wls"),
             })
         df = pd.DataFrame(rows)
 
@@ -5637,6 +5530,14 @@ class SingleVariogram:
         # ── bottom panel: variogram ──
         ax = axs[1]
 
+        # If a median variogram was replaced, show it as faded reference
+        if hasattr(self, "_median_variogram") and self._median_variogram is not None:
+            ax.plot(
+                self._median_lags, self._median_variogram,
+                "s-", color="gray", markersize=3, alpha=0.4, zorder=3,
+                label="Median variogram (multi-sample)",
+            )
+
         # empirical variogram points
         ax.plot(
             lags, self.variogram,
@@ -5683,10 +5584,17 @@ class SingleVariogram:
         ax.set_ylabel("Semivariance")
 
         # legend
-        handles = [
+        handles = []
+        if hasattr(self, "_median_variogram") and self._median_variogram is not None:
+            handles.append(
+                Line2D([0], [0], marker="s", color="gray", alpha=0.4,
+                       linestyle="-", markersize=3,
+                       label="Median variogram (multi-sample)"),
+            )
+        handles.append(
             Line2D([0], [0], marker="o", color="blue",
                    linestyle="-", markersize=4, label="Empirical variogram"),
-        ]
+        )
         if include_model and self.best_model is not None:
             handles.append(
                 Line2D([0], [0], color="darkred", linewidth=2.2,
@@ -5766,9 +5674,6 @@ class GridVariogram:
         include_nugget: bool = True,
         max_components: int = 1,
         criterion: str = "aicc",
-        fitting_method: str = "reml",
-        reml_n_subset: int = 500,
-        trend_orders: Optional[List[int]] = None,
         msspe_n_subset: int = 500,
         msspe_n_runs: int = 10,
         msspe_prefilter: int = 0,
@@ -5781,7 +5686,7 @@ class GridVariogram:
         Each realisation draws ``n_samples`` independent spatial samples,
         computes one empirical variogram per sample, takes the **median**
         variogram across those samples, and (optionally) fits models to
-        that smoothed curve.
+        that smoothed curve via Weighted Least Squares.
 
         Parameters
         ----------
@@ -5802,19 +5707,6 @@ class GridVariogram:
         criterion : {'aicc', 'aic', 'bic', 'msspe'}
             Model selection criterion passed to each
             :meth:`SingleVariogram.fit_model`.
-        fitting_method : {'reml', 'wls'}
-            Fitting method passed to each
-            :meth:`SingleVariogram.fit_model`.  ``'reml'`` fits the
-            covariance model directly to the spatial sample via
-            Restricted Maximum Likelihood; ``'wls'`` fits to the binned
-            empirical variogram via Weighted Least Squares.
-        reml_n_subset : int
-            Subsample size for REML fitting (passed through to
-            :meth:`SingleVariogram.fit_model`).
-        trend_orders : list of int, optional
-            Polynomial trend orders to try (passed through to
-            :meth:`SingleVariogram.fit_model`).  Default: ``[0, 1]``
-            for REML, ``[0]`` for WLS.
         model_types, include_nugget, max_components, msspe_n_subset,
         msspe_n_runs, msspe_prefilter
             Passed through to :meth:`SingleVariogram.fit_model`.
@@ -5830,10 +5722,8 @@ class GridVariogram:
         self.n_failed = 0
         self.n_samples = n_samples
 
-        # REML and MSSPE both need the spatial sample retained
-        needs_sample = fit_model and (
-            fitting_method == "reml" or criterion == "msspe"
-        )
+        # MSSPE needs the spatial sample retained
+        needs_sample = fit_model and criterion == "msspe"
 
         for i in range(self.n_realizations):
             run_seed = int(child_seeds[i].generate_state(1)[0])
@@ -5872,9 +5762,6 @@ class GridVariogram:
                         include_nugget=include_nugget,
                         max_components=max_components,
                         criterion=criterion,
-                        fitting_method=fitting_method,
-                        reml_n_subset=reml_n_subset,
-                        trend_orders=trend_orders,
                         msspe_n_subset=msspe_n_subset,
                         msspe_n_runs=msspe_n_runs,
                         msspe_prefilter=msspe_prefilter,
@@ -5894,8 +5781,6 @@ class GridVariogram:
                         msspe = sv.best_model.get("msspe")
                         if msspe is not None:
                             parts.append(f"MSSPE={msspe:.3f}")
-                        fm = sv.best_model.get("fitting_method", "?")
-                        parts.append(f"[{fm}]")
                         status = "  ".join(parts)
                     print(f"  [{i + 1}/{self.n_realizations}] {status}")
 
@@ -5933,7 +5818,7 @@ class GridVariogram:
         variograms.  Pair counts are averaged (mean) since they inform
         Cressie weights.  If ``return_sample`` is True, the coordinates
         and values from one of the samples are retained for downstream
-        MSSPE computation.
+        MSSPE / LOOCV computation.
 
         Parameters
         ----------
