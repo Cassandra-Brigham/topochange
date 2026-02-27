@@ -5156,6 +5156,7 @@ class GridVariogram:
         bin_width: float,
         max_lag_multiplier: float = 1 / 3,
         estimator: str = "matheron",
+        n_samples: int = 1,
         # model fitting parameters
         fit_model: bool = True,
         model_types: Optional[List[str]] = None,
@@ -5171,17 +5172,24 @@ class GridVariogram:
     ) -> None:
         """Run the ensemble of SingleVariogram realisations.
 
-        Each realisation draws one independent spatial sample, computes
-        one empirical variogram, and (optionally) fits models.  The
-        number of realisations is set by ``n_realizations`` at
-        construction time.
+        Each realisation draws ``n_samples`` independent spatial samples,
+        computes one empirical variogram per sample, takes the **median**
+        variogram across those samples, and (optionally) fits models to
+        that smoothed curve.
 
         Parameters
         ----------
         area_side, samples_per_area, max_samples, bin_width,
         max_lag_multiplier, estimator
             Passed through to
-            :meth:`SingleVariogram.compute_empirical_variogram`.
+            :meth:`SingleVariogram.compute_empirical_variogram` (or the
+            internal sampling helper when ``n_samples > 1``).
+        n_samples : int
+            Number of independent spatial samples drawn *within* each
+            realisation.  When ``n_samples > 1``, the median empirical
+            variogram is used as the fitting target, producing more
+            stable fits.  Default is 1 (single sample per realisation,
+            same as before).
         fit_model : bool
             If True, run :meth:`SingleVariogram.fit_model` on each
             realisation and aggregate model selection results.
@@ -5201,21 +5209,38 @@ class GridVariogram:
 
         self.variograms = []
         self.n_failed = 0
+        self.n_samples = n_samples
 
         for i in range(self.n_realizations):
             run_seed = int(child_seeds[i].generate_state(1)[0])
             sv = SingleVariogram(self.rdh)
             try:
-                sv.compute_empirical_variogram(
-                    area_side=area_side,
-                    samples_per_area=samples_per_area,
-                    max_samples=max_samples,
-                    bin_width=bin_width,
-                    max_lag_multiplier=max_lag_multiplier,
-                    seed=run_seed,
-                    estimator=estimator,
-                    return_sample=(fit_model and criterion == "msspe"),
-                )
+                if n_samples <= 1:
+                    # ── single sample per realisation (original behaviour) ──
+                    sv.compute_empirical_variogram(
+                        area_side=area_side,
+                        samples_per_area=samples_per_area,
+                        max_samples=max_samples,
+                        bin_width=bin_width,
+                        max_lag_multiplier=max_lag_multiplier,
+                        seed=run_seed,
+                        estimator=estimator,
+                        return_sample=(fit_model and criterion == "msspe"),
+                    )
+                else:
+                    # ── n_samples: draw multiple, fit on median ─────────
+                    self._compute_median_variogram(
+                        sv,
+                        n_samples=n_samples,
+                        area_side=area_side,
+                        samples_per_area=samples_per_area,
+                        max_samples=max_samples,
+                        bin_width=bin_width,
+                        max_lag_multiplier=max_lag_multiplier,
+                        estimator=estimator,
+                        return_sample=(fit_model and criterion == "msspe"),
+                        seed=run_seed,
+                    )
 
                 if fit_model:
                     sv.fit_model(
@@ -5254,6 +5279,94 @@ class GridVariogram:
         # ── aggregate results ──
         if fit_model:
             self._aggregate_model_results()
+
+    @staticmethod
+    def _compute_median_variogram(
+        sv: "SingleVariogram",
+        n_samples: int,
+        area_side: float,
+        samples_per_area: float,
+        max_samples: int,
+        bin_width: float,
+        max_lag_multiplier: float,
+        estimator: str,
+        return_sample: bool,
+        seed: int,
+    ) -> None:
+        """Draw *n_samples* independent variograms and assign the median to *sv*.
+
+        The median is taken bin-by-bin across the ``n_samples`` empirical
+        variograms.  Pair counts are averaged (mean) since they inform
+        Cressie weights.  If ``return_sample`` is True, the coordinates
+        and values from one of the samples are retained for downstream
+        MSSPE computation.
+
+        Parameters
+        ----------
+        sv : SingleVariogram
+            Target object whose attributes will be populated.
+        n_samples : int
+            Number of independent spatial samples to draw.
+        Other parameters
+            Same semantics as
+            :meth:`SingleVariogram.compute_empirical_variogram`.
+        """
+        # compute max_lag (same logic as SingleVariogram.compute_empirical_variogram)
+        xs = sv.rdh.rioxarray_obj.x.values
+        ys = sv.rdh.rioxarray_obj.y.values
+        x_extent = float(np.max(xs) - np.min(xs))
+        y_extent = float(np.max(ys) - np.min(ys))
+        diag = np.sqrt(x_extent ** 2 + y_extent ** 2)
+        max_lag = float(diag * max_lag_multiplier)
+
+        # generate child seeds for the inner samples
+        inner_ss = np.random.SeedSequence(seed)
+        inner_seeds = inner_ss.spawn(n_samples)
+
+        all_gamma = []
+        all_counts = []
+        kept_coords = None
+        kept_values = None
+
+        for j in range(n_samples):
+            s = int(inner_seeds[j].generate_state(1)[0])
+            bin_counts, gamma, n_bins_run, coords, values = (
+                sv._single_variogram_run(
+                    area_side, samples_per_area, max_samples,
+                    bin_width, max_lag, estimator, seed=s,
+                )
+            )
+            all_gamma.append(gamma)
+            all_counts.append(bin_counts.astype(float))
+
+            # keep the first valid sample for MSSPE
+            if return_sample and kept_coords is None:
+                kept_coords = coords
+                kept_values = values
+
+        # stack and compute median variogram, mean pair counts
+        gamma_arr = np.array(all_gamma)        # (n_samples, n_bins)
+        count_arr = np.array(all_counts)
+
+        with np.errstate(all="ignore"):
+            median_gamma = np.nanmedian(gamma_arr, axis=0)
+            mean_counts = np.nanmean(count_arr, axis=0)
+
+        # keep only valid (non-NaN) bins
+        valid = ~np.isnan(median_gamma)
+        n_kept = int(np.sum(valid))
+
+        sv.variogram = median_gamma[valid]
+        sv.pair_counts = mean_counts[valid]
+        sv.lags = np.linspace(
+            bin_width / 2, bin_width * n_kept - bin_width / 2, n_kept
+        )
+        sv.n_bins = n_kept
+        sv.estimator = estimator
+
+        if return_sample and kept_coords is not None:
+            sv.sample_coords = kept_coords
+            sv.sample_values = kept_values
 
     def _aggregate_model_results(self) -> None:
         """Aggregate candidate results across all realisations.
