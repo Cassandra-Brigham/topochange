@@ -4642,18 +4642,394 @@ class SingleVariogram:
             aic = n_eff * np.log(rss / max(n_eff, 1)) + 2 * k
             bic = n_eff * np.log(rss / max(n_eff, 1)) + k * np.log(max(n_eff, 1))
 
+        # AICc (small-sample corrected)
+        denom = max(n_eff - k - 1, 1)
+        aicc = float(aic) + 2 * k * (k + 1) / denom
+
         return {
             "model": model,
             "params": popt,
             "param_cov": pcov,
             "rss": rss,
             "aic": float(aic),
+            "aicc": float(aicc),
             "bic": float(bic),
             "msspe": None,
             "msspe_std": None,
             "msspe_n_runs": 0,
             "description": model.structural_description(),
             "warnings": [],
+            "fitting_method": "wls",
+        }
+
+    # ── REML fitting ─────────────────────────────────────────────
+
+    @staticmethod
+    def _build_trend_matrix(
+        coords: np.ndarray,
+        trend_order: int = 0,
+    ) -> np.ndarray:
+        """Build the trend design matrix F for given coordinates.
+
+        Follows the convention used by geoR's ``likfit`` function
+        (Ribeiro & Diggle, 2001), where ``trend`` = ``"cte"``
+        corresponds to ``trend_order=0``, ``"1st"`` to
+        ``trend_order=1``, and ``"2nd"`` to ``trend_order=2``.
+
+        Parameters
+        ----------
+        coords : (n, 2) array
+            Spatial coordinates.
+        trend_order : {0, 1, 2}
+            Polynomial order of the spatial trend.
+
+            - 0: constant mean only, F = [1] (p=1).
+            - 1: linear, F = [1, x, y] (p=3).
+            - 2: quadratic, F = [1, x, y, x², xy, y²] (p=6).
+
+        Returns
+        -------
+        F : (n, p) array
+            Design matrix.
+
+        References
+        ----------
+        Ribeiro, P.J. & Diggle, P.J. (2001). geoR: A package for
+        geostatistical analysis. *R-NEWS*, 1(2), 14–18.
+        """
+        n = len(coords)
+        x = coords[:, 0]
+        y = coords[:, 1]
+
+        if trend_order == 0:
+            return np.ones((n, 1))
+        elif trend_order == 1:
+            return np.column_stack([np.ones(n), x, y])
+        elif trend_order == 2:
+            return np.column_stack([
+                np.ones(n), x, y, x ** 2, x * y, y ** 2,
+            ])
+        else:
+            raise ValueError(
+                f"trend_order must be 0, 1, or 2, got {trend_order}"
+            )
+
+    @staticmethod
+    def _reml_neg_log_likelihood(
+        params: np.ndarray,
+        model: CompositeVariogramModel,
+        dist_matrix: np.ndarray,
+        values: np.ndarray,
+        F: np.ndarray,
+    ) -> float:
+        """Negative REML log-likelihood for a variogram model.
+
+        Generalised to an arbitrary trend design matrix *F*,
+        following the formulation in geoR's ``likGRF.R``
+        (Ribeiro & Diggle, 2001) and Cressie (1993, §2.6).
+
+        Parameters
+        ----------
+        params : (k,) array
+            Variogram model parameters.
+        model : CompositeVariogramModel
+            Model whose ``__call__`` returns γ(h).
+        dist_matrix : (n, n) array
+            Pre-computed pairwise distances.
+        values : (n,) array
+            Observed values at sample locations.
+        F : (n, p) array
+            Trend design matrix.  For a constant mean, this is an
+            (n, 1) column of ones.
+
+        Returns
+        -------
+        float
+            Negative REML log-likelihood (to be minimised).
+
+        Notes
+        -----
+        For a Gaussian spatial model Z ~ N(Fβ, C(θ)) the REML
+        log-likelihood is::
+
+            -2 ℓ_REML = (n-p)log(2π) + log|C| + log|F'C⁻¹F|
+                        + r'C⁻¹r
+
+        where β̂ = (F'C⁻¹F)⁻¹ F'C⁻¹z and r = z − Fβ̂.
+
+        When ``F = 1`` (constant mean), this reduces to the
+        classical formula with ``p = 1``.
+
+        This mirrors the computation in geoR ``likGRF.R``::
+
+            ivx  <- solve(V, xmat)
+            xivx <- crossprod(ivx, xmat)
+            betahat <- solve(xivx, crossprod(ivx, z))
+            res  <- z - xmat %*% betahat
+            ssres <- drop(crossprod(res, solve(V, res)))
+            choldet <- sum(log(diag(chol(xivx))))
+            negloglik <- ((n-p)/2)*log(ssres) + log_det_V_half + choldet
+
+        References
+        ----------
+        Patterson, H.D. & Thompson, R. (1971). Recovery of inter-block
+        information when block sizes are unequal. *Biometrika*, 58,
+        545–554.
+
+        Ribeiro, P.J. & Diggle, P.J. (2001). geoR: A package for
+        geostatistical analysis. *R-NEWS*, 1(2), 14–18.
+        Source: ``github.com/rundel/geoR/blob/master/R/likGRF.R``
+
+        Cressie, N. (1993). *Statistics for Spatial Data*, rev. ed.,
+        Wiley. §2.6.
+        """
+        n = len(values)
+        p = F.shape[1]
+        model.set_params(params)
+
+        # total sill
+        total_sill = model.get_total_sill()
+        if total_sill is None or total_sill <= 0:
+            return 1e20
+
+        # build covariance matrix: C(h) = sill_total - γ(h)
+        gamma_matrix = model(dist_matrix)
+        C = total_sill - gamma_matrix
+
+        # ensure diagonal is exactly total_sill (numerical safety)
+        np.fill_diagonal(C, total_sill)
+
+        # add small jitter for numerical stability
+        C += np.eye(n) * (total_sill * 1e-8)
+
+        # Cholesky decomposition of C
+        try:
+            L = np.linalg.cholesky(C)
+        except np.linalg.LinAlgError:
+            return 1e20  # not positive definite → reject
+
+        # log|C| = 2 * sum(log(diag(L)))
+        log_det_C = 2.0 * np.sum(np.log(np.diag(L)))
+
+        # ── solve C⁻¹F and C⁻¹z via triangular solves ──
+        # (mirrors geoR: ivx <- solve(V, xmat))
+        C_inv_F = np.linalg.solve(L, F)          # L⁻¹ F
+        C_inv_F = np.linalg.solve(L.T, C_inv_F)  # C⁻¹ F
+
+        alpha = np.linalg.solve(L, values)        # L⁻¹ z
+        C_inv_z = np.linalg.solve(L.T, alpha)     # C⁻¹ z
+
+        # ── F'C⁻¹F  (p × p) and its log-determinant ──
+        # (mirrors geoR: xivx <- crossprod(ivx, xmat))
+        FtCinvF = F.T @ C_inv_F
+
+        try:
+            L_FtCF = np.linalg.cholesky(FtCinvF)
+        except np.linalg.LinAlgError:
+            return 1e20
+        log_det_FtCinvF = 2.0 * np.sum(np.log(np.diag(L_FtCF)))
+
+        # ── GLS trend estimate: β̂ = (F'C⁻¹F)⁻¹ F'C⁻¹z ──
+        # (mirrors geoR: betahat <- solve(xivx, crossprod(ivx, z)))
+        FtCinvz = F.T @ C_inv_z
+        beta_hat = np.linalg.solve(FtCinvF, FtCinvz)
+
+        # ── residuals and quadratic form r'C⁻¹r ──
+        r = values - F @ beta_hat
+        alpha_r = np.linalg.solve(L, r)
+        r_C_inv_r = alpha_r @ alpha_r
+
+        # ── REML negative log-likelihood ──
+        nll = 0.5 * (
+            (n - p) * np.log(2 * np.pi)
+            + log_det_C
+            + log_det_FtCinvF
+            + r_C_inv_r
+        )
+
+        if not np.isfinite(nll):
+            return 1e20
+
+        return float(nll)
+
+    _TREND_LABELS = {0: "cte", 1: "1st", 2: "2nd"}
+
+    def _fit_single_composite_model_reml(
+        self,
+        model: CompositeVariogramModel,
+        coords: np.ndarray,
+        values: np.ndarray,
+        dist_matrix: np.ndarray,
+        lags: np.ndarray,
+        variogram: np.ndarray,
+        trend_order: int = 0,
+        n_restarts: int = 8,
+    ) -> Optional[Dict[str, Any]]:
+        """Fit one composite model via REML.
+
+        Adapts the joint trend + covariance estimation approach
+        from geoR's ``likfit`` (Ribeiro & Diggle, 2001).  The
+        trend design matrix *F* is built from ``coords`` at the
+        requested polynomial order and passed into the REML
+        log-likelihood, where the trend coefficients β are
+        profiled out analytically at each optimiser step.
+
+        Parameters
+        ----------
+        model : CompositeVariogramModel
+            Candidate model to fit.
+        coords : (n, 2) array
+            Spatial coordinates of sample points.
+        values : (n,) array
+            Observed values at sample locations.
+        dist_matrix : (n, n) array
+            Pre-computed pairwise distance matrix.
+        lags, variogram : arrays
+            Empirical variogram (used only for generating initial
+            guesses and bounds, not for fitting).
+        trend_order : {0, 1, 2}
+            Polynomial trend order.  0 = constant mean (p=1),
+            1 = linear in x,y (p=3), 2 = quadratic (p=6).
+            Matches geoR's ``"cte"`` / ``"1st"`` / ``"2nd"``.
+        n_restarts : int
+            Number of multi-start optimisations.
+
+        Returns
+        -------
+        dict or None
+            Fitted model dict with keys: model, params, param_cov,
+            aic, aicc, bic, reml_nll, trend_order, trend_coefficients,
+            description, etc.
+            None if all optimisation attempts fail.
+
+        References
+        ----------
+        Ribeiro, P.J. & Diggle, P.J. (2001). geoR: A package for
+        geostatistical analysis. *R-NEWS*, 1(2), 14–18.
+        Source: ``github.com/rundel/geoR/blob/master/R/likGRF.R``
+        """
+        from scipy.optimize import minimize
+
+        # ── build trend design matrix ──
+        F = self._build_trend_matrix(coords, trend_order)
+        p = F.shape[1]  # number of trend parameters
+
+        p0_base = model.default_guess(lags, variogram)
+        bounds_pair = model.bounds(lags, variogram)
+        lb = np.array(bounds_pair[0])
+        ub = np.array(bounds_pair[1])
+
+        # scipy bounds format
+        sp_bounds = list(zip(lb, ub))
+
+        # nugget pre-estimation
+        if model.include_nugget:
+            nugget_pre = self._estimate_nugget_from_short_lags(lags, variogram)
+            nugget_idx = model.n_params - 1
+            p0_base[nugget_idx] = np.clip(
+                nugget_pre, lb[nugget_idx], ub[nugget_idx]
+            )
+
+        # generate multi-start guesses
+        rng = np.random.default_rng()
+        guesses = self._generate_multistart_guesses(
+            p0_base, bounds_pair, n_restarts, rng
+        )
+
+        best_result = None
+        best_nll = np.inf
+        n = len(values)
+
+        for p0 in guesses:
+            try:
+                res = minimize(
+                    self._reml_neg_log_likelihood,
+                    p0,
+                    args=(model, dist_matrix, values, F),
+                    method="L-BFGS-B",
+                    bounds=sp_bounds,
+                    options={"maxiter": 500, "ftol": 1e-10},
+                )
+                if res.success and np.isfinite(res.fun) and res.fun < best_nll:
+                    best_nll = res.fun
+                    best_result = res
+            except Exception:
+                continue
+
+        if best_result is None:
+            return None
+
+        popt = best_result.x
+        nll = best_result.fun
+        model.set_params(popt)
+        k_cov = model.n_params       # covariance parameters
+        k_total = k_cov + p           # total estimated parameters
+
+        # ── recover GLS trend coefficients β̂ ──
+        # (mirrors geoR: betahat <- solve(xivx, crossprod(ivx, z)))
+        total_sill = model.get_total_sill()
+        gamma_matrix = model(dist_matrix)
+        C = total_sill - gamma_matrix
+        np.fill_diagonal(C, total_sill)
+        C += np.eye(n) * (total_sill * 1e-8)
+        try:
+            L = np.linalg.cholesky(C)
+            C_inv_F = np.linalg.solve(L.T, np.linalg.solve(L, F))
+            C_inv_z = np.linalg.solve(L.T, np.linalg.solve(L, values))
+            FtCinvF = F.T @ C_inv_F
+            FtCinvz = F.T @ C_inv_z
+            beta_hat = np.linalg.solve(FtCinvF, FtCinvz)
+        except np.linalg.LinAlgError:
+            beta_hat = np.full(p, np.nan)
+
+        # ── REML-based information criteria ──
+        # degrees of freedom for REML: n − p
+        n_reml = n - p
+        reml_ll = -nll
+        aic = 2 * k_total - 2 * reml_ll
+        bic = k_total * np.log(n_reml) - 2 * reml_ll
+        denom = max(n_reml - k_total - 1, 1)
+        aicc = aic + 2 * k_total * (k_total + 1) / denom
+
+        # parameter covariance from inverse Hessian
+        # (covariance parameters only; trend β has its own uncertainty
+        # from (F'C⁻¹F)⁻¹, but we don't propagate that here)
+        param_cov = None
+        if hasattr(best_result, "hess_inv"):
+            hi = best_result.hess_inv
+            if hasattr(hi, "todense"):
+                param_cov = np.array(hi.todense())
+            else:
+                param_cov = np.array(hi)
+        if param_cov is None:
+            param_cov = np.full((k_cov, k_cov), np.nan)
+
+        # ── build description including trend ──
+        trend_label = self._TREND_LABELS.get(trend_order, f"poly{trend_order}")
+        base_desc = model.structural_description()
+        if trend_order > 0:
+            description = f"{base_desc} | trend={trend_label}"
+        else:
+            description = base_desc
+
+        return {
+            "model": model,
+            "params": popt,
+            "param_cov": param_cov,
+            "rss": np.nan,  # not applicable for REML
+            "aic": float(aic),
+            "aicc": float(aicc),
+            "bic": float(bic),
+            "reml_nll": float(nll),
+            "msspe": None,
+            "msspe_std": None,
+            "msspe_n_runs": 0,
+            "description": description,
+            "trend_order": trend_order,
+            "trend_coefficients": beta_hat,
+            "n_trend_params": p,
+            "warnings": [],
+            "fitting_method": "reml",
         }
 
     @staticmethod
@@ -4753,7 +5129,10 @@ class SingleVariogram:
         model_types: Optional[List[str]] = None,
         include_nugget: bool = True,
         max_components: int = 1,
-        criterion: str = "msspe",
+        criterion: str = "aicc",
+        fitting_method: str = "reml",
+        reml_n_subset: int = 500,
+        trend_orders: Optional[List[int]] = None,
         msspe_n_subset: int = 500,
         msspe_n_runs: int = 10,
         msspe_prefilter: int = 0,
@@ -4763,8 +5142,16 @@ class SingleVariogram:
         """Fit candidate variogram models and select the best.
 
         Fits all combinations of ``model_types`` (up to ``max_components``
-        nested structures), computes AIC/BIC for each, and optionally
-        evaluates MSSPE via kriging leave-one-out cross-validation.
+        nested structures) using either Weighted Least Squares on the
+        binned empirical variogram or Restricted Maximum Likelihood on
+        the spatial sample.
+
+        When ``fitting_method='reml'``, each covariance candidate is
+        fitted under every requested ``trend_orders``, and AICc (or
+        the chosen criterion) selects jointly across covariance
+        structure *and* trend order.  This follows the workflow used
+        by geoR's ``likfit`` (Ribeiro & Diggle, 2001): fit each
+        (trend, covariance) combination, compare AIC/BIC.
 
         Parameters
         ----------
@@ -4775,15 +5162,46 @@ class SingleVariogram:
             Whether to generate with-nugget and without-nugget variants.
         max_components : int
             Maximum nested structures per candidate (1–3).
-        criterion : {'msspe', 'aic', 'bic'}
+        criterion : {'aicc', 'aic', 'bic', 'msspe'}
             Model selection criterion.
 
-            - ``'msspe'``: select the model whose kriging LOOCV MSSPE is
-              closest to 1.0 (|MSSPE − 1| minimised).  Requires spatial
-              sample data (``return_sample=True`` in
-              ``compute_empirical_variogram``).
+            - ``'aicc'``: select by minimum corrected Akaike Information
+              Criterion (recommended, especially for small n/k ratios).
             - ``'aic'``: select by minimum Akaike Information Criterion.
             - ``'bic'``: select by minimum Bayesian Information Criterion.
+            - ``'msspe'``: select the model whose kriging LOOCV MSSPE is
+              closest to 1.0.  Requires spatial sample data
+              (``return_sample=True`` in
+              ``compute_empirical_variogram``).
+        fitting_method : {'reml', 'wls'}
+            How to fit models to the data.
+
+            - ``'reml'``: Restricted Maximum Likelihood — fits the
+              covariance model directly to the spatial sample points.
+              Jointly estimates trend and covariance via profiled
+              likelihood.  Gives theoretically valid AIC/BIC and
+              parameter uncertainty from the Hessian.  Requires
+              spatial sample data (``return_sample=True``).
+            - ``'wls'``: Weighted Least Squares — fits the model to the
+              binned empirical variogram using Cressie (1985) weights.
+              Does not estimate trend (assumes stationarity).
+        reml_n_subset : int
+            Subsample size for REML fitting (only used when
+            ``fitting_method='reml'``).  REML requires O(n³)
+            computation per likelihood evaluation; 500 is a good
+            trade-off between information and speed.
+        trend_orders : list of int, optional
+            Polynomial trend orders to try when
+            ``fitting_method='reml'``.  Each covariance candidate is
+            fitted under each trend order, and the information
+            criterion selects jointly.
+
+            - 0: constant mean (p=1).
+            - 1: linear in x, y (p=3).
+            - 2: quadratic in x, y (p=6).
+
+            Default: ``[0, 1]`` (try constant and linear).
+            Ignored when ``fitting_method='wls'``.
         msspe_n_subset : int
             Points per LOOCV evaluation (only used when
             ``criterion='msspe'``).
@@ -4792,13 +5210,17 @@ class SingleVariogram:
         msspe_prefilter : int
             If > 0, evaluate MSSPE only on the top-N models by AIC.
         seed : int, optional
-            Seed for LOOCV reproducibility.
+            Seed for reproducibility.
 
         Returns
         -------
         pd.DataFrame
-            Criteria table with columns: model, AIC, BIC, MSSPE,
-            MSSPE_std, params, sorted by the chosen criterion.
+            Criteria table sorted by the chosen criterion.
+
+        References
+        ----------
+        Ribeiro, P.J. & Diggle, P.J. (2001). geoR: A package for
+        geostatistical analysis. *R-NEWS*, 1(2), 14–18.
         """
         if self.lags is None or self.variogram is None:
             raise RuntimeError(
@@ -4806,14 +5228,54 @@ class SingleVariogram:
                 "Call compute_empirical_variogram() first."
             )
 
+        use_reml = fitting_method == "reml"
+
+        # REML requires spatial sample
+        if use_reml and (self.sample_coords is None or self.sample_values is None):
+            warnings.warn(
+                "No spatial sample available for REML fitting. "
+                "Re-run compute_empirical_variogram with return_sample=True. "
+                "Falling back to WLS.",
+                UserWarning,
+            )
+            use_reml = False
+
         if model_types is None:
             model_types = list(self.BOUNDED_MODELS)
+
+        if trend_orders is None:
+            trend_orders = [0, 1] if use_reml else [0]
 
         lags = self.lags
         variogram = self.variogram
         pair_counts = self.pair_counts
 
-        # compute Cressie weights
+        # ── prepare REML data (subsample + distance matrix) ──
+        reml_coords = None
+        reml_values = None
+        reml_dist = None
+
+        if use_reml:
+            coords_full = self.sample_coords
+            values_full = self.sample_values
+            n_full = len(values_full)
+
+            # subsample for computational tractability
+            if n_full > reml_n_subset:
+                rng = np.random.default_rng(seed)
+                idx = rng.choice(n_full, reml_n_subset, replace=False)
+                reml_coords = coords_full[idx]
+                reml_values = values_full[idx]
+            else:
+                reml_coords = coords_full
+                reml_values = values_full
+
+            # precompute distance matrix
+            dx = reml_coords[:, 0:1] - reml_coords[:, 0:1].T
+            dy = reml_coords[:, 1:2] - reml_coords[:, 1:2].T
+            reml_dist = np.sqrt(dx ** 2 + dy ** 2)
+
+        # ── prepare WLS weights (always needed for initial guesses) ──
         gamma_sq = np.square(variogram)
         gamma_sq = np.where(
             gamma_sq < np.finfo(float).eps, np.finfo(float).eps, gamma_sq
@@ -4852,13 +5314,34 @@ class SingleVariogram:
                         continue
 
         # ── fit each candidate ──
+        # For REML, each covariance candidate is fitted under every
+        # requested trend order — joint selection across (trend, cov).
+        # This mirrors the geoR workflow of calling likfit() with
+        # different trend= settings and comparing AIC/BIC.
         self.fitted_models = []
         for cand in candidates:
-            result = self._fit_single_composite_model(
-                cand, lags, variogram, None, weights
-            )
-            if result is not None:
-                self.fitted_models.append(result)
+            if use_reml:
+                for t_order in trend_orders:
+                    # deep-copy the model so each (cov, trend) combo
+                    # gets its own independent model object
+                    import copy
+                    cand_copy = copy.deepcopy(cand)
+                    result = self._fit_single_composite_model_reml(
+                        cand_copy, reml_coords, reml_values, reml_dist,
+                        lags, variogram, trend_order=t_order,
+                    )
+                    if result is not None:
+                        self.fitted_models.append(result)
+            else:
+                result = self._fit_single_composite_model(
+                    cand, lags, variogram, None, weights
+                )
+                if result is not None:
+                    # WLS has no trend estimation
+                    result["trend_order"] = 0
+                    result["trend_coefficients"] = np.array([np.nan])
+                    result["n_trend_params"] = 1
+                    self.fitted_models.append(result)
 
         if not self.fitted_models:
             raise RuntimeError(
@@ -4871,7 +5354,7 @@ class SingleVariogram:
             warnings.warn(
                 "No spatial sample available for MSSPE computation. "
                 "Re-run compute_empirical_variogram with return_sample=True. "
-                "Falling back to AIC selection.",
+                "Falling back to AICc selection.",
                 UserWarning,
             )
             compute_msspe = False
@@ -4882,7 +5365,7 @@ class SingleVariogram:
 
             # determine which models to evaluate
             if msspe_prefilter > 0 and len(self.fitted_models) > msspe_prefilter:
-                ranked = np.argsort([m["aic"] for m in self.fitted_models])
+                ranked = np.argsort([m["aicc"] for m in self.fitted_models])
                 eval_idx = set(ranked[:msspe_prefilter].tolist())
             else:
                 eval_idx = set(range(len(self.fitted_models)))
@@ -4949,8 +5432,9 @@ class SingleVariogram:
             ]
         elif criterion == "bic":
             scores = [m["bic"] for m in self.fitted_models]
+        elif criterion == "aicc":
+            scores = [m["aicc"] for m in self.fitted_models]
         else:
-            # default to AIC (also used as fallback when MSSPE unavailable)
             scores = [m["aic"] for m in self.fitted_models]
 
         best_idx = int(np.argmin(scores))
@@ -4961,11 +5445,14 @@ class SingleVariogram:
         for m in self.fitted_models:
             rows.append({
                 "model": m["description"],
+                "trend_order": m.get("trend_order", 0),
                 "AIC": m["aic"],
+                "AICc": m["aicc"],
                 "BIC": m["bic"],
                 "MSSPE": m["msspe"],
                 "MSSPE_std": m["msspe_std"],
                 "params": m["params"].tolist(),
+                "fitting_method": m.get("fitting_method", "wls"),
             })
         df = pd.DataFrame(rows)
 
@@ -4979,6 +5466,8 @@ class SingleVariogram:
             )
         elif criterion == "bic":
             df = df.sort_values("BIC")
+        elif criterion == "aicc":
+            df = df.sort_values("AICc")
         else:
             df = df.sort_values("AIC")
         df = df.reset_index(drop=True)
@@ -5143,6 +5632,7 @@ class GridVariogram:
         self.model_counts: Optional[Dict[str, int]] = None
         self.model_fractions: Optional[Dict[str, float]] = None
         self.central_model_name: Optional[str] = None
+        self.central_trend_order: int = 0
         self.central_params: Optional[Dict[str, Dict[str, float]]] = None
         self.all_criteria: Optional[pd.DataFrame] = None
         self.n_failed: int = 0
@@ -5162,7 +5652,10 @@ class GridVariogram:
         model_types: Optional[List[str]] = None,
         include_nugget: bool = True,
         max_components: int = 1,
-        criterion: str = "msspe",
+        criterion: str = "aicc",
+        fitting_method: str = "reml",
+        reml_n_subset: int = 500,
+        trend_orders: Optional[List[int]] = None,
         msspe_n_subset: int = 500,
         msspe_n_runs: int = 10,
         msspe_prefilter: int = 0,
@@ -5193,9 +5686,22 @@ class GridVariogram:
         fit_model : bool
             If True, run :meth:`SingleVariogram.fit_model` on each
             realisation and aggregate model selection results.
-        criterion : {'msspe', 'aic', 'bic'}
+        criterion : {'aicc', 'aic', 'bic', 'msspe'}
             Model selection criterion passed to each
             :meth:`SingleVariogram.fit_model`.
+        fitting_method : {'reml', 'wls'}
+            Fitting method passed to each
+            :meth:`SingleVariogram.fit_model`.  ``'reml'`` fits the
+            covariance model directly to the spatial sample via
+            Restricted Maximum Likelihood; ``'wls'`` fits to the binned
+            empirical variogram via Weighted Least Squares.
+        reml_n_subset : int
+            Subsample size for REML fitting (passed through to
+            :meth:`SingleVariogram.fit_model`).
+        trend_orders : list of int, optional
+            Polynomial trend orders to try (passed through to
+            :meth:`SingleVariogram.fit_model`).  Default: ``[0, 1]``
+            for REML, ``[0]`` for WLS.
         model_types, include_nugget, max_components, msspe_n_subset,
         msspe_n_runs, msspe_prefilter
             Passed through to :meth:`SingleVariogram.fit_model`.
@@ -5211,6 +5717,11 @@ class GridVariogram:
         self.n_failed = 0
         self.n_samples = n_samples
 
+        # REML and MSSPE both need the spatial sample retained
+        needs_sample = fit_model and (
+            fitting_method == "reml" or criterion == "msspe"
+        )
+
         for i in range(self.n_realizations):
             run_seed = int(child_seeds[i].generate_state(1)[0])
             sv = SingleVariogram(self.rdh)
@@ -5225,7 +5736,7 @@ class GridVariogram:
                         max_lag_multiplier=max_lag_multiplier,
                         seed=run_seed,
                         estimator=estimator,
-                        return_sample=(fit_model and criterion == "msspe"),
+                        return_sample=needs_sample,
                     )
                 else:
                     # ── n_samples: draw multiple, fit on median ─────────
@@ -5238,7 +5749,7 @@ class GridVariogram:
                         bin_width=bin_width,
                         max_lag_multiplier=max_lag_multiplier,
                         estimator=estimator,
-                        return_sample=(fit_model and criterion == "msspe"),
+                        return_sample=needs_sample,
                         seed=run_seed,
                     )
 
@@ -5248,6 +5759,9 @@ class GridVariogram:
                         include_nugget=include_nugget,
                         max_components=max_components,
                         criterion=criterion,
+                        fitting_method=fitting_method,
+                        reml_n_subset=reml_n_subset,
+                        trend_orders=trend_orders,
                         msspe_n_subset=msspe_n_subset,
                         msspe_n_runs=msspe_n_runs,
                         msspe_prefilter=msspe_prefilter,
@@ -5260,9 +5774,16 @@ class GridVariogram:
                     status = "OK"
                     if sv.best_model is not None:
                         desc = sv.best_model["description"]
+                        parts = [desc]
+                        aicc = sv.best_model.get("aicc")
+                        if aicc is not None:
+                            parts.append(f"AICc={aicc:.1f}")
                         msspe = sv.best_model.get("msspe")
-                        msspe_str = f"MSSPE={msspe:.3f}" if msspe is not None else "MSSPE=N/A"
-                        status = f"{desc}  {msspe_str}"
+                        if msspe is not None:
+                            parts.append(f"MSSPE={msspe:.3f}")
+                        fm = sv.best_model.get("fitting_method", "?")
+                        parts.append(f"[{fm}]")
+                        status = "  ".join(parts)
                     print(f"  [{i + 1}/{self.n_realizations}] {status}")
 
             except Exception as e:
@@ -5468,25 +5989,43 @@ class GridVariogram:
         summary_rows = []
         for desc, records in by_description.items():
             aics = np.array([r["aic"] for r in records])
+            aiccs = np.array([
+                r["aicc"] if r.get("aicc") is not None else np.nan
+                for r in records
+            ])
             bics = np.array([r["bic"] for r in records])
             msspes = np.array([
-                r["msspe"] if r["msspe"] is not None else np.nan
+                r["msspe"] if r.get("msspe") is not None else np.nan
                 for r in records
             ])
 
             n_fitted = len(records)
             n_best = best_counts.get(desc, 0)
 
+            # extract trend_order from the first record (same for all
+            # records with the same description)
+            trend_order = records[0].get("trend_order", 0)
+
             row: Dict[str, Any] = {
                 "model": desc,
+                "trend_order": trend_order,
                 "best_count": n_best,
                 "best_fraction": n_best / n_ok,
                 "fitted_count": n_fitted,
                 "AIC_mean": float(np.mean(aics)),
                 "AIC_std": float(np.std(aics)),
-                "BIC_mean": float(np.mean(bics)),
-                "BIC_std": float(np.std(bics)),
             }
+
+            valid_aicc = aiccs[np.isfinite(aiccs)]
+            if len(valid_aicc) > 0:
+                row["AICc_mean"] = float(np.mean(valid_aicc))
+                row["AICc_std"] = float(np.std(valid_aicc))
+            else:
+                row["AICc_mean"] = None
+                row["AICc_std"] = None
+
+            row["BIC_mean"] = float(np.mean(bics))
+            row["BIC_std"] = float(np.std(bics))
 
             valid_msspe = msspes[np.isfinite(msspes)]
             if len(valid_msspe) > 0:
@@ -5512,15 +6051,11 @@ class GridVariogram:
 
             summary_rows.append(row)
 
-        # ── 4. sort by best_count desc, then |MSSPE − 1| asc ──────
+        # ── 4. sort by best_count desc, then AICc asc ──────────────
         def _sort_key(row):
-            msspe = row["MSSPE_mean"]
-            msspe_dist = (
-                abs(msspe - 1.0)
-                if msspe is not None and np.isfinite(msspe)
-                else np.inf
-            )
-            return (-row["best_count"], msspe_dist)
+            aicc = row.get("AICc_mean")
+            aicc_val = aicc if aicc is not None and np.isfinite(aicc) else np.inf
+            return (-row["best_count"], aicc_val)
 
         summary_rows.sort(key=_sort_key)
 
@@ -5532,8 +6067,9 @@ class GridVariogram:
             r["model"]: r["best_fraction"] for r in summary_rows
         }
 
-        # central model = highest best_count, MSSPE tiebreaker
+        # central model = highest best_count, AICc tiebreaker
         self.central_model_name = summary_rows[0]["model"]
+        self.central_trend_order = summary_rows[0].get("trend_order", 0)
         # use parameters only from realisations where it won
         self.central_params = summary_rows[0]["best_param_stats"]
 
@@ -5542,11 +6078,14 @@ class GridVariogram:
         for r in summary_rows:
             df_rows.append({
                 "model": r["model"],
+                "trend_order": r.get("trend_order", 0),
                 "best_count": r["best_count"],
                 "best_fraction": r["best_fraction"],
                 "fitted_count": r["fitted_count"],
                 "AIC_mean": r["AIC_mean"],
                 "AIC_std": r["AIC_std"],
+                "AICc_mean": r.get("AICc_mean"),
+                "AICc_std": r.get("AICc_std"),
                 "BIC_mean": r["BIC_mean"],
                 "BIC_std": r["BIC_std"],
                 "MSSPE_mean": r["MSSPE_mean"],
@@ -5575,32 +6114,46 @@ class GridVariogram:
         # ── aggregated model table ──
         if self.all_criteria is not None and len(self.all_criteria) > 0:
             lines.append("MODEL STRUCTURE SUMMARY (across all realisations)")
-            lines.append("-" * 100)
+            lines.append("-" * 110)
             header = (
                 f"  {'Model':<40s}  {'Best':>4s}  {'Frac':>6s}  "
                 f"{'Fitted':>6s}  "
-                f"{'AIC_mean':>10s}  {'AIC_std':>8s}  "
-                f"{'MSSPE_mean':>10s}  {'MSSPE_std':>9s}"
+                f"{'AICc_mean':>10s}  {'AICc_std':>8s}  "
+                f"{'BIC_mean':>10s}  "
+                f"{'MSSPE_mean':>10s}"
             )
             lines.append(header)
-            lines.append("-" * 100)
+            lines.append("-" * 110)
             for _, row in self.all_criteria.iterrows():
+                aicc_str = (
+                    f"{row['AICc_mean']:10.1f}"
+                    if row.get("AICc_mean") is not None
+                    and np.isfinite(row["AICc_mean"])
+                    else "       N/A"
+                )
+                aicc_std_str = (
+                    f"{row['AICc_std']:8.1f}"
+                    if row.get("AICc_std") is not None
+                    and np.isfinite(row["AICc_std"])
+                    else "     N/A"
+                )
+                bic_str = (
+                    f"{row['BIC_mean']:10.1f}"
+                    if np.isfinite(row["BIC_mean"])
+                    else "       N/A"
+                )
                 msspe_str = (
                     f"{row['MSSPE_mean']:10.4f}"
                     if row["MSSPE_mean"] is not None and np.isfinite(row["MSSPE_mean"])
                     else "       N/A"
                 )
-                msspe_std_str = (
-                    f"{row['MSSPE_std']:9.4f}"
-                    if row["MSSPE_std"] is not None and np.isfinite(row["MSSPE_std"])
-                    else "      N/A"
-                )
                 lines.append(
                     f"  {row['model']:<40s}  {row['best_count']:4d}  "
                     f"{row['best_fraction']:5.1%}  "
                     f"{row['fitted_count']:6d}  "
-                    f"{row['AIC_mean']:10.1f}  {row['AIC_std']:8.1f}  "
-                    f"{msspe_str}  {msspe_std_str}"
+                    f"{aicc_str}  {aicc_std_str}  "
+                    f"{bic_str}  "
+                    f"{msspe_str}"
                 )
             lines.append("")
 
