@@ -507,6 +507,7 @@ class VariogramModelRegistry:
 
         def _matern_bounds(lags, variogram):
             max_gamma = np.nanmax(variogram) * 3
+            max_lag = np.nanmax(lags)
             bin_width = float(np.min(np.diff(lags))) if len(lags) > 1 else 1e-6
             return ([0, bin_width, 0.1],
                     [max_gamma, max_lag, 5.0])
@@ -535,6 +536,7 @@ class VariogramModelRegistry:
 
         def _damped_hole_bounds(lags, variogram):
             max_gamma = np.nanmax(variogram) * 3
+            max_lag = np.nanmax(lags)
             bin_width = float(np.min(np.diff(lags))) if len(lags) > 1 else 1e-6
             return ([0, bin_width, bin_width], [max_gamma, max_lag, max_lag])
 
