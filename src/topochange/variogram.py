@@ -5023,6 +5023,23 @@ class SingleVariogram:
         n_reml = n - p
         sigma2_hat = ssres / n_reml       # profiled MLE of total variance
 
+        # ── diagnostic: check σ̂² is consistent with data variance ──
+        data_var = float(np.var(values))
+        if data_var > 0:
+            _sv_ratio = sigma2_hat / data_var
+            if _sv_ratio < 0.33 or _sv_ratio > 3.0:
+                warnings.warn(
+                    f"REML σ̂²={sigma2_hat:.4g} differs substantially "
+                    f"from sample variance={data_var:.4g} "
+                    f"(ratio={_sv_ratio:.2f}). "
+                    f"This may indicate a data/model mismatch. "
+                    f"Model: {model.structural_description()}, "
+                    f"trend_order={trend_order}, "
+                    f"scale_factor={sigma2_hat/total_sill_opt:.4g}",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
         # ── rescale model parameters to true absolute values ──
         # The optimiser found the shape (ratios); σ̂² gives the scale.
         scale_factor = sigma2_hat / total_sill_opt
@@ -5037,7 +5054,8 @@ class SingleVariogram:
                 ]
                 rescaled_params[comp_slice.start] *= scale_factor
         if model.include_nugget:
-            rescaled_params[model._param_slices['nugget']] *= scale_factor
+            nug_idx = model._param_slices['nugget'].start
+            rescaled_params[nug_idx] *= scale_factor
 
         model.set_params(rescaled_params)
         popt = rescaled_params
@@ -5345,6 +5363,25 @@ class SingleVariogram:
             dx = reml_coords[:, 0:1] - reml_coords[:, 0:1].T
             dy = reml_coords[:, 1:2] - reml_coords[:, 1:2].T
             reml_dist = np.sqrt(dx ** 2 + dy ** 2)
+
+            # ── diagnostic: compare REML sample variance with
+            #    empirical variogram to catch data mismatches early ──
+            _reml_var = float(np.var(reml_values))
+            _emp_max = float(np.nanmax(variogram))
+            if _reml_var > 0 and _emp_max > 0:
+                _ratio = _emp_max / _reml_var
+                if _ratio > 3.0 or _ratio < 0.33:
+                    warnings.warn(
+                        f"REML sample variance ({_reml_var:.4g}) differs "
+                        f"substantially from empirical variogram max "
+                        f"({_emp_max:.4g}), ratio={_ratio:.2f}. "
+                        f"The sample_values used for REML may not match "
+                        f"the data used to compute the empirical variogram. "
+                        f"n_reml={len(reml_values)}, "
+                        f"n_full={n_full}.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
 
         # ── prepare WLS weights (always needed for initial guesses) ──
         gamma_sq = np.square(variogram)
