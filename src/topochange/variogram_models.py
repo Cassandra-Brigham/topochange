@@ -673,6 +673,8 @@ class VariogramModelRegistry:
             Description of validation result or warning.
         """
         if not model_names:
+            if include_nugget:
+                return True, "Pure nugget model (no spatial structure)."
             return False, "At least one model required."
         
         # check all models exist

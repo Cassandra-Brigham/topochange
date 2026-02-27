@@ -291,9 +291,13 @@ class CompositeVariogramModel:
 
         if self.include_nugget:
             max_gamma = np.nanmax(variogram)
-            # cap nugget at 50% of observed max semivariance
             lower.append(0)
-            upper.append(max_gamma * 0.5)
+            if len(self._components) == 0:
+                # pure nugget model: nugget IS the sill, allow full range
+                upper.append(max_gamma * 3)
+            else:
+                # cap nugget at 50% of observed max semivariance
+                upper.append(max_gamma * 0.5)
 
         return (lower, upper)
     

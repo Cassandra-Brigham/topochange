@@ -4828,6 +4828,14 @@ class SingleVariogram:
         bounded = [m for m in model_types if MODEL_REGISTRY.is_bounded(m)]
         candidates: List[CompositeVariogramModel] = []
 
+        # pure nugget (no spatial structure)
+        try:
+            candidates.append(
+                CompositeVariogramModel([], include_nugget=True)
+            )
+        except ValueError:
+            pass
+
         for n in range(1, min(max_components, 3) + 1):
             for combo in combinations_with_replacement(bounded, n):
                 combo_list = list(combo)
