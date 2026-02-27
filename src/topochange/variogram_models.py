@@ -441,7 +441,9 @@ class VariogramModelRegistry:
             def _bounds(lags, variogram):
                 max_gamma = np.nanmax(variogram) * 3
                 max_lag = np.nanmax(lags)
-                return ([0, 1e-6], [max_gamma, max_lag / (2 * prf)])
+                # range lower bound = bin width (minimum resolvable scale)
+                bin_width = float(np.min(np.diff(lags))) if len(lags) > 1 else 1e-6
+                return ([0, bin_width], [max_gamma, max_lag / (2 * prf)])
             return _bounds
 
         # spherical  (practical_range_factor = 1.0)
@@ -506,7 +508,8 @@ class VariogramModelRegistry:
         def _matern_bounds(lags, variogram):
             max_gamma = np.nanmax(variogram) * 3
             max_lag = np.nanmax(lags)
-            return ([0, 1e-6, 0.1],
+            bin_width = float(np.min(np.diff(lags))) if len(lags) > 1 else 1e-6
+            return ([0, bin_width, 0.1],
                     [max_gamma, max_lag / (2 * _matern_prf_conservative), 5.0])
         
         matern_spec = VariogramModelSpec(
@@ -534,9 +537,10 @@ class VariogramModelRegistry:
         def _damped_hole_bounds(lags, variogram):
             max_gamma = np.nanmax(variogram) * 3
             max_lag = np.nanmax(lags)
+            bin_width = float(np.min(np.diff(lags))) if len(lags) > 1 else 1e-6
             # damped hole: practical_range_factor = 1.0 for range,
             # wavelength also bounded to half-lag
-            return ([0, 1e-6, 1e-6], [max_gamma, max_lag / 2, max_lag / 2])
+            return ([0, bin_width, bin_width], [max_gamma, max_lag / 2, max_lag / 2])
 
         def _damped_hole_validate(params):
             """Validate positive definiteness constraint for damped hole effect.
