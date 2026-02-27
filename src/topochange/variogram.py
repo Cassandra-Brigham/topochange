@@ -4722,16 +4722,41 @@ class SingleVariogram:
         values: np.ndarray,
         F: np.ndarray,
     ) -> float:
-        """Negative REML log-likelihood for a variogram model.
+        """Profiled REML negative log-likelihood.
 
-        Generalised to an arbitrary trend design matrix *F*,
-        following the formulation in geoR's ``likGRF.R``
-        (Ribeiro & Diggle, 2001) and Cressie (1993, §2.6).
+        The total variance σ² is profiled out analytically,
+        so the optimiser only searches over the correlation
+        structure (ranges, nugget-to-sill ratio).  This exactly
+        mirrors geoR's ``likGRF.R`` computation::
+
+            V      <- correlation matrix (diagonal = 1)
+            ivx    <- solve(V, xmat)
+            xivx   <- crossprod(ivx, xmat)
+            betahat <- solve(xivx, crossprod(ivx, z))
+            res    <- z - xmat %*% betahat
+            ssres  <- drop(crossprod(res, solve(V, res)))
+            choldet <- sum(log(diag(chol(xivx))))
+            negloglik <- ((n-p)/2)*log(ssres)
+                         + log_det_V_half + choldet
+
+        The profiled REML NLL (up to a constant) is::
+
+            (n-p)/2 · log(r'V⁻¹r) + ½ log|V| + ½ log|F'V⁻¹F|
+
+        where V = C / σ² is the normalised correlation matrix,
+        and σ̂² = r'V⁻¹r / (n-p) is the profiled MLE of the
+        total variance.
+
+        Working with the unit-scale V rather than C eliminates
+        scale-dependent conditioning problems that cause Cholesky
+        failures when the sill is far from the data variance.
 
         Parameters
         ----------
         params : (k,) array
-            Variogram model parameters.
+            Variogram model parameters (sill, range, ... nugget).
+            Only the *ratios* of the sill components affect V;
+            the absolute scale is recovered from the profile.
         model : CompositeVariogramModel
             Model whose ``__call__`` returns γ(h).
         dist_matrix : (n, n) array
@@ -4739,36 +4764,12 @@ class SingleVariogram:
         values : (n,) array
             Observed values at sample locations.
         F : (n, p) array
-            Trend design matrix.  For a constant mean, this is an
-            (n, 1) column of ones.
+            Trend design matrix.
 
         Returns
         -------
         float
-            Negative REML log-likelihood (to be minimised).
-
-        Notes
-        -----
-        For a Gaussian spatial model Z ~ N(Fβ, C(θ)) the REML
-        log-likelihood is::
-
-            -2 ℓ_REML = (n-p)log(2π) + log|C| + log|F'C⁻¹F|
-                        + r'C⁻¹r
-
-        where β̂ = (F'C⁻¹F)⁻¹ F'C⁻¹z and r = z − Fβ̂.
-
-        When ``F = 1`` (constant mean), this reduces to the
-        classical formula with ``p = 1``.
-
-        This mirrors the computation in geoR ``likGRF.R``::
-
-            ivx  <- solve(V, xmat)
-            xivx <- crossprod(ivx, xmat)
-            betahat <- solve(xivx, crossprod(ivx, z))
-            res  <- z - xmat %*% betahat
-            ssres <- drop(crossprod(res, solve(V, res)))
-            choldet <- sum(log(diag(chol(xivx))))
-            negloglik <- ((n-p)/2)*log(ssres) + log_det_V_half + choldet
+            Negative profiled REML log-likelihood (to minimise).
 
         References
         ----------
@@ -4783,68 +4784,71 @@ class SingleVariogram:
         Cressie, N. (1993). *Statistics for Spatial Data*, rev. ed.,
         Wiley. §2.6.
         """
+        from scipy.linalg import cho_factor, cho_solve
+
         n = len(values)
         p = F.shape[1]
         model.set_params(params)
 
-        # total sill
+        # total sill (used only as a normalising constant)
         total_sill = model.get_total_sill()
         if total_sill is None or total_sill <= 0:
             return 1e20
 
-        # build covariance matrix: C(h) = sill_total - γ(h)
+        # ── normalised correlation matrix V = C / σ² ──
+        # C(h) = total_sill - γ(h),  V = C / total_sill
+        # V_ii = 1,  V_ij = 1 - γ(h_ij) / total_sill
         gamma_matrix = model(dist_matrix)
-        C = total_sill - gamma_matrix
+        V = 1.0 - gamma_matrix / total_sill
 
-        # ensure diagonal is exactly total_sill (numerical safety)
-        np.fill_diagonal(C, total_sill)
+        # jitter on unit-scale diagonal for numerical stability
+        np.fill_diagonal(V, 1.0 + 1e-6)
 
-        # add small jitter for numerical stability
-        C += np.eye(n) * (total_sill * 1e-8)
-
-        # Cholesky decomposition of C
+        # Cholesky of V (unit-scale → much better conditioned)
         try:
-            L = np.linalg.cholesky(C)
-        except np.linalg.LinAlgError:
-            return 1e20  # not positive definite → reject
-
-        # log|C| = 2 * sum(log(diag(L)))
-        log_det_C = 2.0 * np.sum(np.log(np.diag(L)))
-
-        # ── solve C⁻¹F and C⁻¹z via triangular solves ──
-        # (mirrors geoR: ivx <- solve(V, xmat))
-        C_inv_F = np.linalg.solve(L, F)          # L⁻¹ F
-        C_inv_F = np.linalg.solve(L.T, C_inv_F)  # C⁻¹ F
-
-        alpha = np.linalg.solve(L, values)        # L⁻¹ z
-        C_inv_z = np.linalg.solve(L.T, alpha)     # C⁻¹ z
-
-        # ── F'C⁻¹F  (p × p) and its log-determinant ──
-        # (mirrors geoR: xivx <- crossprod(ivx, xmat))
-        FtCinvF = F.T @ C_inv_F
-
-        try:
-            L_FtCF = np.linalg.cholesky(FtCinvF)
+            cho = cho_factor(V, lower=True, check_finite=False)
         except np.linalg.LinAlgError:
             return 1e20
-        log_det_FtCinvF = 2.0 * np.sum(np.log(np.diag(L_FtCF)))
 
-        # ── GLS trend estimate: β̂ = (F'C⁻¹F)⁻¹ F'C⁻¹z ──
-        # (mirrors geoR: betahat <- solve(xivx, crossprod(ivx, z)))
-        FtCinvz = F.T @ C_inv_z
-        beta_hat = np.linalg.solve(FtCinvF, FtCinvz)
+        # log|V|
+        log_det_V = 2.0 * np.sum(np.log(np.diag(cho[0])))
 
-        # ── residuals and quadratic form r'C⁻¹r ──
+        # ── batch-solve V⁻¹[F | z] ──
+        Fz = np.empty((n, p + 1))
+        Fz[:, :p] = F
+        Fz[:, p] = values
+        V_inv_Fz = cho_solve(cho, Fz, check_finite=False)
+
+        V_inv_F = V_inv_Fz[:, :p]   # (n, p)
+        V_inv_z = V_inv_Fz[:, p]     # (n,)
+
+        # ── F'V⁻¹F  and its log-determinant ──
+        FtVinvF = F.T @ V_inv_F
+        try:
+            cho_small = cho_factor(FtVinvF, lower=True, check_finite=False)
+        except np.linalg.LinAlgError:
+            return 1e20
+        log_det_FtVinvF = 2.0 * np.sum(np.log(np.diag(cho_small[0])))
+
+        # ── GLS trend: β̂ = (F'V⁻¹F)⁻¹ F'V⁻¹z ──
+        FtVinvz = F.T @ V_inv_z
+        beta_hat = cho_solve(cho_small, FtVinvz, check_finite=False)
+
+        # ── r'V⁻¹r  (profiled sufficient statistic) ──
+        V_inv_r = V_inv_z - V_inv_F @ beta_hat
         r = values - F @ beta_hat
-        alpha_r = np.linalg.solve(L, r)
-        r_C_inv_r = alpha_r @ alpha_r
+        ssres = r @ V_inv_r           # r'V⁻¹r
 
-        # ── REML negative log-likelihood ──
+        if ssres <= 0:
+            return 1e20
+
+        # ── profiled REML NLL (constant terms dropped) ──
+        # σ̂² = ssres / (n-p)  →  (n-p) log(σ̂²) = (n-p) log(ssres/(n-p))
+        # = (n-p) log(ssres) - (n-p) log(n-p)  [second term is constant]
         nll = 0.5 * (
-            (n - p) * np.log(2 * np.pi)
-            + log_det_C
-            + log_det_FtCinvF
-            + r_C_inv_r
+            (n - p) * np.log(ssres)
+            + log_det_V
+            + log_det_FtVinvF
         )
 
         if not np.isfinite(nll):
@@ -4863,16 +4867,19 @@ class SingleVariogram:
         lags: np.ndarray,
         variogram: np.ndarray,
         trend_order: int = 0,
-        n_restarts: int = 8,
+        n_restarts: int = 3,
     ) -> Optional[Dict[str, Any]]:
-        """Fit one composite model via REML.
+        """Fit one composite model via profiled REML.
 
         Adapts the joint trend + covariance estimation approach
-        from geoR's ``likfit`` (Ribeiro & Diggle, 2001).  The
-        trend design matrix *F* is built from ``coords`` at the
-        requested polynomial order and passed into the REML
-        log-likelihood, where the trend coefficients β are
-        profiled out analytically at each optimiser step.
+        from geoR's ``likfit`` (Ribeiro & Diggle, 2001).  Both
+        the trend coefficients β *and* the total variance σ² are
+        profiled out analytically — the optimiser only searches
+        over correlation parameters (ranges, nugget-to-sill ratio).
+
+        After optimisation, σ̂² = r'V⁻¹r / (n-p) is recovered
+        from the profile and used to rescale the model parameters
+        to their absolute values.
 
         Parameters
         ----------
@@ -4909,6 +4916,7 @@ class SingleVariogram:
         Source: ``github.com/rundel/geoR/blob/master/R/likGRF.R``
         """
         from scipy.optimize import minimize
+        from scipy.linalg import cho_factor, cho_solve
 
         # ── build trend design matrix ──
         F = self._build_trend_matrix(coords, trend_order)
@@ -4919,21 +4927,27 @@ class SingleVariogram:
         lb = np.array(bounds_pair[0])
         ub = np.array(bounds_pair[1])
 
-        # scipy bounds format
-        sp_bounds = list(zip(lb, ub))
-
-        # nugget pre-estimation
+        # For REML, relax the nugget cap — the profiled likelihood
+        # can properly estimate any nugget-to-sill ratio, including
+        # data that is predominantly nugget (pure noise).
         if model.include_nugget:
-            nugget_pre = self._estimate_nugget_from_short_lags(lags, variogram)
             nugget_idx = model.n_params - 1
+            max_gamma = np.nanmax(variogram)
+            ub[nugget_idx] = max_gamma * 3.0    # allow nugget up to 3× max γ
+
+            # nugget pre-estimation
+            nugget_pre = self._estimate_nugget_from_short_lags(lags, variogram)
             p0_base[nugget_idx] = np.clip(
                 nugget_pre, lb[nugget_idx], ub[nugget_idx]
             )
 
+        # scipy bounds format
+        sp_bounds = list(zip(lb, ub))
+
         # generate multi-start guesses
         rng = np.random.default_rng()
         guesses = self._generate_multistart_guesses(
-            p0_base, bounds_pair, n_restarts, rng
+            p0_base, (list(lb), list(ub)), n_restarts, rng
         )
 
         best_result = None
@@ -4950,7 +4964,12 @@ class SingleVariogram:
                     bounds=sp_bounds,
                     options={"maxiter": 500, "ftol": 1e-10},
                 )
-                if res.success and np.isfinite(res.fun) and res.fun < best_nll:
+                # Accept any result with a finite NLL better than
+                # what we've seen — don't require res.success, as
+                # L-BFGS-B may report non-convergence even when it
+                # has found a good point (common for flat directions
+                # in the profiled likelihood).
+                if np.isfinite(res.fun) and res.fun < best_nll:
                     best_nll = res.fun
                     best_result = res
             except Exception:
@@ -4959,41 +4978,92 @@ class SingleVariogram:
         if best_result is None:
             return None
 
+        # ── recover σ̂² from the profiled likelihood ──
+        # The optimiser found the correlation shape; now we
+        # compute the optimal total variance analytically.
         popt = best_result.x
-        nll = best_result.fun
+        nll_profiled = best_result.fun
         model.set_params(popt)
+
+        total_sill_opt = model.get_total_sill()
+        if total_sill_opt is None or total_sill_opt <= 0:
+            return None
+
+        # Build V (normalised correlation matrix) at the optimum
+        gamma_matrix = model(dist_matrix)
+        V = 1.0 - gamma_matrix / total_sill_opt
+        np.fill_diagonal(V, 1.0 + 1e-6)
+
+        try:
+            cho = cho_factor(V, lower=True, check_finite=False)
+        except np.linalg.LinAlgError:
+            return None
+
+        # Solve V⁻¹[F | z]
+        Fz = np.empty((n, p + 1))
+        Fz[:, :p] = F
+        Fz[:, p] = values
+        V_inv_Fz = cho_solve(cho, Fz, check_finite=False)
+        V_inv_F = V_inv_Fz[:, :p]
+        V_inv_z = V_inv_Fz[:, p]
+
+        FtVinvF = F.T @ V_inv_F
+        try:
+            cho_small = cho_factor(FtVinvF, lower=True, check_finite=False)
+        except np.linalg.LinAlgError:
+            return None
+
+        FtVinvz = F.T @ V_inv_z
+        beta_hat = cho_solve(cho_small, FtVinvz, check_finite=False)
+
+        r = values - F @ beta_hat
+        V_inv_r = V_inv_z - V_inv_F @ beta_hat
+        ssres = float(r @ V_inv_r)
+
+        n_reml = n - p
+        sigma2_hat = ssres / n_reml       # profiled MLE of total variance
+
+        # ── rescale model parameters to true absolute values ──
+        # The optimiser found the shape (ratios); σ̂² gives the scale.
+        scale_factor = sigma2_hat / total_sill_opt
+        rescaled_params = popt.copy()
+        # Scale each sill parameter and the nugget by the same factor
+        for i, spec in enumerate(model._components):
+            if spec.has_sill:
+                comp_slice = model._param_slices[
+                    model.component_names[i]
+                    if model.component_names.count(model.component_names[i]) == 1
+                    else f"{model.component_names[i]}_{i}"
+                ]
+                rescaled_params[comp_slice.start] *= scale_factor
+        if model.include_nugget:
+            rescaled_params[model._param_slices['nugget']] *= scale_factor
+
+        model.set_params(rescaled_params)
+        popt = rescaled_params
+
         k_cov = model.n_params       # covariance parameters
         k_total = k_cov + p           # total estimated parameters
 
-        # ── recover GLS trend coefficients β̂ ──
-        # (mirrors geoR: betahat <- solve(xivx, crossprod(ivx, z)))
-        total_sill = model.get_total_sill()
-        gamma_matrix = model(dist_matrix)
-        C = total_sill - gamma_matrix
-        np.fill_diagonal(C, total_sill)
-        C += np.eye(n) * (total_sill * 1e-8)
-        try:
-            L = np.linalg.cholesky(C)
-            C_inv_F = np.linalg.solve(L.T, np.linalg.solve(L, F))
-            C_inv_z = np.linalg.solve(L.T, np.linalg.solve(L, values))
-            FtCinvF = F.T @ C_inv_F
-            FtCinvz = F.T @ C_inv_z
-            beta_hat = np.linalg.solve(FtCinvF, FtCinvz)
-        except np.linalg.LinAlgError:
-            beta_hat = np.full(p, np.nan)
-
-        # ── REML-based information criteria ──
-        # degrees of freedom for REML: n − p
-        n_reml = n - p
-        reml_ll = -nll
+        # ── full REML NLL at the optimum (for AIC/BIC) ──
+        # profiled NLL was: (n-p)/2 log(ssres) + ½ log|V| + ½ log|F'V⁻¹F|
+        # full NLL adds: (n-p)/2 (1 + log(2π) - log(n-p))
+        log_det_V = 2.0 * np.sum(np.log(np.diag(cho[0])))
+        log_det_FtVinvF = 2.0 * np.sum(np.log(np.diag(cho_small[0])))
+        full_nll = 0.5 * (
+            n_reml * (1.0 + np.log(2 * np.pi))
+            + n_reml * np.log(sigma2_hat)
+            + log_det_V
+            + log_det_FtVinvF
+        )
+        reml_ll = -full_nll
         aic = 2 * k_total - 2 * reml_ll
         bic = k_total * np.log(n_reml) - 2 * reml_ll
         denom = max(n_reml - k_total - 1, 1)
         aicc = aic + 2 * k_total * (k_total + 1) / denom
 
         # parameter covariance from inverse Hessian
-        # (covariance parameters only; trend β has its own uncertainty
-        # from (F'C⁻¹F)⁻¹, but we don't propagate that here)
+        # (correlation parameters only — approximate)
         param_cov = None
         if hasattr(best_result, "hess_inv"):
             hi = best_result.hess_inv
@@ -5020,7 +5090,7 @@ class SingleVariogram:
             "aic": float(aic),
             "aicc": float(aicc),
             "bic": float(bic),
-            "reml_nll": float(nll),
+            "reml_nll": float(full_nll),
             "msspe": None,
             "msspe_std": None,
             "msspe_n_runs": 0,
@@ -5028,6 +5098,7 @@ class SingleVariogram:
             "trend_order": trend_order,
             "trend_coefficients": beta_hat,
             "n_trend_params": p,
+            "sigma2_hat": float(sigma2_hat),
             "warnings": [],
             "fitting_method": "reml",
         }
@@ -5553,18 +5624,23 @@ class SingleVariogram:
             parts = [self.best_model["description"]]
             if self.best_model["msspe"] is not None:
                 parts.append(f'MSSPE={self.best_model["msspe"]:.3f}')
-            parts.append(f'AIC={self.best_model["aic"]:.1f}')
+            parts.append(f'AICc={self.best_model["aicc"]:.1f}')
             parts.append(f'BIC={self.best_model["bic"]:.1f}')
 
-            # extract range / sill / nugget for annotation
+            # show total sill and range (more useful than component sills)
+            total_sill = model.get_total_sill()
+            if total_sill is not None:
+                parts.append(f"sill={total_sill:.4g}")
+            # show practical range (largest range among components)
             for i, spec in enumerate(model._components):
                 comp_params = model.get_component_params(i)
-                for j, pname in enumerate(spec.param_names):
-                    parts.append(f"{pname}={comp_params[j]:.4g}")
+                if 'range' in spec.param_names:
+                    ridx = spec.param_names.index('range')
+                    parts.append(f"range={comp_params[ridx]:.4g}")
             if model.include_nugget:
                 parts.append(f"nugget={model.get_nugget():.4g}")
 
-            ax.set_title("  |  ".join(parts[:5]), fontsize=9)
+            ax.set_title("  |  ".join(parts[:6]), fontsize=9)
 
         ax.set_xlabel("Lag Distance (m)")
         ax.set_ylabel("Semivariance")
