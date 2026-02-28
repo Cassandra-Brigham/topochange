@@ -5655,9 +5655,21 @@ class SingleVariogram:
 
         param_samples = np.array(collected)  # (n_succeeded, n_params)
 
+        # compute percentile summary per parameter
+        pct_keys = [5, 16, 50, 84, 95]
+        param_names = list(model_template.param_names)
+        param_percentiles = {}
+        for j, name in enumerate(param_names):
+            vals = param_samples[:, j]
+            param_percentiles[name] = {
+                f"p{p}": float(np.percentile(vals, p)) for p in pct_keys
+            }
+
         # store for downstream use
         self.bootstrap_param_samples = param_samples
+        self.bootstrap_param_percentiles = param_percentiles
         self.best_model["param_samples"] = param_samples
+        self.best_model["param_percentiles"] = param_percentiles
 
         if verbose or n_failed > 0:
             print(
@@ -5672,6 +5684,7 @@ class SingleVariogram:
     def plot_single_variogram(
         self,
         include_model: bool = False,
+        include_bootstrap: bool = False,
         figsize: tuple = (10, 8),
     ) -> plt.Figure:
         """Plot the empirical variogram with optional fitted model overlay.
@@ -5682,6 +5695,11 @@ class SingleVariogram:
             If True and :meth:`fit_model` has been called, overlay the
             best-fit model curve and annotate with model name, parameters,
             and selection criteria (MSSPE, AIC, BIC).
+        include_bootstrap : bool
+            If True and :meth:`bootstrap_parameters` has been called,
+            overlay the bootstrap median model (dashed) and shaded
+            1-sigma (16th–84th pctl) and 2-sigma (5th–95th pctl)
+            envelopes.
         figsize : tuple
             Figure size.
 
@@ -5696,6 +5714,7 @@ class SingleVariogram:
             )
 
         from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
 
         fig, axs = plt.subplots(
             2, 1, gridspec_kw={"height_ratios": [1, 3]},
@@ -5737,6 +5756,7 @@ class SingleVariogram:
         )
 
         # ── overlay fitted model ──
+        lag_fine = None
         if include_model and self.best_model is not None:
             model = self.best_model["model"]
             model.set_params(self.best_model["params"])
@@ -5771,6 +5791,95 @@ class SingleVariogram:
 
             ax.set_title("  |  ".join(parts[:6]), fontsize=9)
 
+        # ── overlay bootstrap envelopes ──
+        has_bootstrap = (
+            include_bootstrap
+            and hasattr(self, "bootstrap_param_samples")
+            and self.bootstrap_param_samples is not None
+            and self.best_model is not None
+        )
+        if has_bootstrap:
+            model_template = self.best_model["model"]
+            samples = self.bootstrap_param_samples
+
+            if lag_fine is None:
+                lag_fine = np.linspace(0, float(lags[-1]) * 1.05, 300)
+
+            # evaluate model at every bootstrap parameter set
+            gamma_ensemble = np.empty((len(samples), len(lag_fine)))
+            for k, params_k in enumerate(samples):
+                m = copy.deepcopy(model_template)
+                m.set_params(params_k)
+                gamma_ensemble[k, :] = m(lag_fine)
+
+            # lag-wise percentiles
+            p5  = np.percentile(gamma_ensemble, 5, axis=0)
+            p16 = np.percentile(gamma_ensemble, 16, axis=0)
+            p50 = np.percentile(gamma_ensemble, 50, axis=0)
+            p84 = np.percentile(gamma_ensemble, 84, axis=0)
+            p95 = np.percentile(gamma_ensemble, 95, axis=0)
+
+            # 2-sigma band (5th–95th)
+            ax.fill_between(
+                lag_fine, p5, p95,
+                color="darkred", alpha=0.15, zorder=4,
+                label="Bootstrap 90% (5th–95th)",
+            )
+            # 1-sigma band (16th–84th)
+            ax.fill_between(
+                lag_fine, p16, p84,
+                color="darkred", alpha=0.25, zorder=4,
+                label="Bootstrap 68% (16th–84th)",
+            )
+            # median curve
+            ax.plot(
+                lag_fine, p50,
+                color="darkred", linewidth=1.5, linestyle="--", zorder=7,
+                label="Bootstrap median",
+            )
+
+            # range / nugget annotations from bootstrap percentiles
+            boot_pctl = self.bootstrap_param_percentiles
+            range_colors = ["red", "green", "lightblue"]
+            r_idx = 0
+            for key, stats in boot_pctl.items():
+                median_val = stats["p50"]
+                lo_1sig = stats["p16"]
+                hi_1sig = stats["p84"]
+                lo_2sig = stats["p5"]
+                hi_2sig = stats["p95"]
+
+                if "range" in key:
+                    c = range_colors[r_idx % len(range_colors)]
+                    ax.axvline(
+                        median_val, color=c, linewidth=1.8,
+                        linestyle="-", zorder=5,
+                        label=f'{key}: {median_val:.0f}',
+                    )
+                    ax.axvspan(
+                        lo_1sig, hi_1sig,
+                        color=c, alpha=0.20, zorder=1,
+                    )
+                    ax.axvspan(
+                        lo_2sig, hi_2sig,
+                        color=c, alpha=0.10, zorder=1,
+                    )
+                    r_idx += 1
+                elif key == "nugget":
+                    ax.axhline(
+                        median_val, color="orange", linewidth=1.8,
+                        linestyle="-", zorder=5,
+                        label=f'nugget: {median_val:.4g}',
+                    )
+                    ax.axhspan(
+                        lo_1sig, hi_1sig,
+                        color="orange", alpha=0.20, zorder=1,
+                    )
+                    ax.axhspan(
+                        lo_2sig, hi_2sig,
+                        color="orange", alpha=0.10, zorder=1,
+                    )
+
         ax.set_xlabel("Lag Distance (m)")
         ax.set_ylabel("Semivariance")
 
@@ -5791,9 +5900,22 @@ class SingleVariogram:
                 Line2D([0], [0], color="darkred", linewidth=2.2,
                        label=f'Fitted: {self.best_model["description"]}')
             )
+        if has_bootstrap:
+            handles.append(
+                Line2D([0], [0], color="darkred", linewidth=1.5,
+                       linestyle="--", label="Bootstrap median"),
+            )
+            handles.append(
+                Patch(facecolor="darkred", alpha=0.25,
+                      label="Bootstrap 68% (1σ)"),
+            )
+            handles.append(
+                Patch(facecolor="darkred", alpha=0.15,
+                      label="Bootstrap 90% (2σ)"),
+            )
         ax.legend(handles=handles, loc="lower right", fontsize=8)
 
-        if not include_model:
+        if not include_model and not has_bootstrap:
             ax.set_title(
                 f"Empirical variogram ({self.estimator})",
             )
@@ -6477,8 +6599,19 @@ class GridVariogram:
 
         param_samples = np.array(collected)  # (n_succeeded, n_params)
 
+        # compute percentile summary per parameter
+        pct_keys = [5, 16, 50, 84, 95]
+        param_names = list(model_template.param_names)
+        param_percentiles = {}
+        for j, name in enumerate(param_names):
+            vals = param_samples[:, j]
+            param_percentiles[name] = {
+                f"p{p}": float(np.percentile(vals, p)) for p in pct_keys
+            }
+
         # store for downstream use
         self.bootstrap_param_samples = param_samples
+        self.bootstrap_param_percentiles = param_percentiles
 
         if verbose or n_failed > 0:
             print(
@@ -6578,6 +6711,7 @@ class GridVariogram:
         self,
         include_central_model: bool = True,
         include_all_models: bool = False,
+        include_bootstrap: bool = False,
         figsize: tuple = (10, 8),
     ) -> plt.Figure:
         """Plot ensemble variogram results.
@@ -6588,6 +6722,11 @@ class GridVariogram:
             Overlay the modal model evaluated at median parameters.
         include_all_models : bool
             Overlay every realisation's fitted model (thin lines).
+        include_bootstrap : bool
+            If True and :meth:`bootstrap_parameters` has been called,
+            overlay the bootstrap median model (dashed) and shaded
+            1-sigma (16th–84th pctl) and 2-sigma (5th–95th pctl)
+            envelopes.
         figsize : tuple
             Figure size.
 
@@ -6729,31 +6868,122 @@ class GridVariogram:
                 )
 
                 # range / nugget annotations
+                # prefer bootstrap percentiles when available; fall back
+                # to ensemble central_params
+                _use_boot_pctl = (
+                    include_bootstrap
+                    and hasattr(self, "bootstrap_param_percentiles")
+                    and self.bootstrap_param_percentiles is not None
+                )
+                annot_source = (
+                    self.bootstrap_param_percentiles
+                    if _use_boot_pctl
+                    else self.central_params
+                )
+                src_label = "bootstrap" if _use_boot_pctl else "ensemble"
+
                 range_colors = ["red", "green", "lightblue"]
                 r_idx = 0
-                for key, stats in self.central_params.items():
+                for key, stats in annot_source.items():
+                    # bootstrap_param_percentiles uses p5/p16/p50/p84/p95;
+                    # central_params uses median/p16/p84/p2_5/p97_5
+                    median_val = stats.get("p50", stats.get("median"))
+                    lo_1sig = stats.get("p16")
+                    hi_1sig = stats.get("p84")
+                    lo_2sig = stats.get("p5", stats.get("p2_5"))
+                    hi_2sig = stats.get("p95", stats.get("p97_5"))
+
+                    if median_val is None:
+                        continue
+
                     if "range" in key:
                         c = range_colors[r_idx % len(range_colors)]
                         ax.axvline(
-                            stats["median"], color=c, linewidth=1.8,
+                            median_val, color=c, linewidth=1.8,
                             linestyle="-", zorder=5,
-                            label=f'{key}: {stats["median"]:.0f}',
+                            label=f'{key}: {median_val:.0f}',
                         )
-                        ax.axvspan(
-                            stats["p16"], stats["p84"],
-                            color=c, alpha=0.20, zorder=1,
-                        )
+                        if lo_1sig is not None and hi_1sig is not None:
+                            ax.axvspan(
+                                lo_1sig, hi_1sig,
+                                color=c, alpha=0.20, zorder=1,
+                            )
+                        if lo_2sig is not None and hi_2sig is not None:
+                            ax.axvspan(
+                                lo_2sig, hi_2sig,
+                                color=c, alpha=0.10, zorder=1,
+                            )
                         r_idx += 1
                     elif key == "nugget":
                         ax.axhline(
-                            stats["median"], color="orange", linewidth=1.8,
+                            median_val, color="orange", linewidth=1.8,
                             linestyle="-", zorder=5,
-                            label=f'nugget: {stats["median"]:.4g}',
+                            label=f'nugget: {median_val:.4g}',
                         )
-                        ax.axhspan(
-                            stats["p16"], stats["p84"],
-                            color="orange", alpha=0.20, zorder=1,
-                        )
+                        if lo_1sig is not None and hi_1sig is not None:
+                            ax.axhspan(
+                                lo_1sig, hi_1sig,
+                                color="orange", alpha=0.20, zorder=1,
+                            )
+                        if lo_2sig is not None and hi_2sig is not None:
+                            ax.axhspan(
+                                lo_2sig, hi_2sig,
+                                color="orange", alpha=0.10, zorder=1,
+                            )
+
+        # ── overlay bootstrap parameter envelopes ──
+        has_bootstrap = (
+            include_bootstrap
+            and hasattr(self, "bootstrap_param_samples")
+            and self.bootstrap_param_samples is not None
+        )
+        if has_bootstrap:
+            # find a model template matching the central model
+            boot_model_template = None
+            for sv in self.variograms:
+                if (
+                    sv.best_model is not None
+                    and sv.best_model["description"] == self.central_model_name
+                ):
+                    boot_model_template = sv.best_model["model"]
+                    break
+
+            if boot_model_template is not None:
+                samples = self.bootstrap_param_samples
+                lag_fine_boot = np.linspace(0, float(lags[-1]) * 1.05, 300)
+
+                # evaluate model at every bootstrap parameter set
+                gamma_ensemble = np.empty((len(samples), len(lag_fine_boot)))
+                for k, params_k in enumerate(samples):
+                    m = copy.deepcopy(boot_model_template)
+                    m.set_params(params_k)
+                    gamma_ensemble[k, :] = m(lag_fine_boot)
+
+                # lag-wise percentiles
+                bp5  = np.percentile(gamma_ensemble, 5, axis=0)
+                bp16 = np.percentile(gamma_ensemble, 16, axis=0)
+                bp50 = np.percentile(gamma_ensemble, 50, axis=0)
+                bp84 = np.percentile(gamma_ensemble, 84, axis=0)
+                bp95 = np.percentile(gamma_ensemble, 95, axis=0)
+
+                # 2-sigma band (5th–95th)
+                ax.fill_between(
+                    lag_fine_boot, bp5, bp95,
+                    color="darkred", alpha=0.15, zorder=3,
+                    label="Bootstrap 90% (5th–95th)",
+                )
+                # 1-sigma band (16th–84th)
+                ax.fill_between(
+                    lag_fine_boot, bp16, bp84,
+                    color="darkred", alpha=0.25, zorder=3,
+                    label="Bootstrap 68% (16th–84th)",
+                )
+                # median curve
+                ax.plot(
+                    lag_fine_boot, bp50,
+                    color="darkred", linewidth=1.5, linestyle="--", zorder=7,
+                    label="Bootstrap median",
+                )
 
         ax.set_xlabel("Lag Distance (m)")
         ax.set_ylabel("Semivariance")
