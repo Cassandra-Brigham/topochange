@@ -4043,6 +4043,7 @@
 
 from __future__ import annotations
 
+import copy
 import warnings
 from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import dataclass, field
@@ -4514,6 +4515,14 @@ class SingleVariogram:
         if return_sample:
             self.sample_coords = coords
             self.sample_values = values
+
+        # store for bootstrap_parameters() reuse
+        self._stored_area_side = area_side
+        self._stored_samples_per_area = samples_per_area
+        self._stored_max_samples = max_samples
+        self._stored_bin_width = bin_width
+        self._stored_max_lag_multiplier = max_lag_multiplier
+        self._stored_estimator = estimator
 
     # ── model fitting ───────────────────────────────────────────────
 
@@ -5476,6 +5485,188 @@ class SingleVariogram:
 
         return df
 
+    # ── parameter bootstrap ──────────────────────────────────────────
+
+    def bootstrap_parameters(
+        self,
+        n_realizations: int = 100,
+        area_side: float = None,
+        samples_per_area: float = None,
+        max_samples: int = None,
+        bin_width: float = None,
+        max_lag_multiplier: float = None,
+        estimator: str = None,
+        *,
+        seed: Optional[int] = None,
+        verbose: bool = False,
+    ) -> np.ndarray:
+        """Estimate parameter uncertainty via spatial resampling bootstrap.
+
+        For each realisation, draws a new spatial sample, computes a
+        fresh empirical variogram, and fits *only* the winning model
+        structure (from :meth:`fit_model`).  The result is a
+        ``(n_succeeded, n_params)`` array of fitted parameters whose
+        spread quantifies parameter uncertainty conditional on the
+        selected model family.
+
+        Parameters
+        ----------
+        n_realizations : int
+            Number of bootstrap realisations.
+        area_side, samples_per_area, max_samples, bin_width,
+        max_lag_multiplier, estimator
+            Sampling / variogram parameters.  If ``None``, reuses the
+            values from the most recent
+            :meth:`compute_empirical_variogram` call.
+        seed : int, optional
+            Base seed for reproducibility (child seeds spawned via
+            ``SeedSequence``).
+        verbose : bool
+            Print per-realisation progress.
+
+        Returns
+        -------
+        param_samples : ndarray, shape (n_succeeded, n_params)
+            Fitted parameter values for each successful realisation.
+            Column order matches ``self.best_model["model"].param_names``.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`fit_model` has not been called yet.
+
+        Notes
+        -----
+        This method separates *parameter uncertainty* from *model
+        selection uncertainty*.  Model selection is handled by the
+        :class:`GridVariogram` ensemble; this method quantifies how
+        much the parameters of the *chosen* model vary across
+        independent spatial samples.
+
+        References
+        ----------
+        Lark, R.M. (2000). A comparison of some robust estimators of
+        the variogram for use in soil survey. *Eur. J. Soil Sci.*,
+        51, 137-157.
+        """
+        if self.best_model is None:
+            raise RuntimeError(
+                "No fitted model. Call fit_model() first."
+            )
+
+        # resolve defaults from stored parameters
+        def _resolve(val, attr_name):
+            if val is not None:
+                return val
+            stored = getattr(self, attr_name, None)
+            if stored is None:
+                raise ValueError(
+                    f"'{attr_name.replace('_stored_', '')}' not provided "
+                    f"and no stored value from compute_empirical_variogram()."
+                )
+            return stored
+
+        area_side = _resolve(area_side, "_stored_area_side")
+        samples_per_area = _resolve(samples_per_area, "_stored_samples_per_area")
+        max_samples = _resolve(max_samples, "_stored_max_samples")
+        bin_width = _resolve(bin_width, "_stored_bin_width")
+        max_lag_multiplier = _resolve(max_lag_multiplier, "_stored_max_lag_multiplier")
+        estimator = _resolve(estimator, "_stored_estimator")
+
+        # compute max_lag (same logic as compute_empirical_variogram)
+        xs = self.rdh.rioxarray_obj.x.values
+        ys = self.rdh.rioxarray_obj.y.values
+        x_extent = float(np.max(xs) - np.min(xs))
+        y_extent = float(np.max(ys) - np.min(ys))
+        diag = np.sqrt(x_extent ** 2 + y_extent ** 2)
+        max_lag = float(diag * max_lag_multiplier)
+
+        # winning model structure
+        model_template = self.best_model["model"]
+
+        # reproducible child seeds
+        ss = np.random.SeedSequence(seed)
+        child_seeds = ss.spawn(n_realizations)
+
+        collected = []
+        n_failed = 0
+
+        for i in range(n_realizations):
+            run_seed = int(child_seeds[i].generate_state(1)[0])
+            try:
+                # draw new sample and compute empirical variogram
+                bin_counts, gamma, n_bins, _coords, _values = (
+                    self._single_variogram_run(
+                        area_side, samples_per_area, max_samples,
+                        bin_width, max_lag, estimator, seed=run_seed,
+                    )
+                )
+
+                # keep only valid bins
+                valid = ~np.isnan(gamma)
+                n_kept = int(np.sum(valid))
+                if n_kept < 3:
+                    n_failed += 1
+                    if verbose:
+                        print(f"  [{i + 1}/{n_realizations}] SKIP: too few bins ({n_kept})")
+                    continue
+
+                boot_gamma = gamma[valid]
+                boot_counts = bin_counts[valid].astype(float)
+                boot_lags = np.linspace(
+                    bin_width / 2, bin_width * n_kept - bin_width / 2, n_kept
+                )
+
+                # Cressie (1985) weights
+                gamma_sq = np.square(boot_gamma)
+                gamma_sq = np.where(
+                    gamma_sq < np.finfo(float).eps,
+                    np.finfo(float).eps,
+                    gamma_sq,
+                )
+                weights = boot_counts / gamma_sq
+
+                # deep-copy winning model for independent fit
+                model = copy.deepcopy(model_template)
+
+                result = self._fit_single_composite_model(
+                    model, boot_lags, boot_gamma, None, weights,
+                )
+
+                if result is not None:
+                    collected.append(result["params"])
+                    if verbose:
+                        print(f"  [{i + 1}/{n_realizations}] OK")
+                else:
+                    n_failed += 1
+                    if verbose:
+                        print(f"  [{i + 1}/{n_realizations}] FIT FAILED")
+
+            except Exception as e:
+                n_failed += 1
+                if verbose:
+                    print(f"  [{i + 1}/{n_realizations}] ERROR: {e}")
+                continue
+
+        if not collected:
+            raise RuntimeError(
+                f"All {n_realizations} bootstrap realisations failed."
+            )
+
+        param_samples = np.array(collected)  # (n_succeeded, n_params)
+
+        # store for downstream use
+        self.bootstrap_param_samples = param_samples
+        self.best_model["param_samples"] = param_samples
+
+        if verbose or n_failed > 0:
+            print(
+                f"Bootstrap complete: {len(collected)}/{n_realizations} "
+                f"succeeded, {n_failed} failed."
+            )
+
+        return param_samples
+
     # ── plotting ────────────────────────────────────────────────────
 
     def plot_single_variogram(
@@ -5721,6 +5912,15 @@ class GridVariogram:
         self.variograms = []
         self.n_failed = 0
         self.n_samples = n_samples
+
+        # store for bootstrap_parameters() reuse
+        self._stored_area_side = area_side
+        self._stored_samples_per_area = samples_per_area
+        self._stored_max_samples = max_samples
+        self._stored_bin_width = bin_width
+        self._stored_max_lag_multiplier = max_lag_multiplier
+        self._stored_estimator = estimator
+        self._stored_n_samples = n_samples
 
         # MSSPE needs the spatial sample retained
         needs_sample = fit_model and criterion == "msspe"
@@ -6093,6 +6293,200 @@ class GridVariogram:
 
         # full summary rows (with param_stats) for programmatic access
         self._summary_rows = summary_rows
+
+    # ── parameter bootstrap ──────────────────────────────────────────
+
+    def bootstrap_parameters(
+        self,
+        n_realizations: int = 100,
+        area_side: float = None,
+        samples_per_area: float = None,
+        max_samples: int = None,
+        bin_width: float = None,
+        max_lag_multiplier: float = None,
+        n_samples: int = None,
+        estimator: str = None,
+        *,
+        seed: Optional[int] = None,
+        verbose: bool = False,
+    ) -> np.ndarray:
+        """Estimate parameter uncertainty for the central model via bootstrap.
+
+        For each realisation, draws new spatial sample(s), computes a
+        (median-stabilised) empirical variogram, and fits *only* the
+        central model structure selected by :meth:`run`.  The result
+        is a ``(n_succeeded, n_params)`` array whose spread quantifies
+        parameter uncertainty conditional on the chosen model family.
+
+        Parameters
+        ----------
+        n_realizations : int
+            Number of bootstrap realisations.
+        area_side, samples_per_area, max_samples, bin_width,
+        max_lag_multiplier, estimator
+            Sampling / variogram parameters.  If ``None``, reuses the
+            values from the most recent :meth:`run` call.
+        n_samples : int, optional
+            Number of inner spatial samples per realisation (median
+            variogram stabilisation).  If ``None``, reuses the value
+            from the most recent :meth:`run` call.
+        seed : int, optional
+            Base seed for reproducibility (child seeds spawned via
+            ``SeedSequence``).
+        verbose : bool
+            Print per-realisation progress.
+
+        Returns
+        -------
+        param_samples : ndarray, shape (n_succeeded, n_params)
+            Fitted parameter values for each successful realisation.
+            Column order matches ``model_template.param_names``.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`run` has not been called yet.
+
+        Notes
+        -----
+        When ``n_samples > 1``, each bootstrap realisation computes
+        the median variogram across multiple independent spatial
+        samples before fitting — the same stabilisation used in
+        :meth:`run`.
+        """
+        if self.central_model_name is None:
+            raise RuntimeError(
+                "No central model. Call run() first."
+            )
+
+        # resolve defaults from stored parameters
+        def _resolve(val, attr_name):
+            if val is not None:
+                return val
+            stored = getattr(self, attr_name, None)
+            if stored is None:
+                raise ValueError(
+                    f"'{attr_name.replace('_stored_', '')}' not provided "
+                    f"and no stored value from run()."
+                )
+            return stored
+
+        area_side = _resolve(area_side, "_stored_area_side")
+        samples_per_area = _resolve(samples_per_area, "_stored_samples_per_area")
+        max_samples = _resolve(max_samples, "_stored_max_samples")
+        bin_width = _resolve(bin_width, "_stored_bin_width")
+        max_lag_multiplier = _resolve(max_lag_multiplier, "_stored_max_lag_multiplier")
+        estimator = _resolve(estimator, "_stored_estimator")
+        n_samples = _resolve(n_samples, "_stored_n_samples")
+
+        # find the winning model template from fitted realisations
+        model_template = None
+        for sv in self.variograms:
+            if (
+                sv.best_model is not None
+                and sv.best_model["description"] == self.central_model_name
+            ):
+                model_template = sv.best_model["model"]
+                break
+
+        if model_template is None:
+            raise RuntimeError(
+                f"Could not find a fitted model matching the central "
+                f"model '{self.central_model_name}' in any realisation."
+            )
+
+        # reproducible child seeds
+        ss = np.random.SeedSequence(seed)
+        child_seeds = ss.spawn(n_realizations)
+
+        collected = []
+        n_failed = 0
+
+        for i in range(n_realizations):
+            run_seed = int(child_seeds[i].generate_state(1)[0])
+            sv = SingleVariogram(self.rdh)
+            try:
+                if n_samples <= 1:
+                    # single sample per realisation
+                    sv.compute_empirical_variogram(
+                        area_side=area_side,
+                        samples_per_area=samples_per_area,
+                        max_samples=max_samples,
+                        bin_width=bin_width,
+                        max_lag_multiplier=max_lag_multiplier,
+                        seed=run_seed,
+                        estimator=estimator,
+                        return_sample=False,
+                    )
+                else:
+                    # median-stabilised variogram
+                    self._compute_median_variogram(
+                        sv,
+                        n_samples=n_samples,
+                        area_side=area_side,
+                        samples_per_area=samples_per_area,
+                        max_samples=max_samples,
+                        bin_width=bin_width,
+                        max_lag_multiplier=max_lag_multiplier,
+                        estimator=estimator,
+                        return_sample=False,
+                        seed=run_seed,
+                    )
+
+                if sv.lags is None or sv.variogram is None or len(sv.lags) < 3:
+                    n_failed += 1
+                    if verbose:
+                        print(f"  [{i + 1}/{n_realizations}] SKIP: too few bins")
+                    continue
+
+                # Cressie (1985) weights
+                gamma_sq = np.square(sv.variogram)
+                gamma_sq = np.where(
+                    gamma_sq < np.finfo(float).eps,
+                    np.finfo(float).eps,
+                    gamma_sq,
+                )
+                weights = sv.pair_counts / gamma_sq
+
+                # deep-copy winning model for independent fit
+                model = copy.deepcopy(model_template)
+
+                result = sv._fit_single_composite_model(
+                    model, sv.lags, sv.variogram, None, weights,
+                )
+
+                if result is not None:
+                    collected.append(result["params"])
+                    if verbose:
+                        print(f"  [{i + 1}/{n_realizations}] OK")
+                else:
+                    n_failed += 1
+                    if verbose:
+                        print(f"  [{i + 1}/{n_realizations}] FIT FAILED")
+
+            except Exception as e:
+                n_failed += 1
+                if verbose:
+                    print(f"  [{i + 1}/{n_realizations}] ERROR: {e}")
+                continue
+
+        if not collected:
+            raise RuntimeError(
+                f"All {n_realizations} bootstrap realisations failed."
+            )
+
+        param_samples = np.array(collected)  # (n_succeeded, n_params)
+
+        # store for downstream use
+        self.bootstrap_param_samples = param_samples
+
+        if verbose or n_failed > 0:
+            print(
+                f"Bootstrap complete: {len(collected)}/{n_realizations} "
+                f"succeeded, {n_failed} failed."
+            )
+
+        return param_samples
 
     def summary(self) -> str:
         """Human-readable summary of ensemble results.
