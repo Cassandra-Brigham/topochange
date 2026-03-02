@@ -8,6 +8,12 @@ All synthetic data is written using PDAL pipelines (the same library the
 project itself uses), so the test files are guaranteed to be readable by
 PointCloud.from_file() without any extra dependencies."""
 
+# Exclude standalone diagnostic scripts that are not pytest suites.
+collect_ignore = [
+    "test_synthetic_stress.py",
+    "test_synthetic_variogram_fitting.py",
+]
+
 import json
 import pytest
 import numpy as np

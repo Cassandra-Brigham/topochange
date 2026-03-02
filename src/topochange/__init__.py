@@ -17,7 +17,6 @@ from .variogram import (
     # backward-compatibility stubs
     VariogramAnalysis,
     FittedVariogramModel,
-    VariogramModelSelector,
     EmpiricalVariogram,
     StatisticalAnalysis,
 )
@@ -90,6 +89,10 @@ __all__ = [
     "CRSHistory",
     "CRSState",
     "build_vertical_pipeline",
+    "VariogramAnalysis",
+    "FittedVariogramModel",
+    "EmpiricalVariogram",
+    "StatisticalAnalysis",
     "DataAccess",
     "OpenTopographyQuery",
     "GetDEMs",

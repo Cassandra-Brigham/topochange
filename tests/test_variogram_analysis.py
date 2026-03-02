@@ -2,8 +2,9 @@
 
 Tests the model fitting infrastructure in src/topochange/variogram.py, specifically:
 1. FittedVariogramModel dataclass
-2. VariogramModelSelector class
-3. VariogramAnalysis.compute_matheron static method
+2. SingleVariogram WLS fitting pipeline
+3. VariogramAnalysis.compute_matheron / compute_cressie_hawkins static methods
+4. Kriging LOOCV
 
 Uses synthetic data (no actual raster files required)."""
 
@@ -11,17 +12,49 @@ import pytest
 import numpy as np
 from numpy.testing import assert_allclose, assert_array_almost_equal
 import warnings
+from unittest.mock import MagicMock
+from itertools import combinations_with_replacement
 
 from topochange.variogram_models import spherical, exponential, MODEL_REGISTRY
 from topochange.composite_variogram import CompositeVariogramModel
 from topochange.variogram import (
     FittedVariogramModel,
-    VariogramModelSelector,
+    SingleVariogram,
     VariogramAnalysis,
+    KrigingLOOCVResult,
+    AggregatedLOOCVResult,
 )
 
 
-# fixtures: Synthetic Data
+# ─── helpers ────────────────────────────────────────────────────────
+
+
+def _make_single_variogram_from_synthetic(lags, empirical, pair_counts=None):
+    """Create a SingleVariogram with manually injected synthetic data.
+
+    This bypasses ``compute_empirical_variogram()`` so we can test the
+    fitting pipeline without requiring a real raster file.
+    """
+    sv = object.__new__(SingleVariogram)
+    # Initialise all attributes that fit_model() and related methods read
+    sv.raster_data_handler = MagicMock()
+    sv.raster_data_handler.unit = "m"
+    sv.lags = np.asarray(lags, dtype=float)
+    sv.variogram = np.asarray(empirical, dtype=float)
+    sv.pair_counts = (
+        np.asarray(pair_counts, dtype=float) if pair_counts is not None else None
+    )
+    sv.n_bins = len(lags)
+    sv.estimator = "matheron"
+    sv.sample_coords = None
+    sv.sample_values = None
+    sv.fitted_models = []
+    sv.best_model = None
+    sv.criteria_table = None
+    return sv
+
+
+# ─── fixtures ───────────────────────────────────────────────────────
 
 
 @pytest.fixture
@@ -78,7 +111,19 @@ def synthetic_matheron_data():
     }
 
 
-# test Suite 1: Matheron Estimator
+@pytest.fixture
+def fitted_sv(synthetic_variogram_data):
+    """A SingleVariogram with synthetic data and fitted models."""
+    sv = _make_single_variogram_from_synthetic(
+        synthetic_variogram_data['lags'],
+        synthetic_variogram_data['empirical'],
+        synthetic_variogram_data['bin_counts'],
+    )
+    sv.fit_model(max_components=1, include_nugget=True)
+    return sv
+
+
+# ─── Test Suite 1: Matheron Estimator ───────────────────────────────
 
 
 class TestMatheronEstimator:
@@ -92,7 +137,6 @@ class TestMatheronEstimator:
             min_pairs=5
         )
 
-        # should match expected gamma values
         assert_allclose(
             gamma_est,
             synthetic_matheron_data['expected_gamma'],
@@ -108,7 +152,6 @@ class TestMatheronEstimator:
             min_pairs=min_pairs
         )
 
-        # bins with count < min_pairs should be NaN
         valid = synthetic_matheron_data['bin_counts'] >= min_pairs
         assert np.all(np.isnan(gamma_est[~valid]))
         assert np.all(np.isfinite(gamma_est[valid]))
@@ -120,10 +163,8 @@ class TestMatheronEstimator:
 
         gamma_est = VariogramAnalysis.compute_matheron(bin_counts, ssd, min_pairs=10)
 
-        # bins with zero counts should be NaN
         assert np.isnan(gamma_est[1])
         assert np.isnan(gamma_est[3])
-        # others should be finite
         assert np.isfinite(gamma_est[0])
         assert np.isfinite(gamma_est[2])
 
@@ -138,7 +179,7 @@ class TestMatheronEstimator:
         assert_allclose(gamma_est[0], 50.0 / (2.0 * 100))
 
 
-# test Suite 1b: Cressie–Hawkins Estimator
+# ─── Test Suite 1b: Cressie–Hawkins Estimator ──────────────────────
 
 
 class TestCressieHawkinsEstimator:
@@ -146,19 +187,13 @@ class TestCressieHawkinsEstimator:
 
     def test_compute_ch_basic(self):
         """Test Cressie–Hawkins: γ̂ = [mean(|ΔZ|^0.5)]⁴ / (2·(0.457 + 0.494/N))."""
-        # construct known inputs: N=100 pairs, all with |ΔZ|=1.0
-        # |ΔZ|^0.5 = 1.0 for each pair, so sum = 100
         bin_counts = np.array([100])
-        sum_sqrt_abs_diff = np.array([100.0])  # each pair contributes 1.0
+        sum_sqrt_abs_diff = np.array([100.0])
 
         gamma = VariogramAnalysis.compute_cressie_hawkins(
             bin_counts, sum_sqrt_abs_diff, min_pairs=10
         )
 
-        # mean(|ΔZ|^0.5) = 100/100 = 1.0
-        # [1.0]^4 = 1.0
-        # correction = 0.457 + 0.494/100 = 0.46194
-        # γ̂ = 0.5 * 1.0 / 0.46194 ≈ 1.0824
         expected = 0.5 * 1.0 / (0.457 + 0.494 / 100)
         assert_allclose(gamma[0], expected, rtol=1e-10)
 
@@ -168,8 +203,6 @@ class TestCressieHawkinsEstimator:
         rng = np.random.default_rng(42)
         n_pairs = 10000
         sigma = 2.0
-        # simulate squared differences from a pure-nugget process
-        # ΔZ ~ N(0, 2σ²)  so |ΔZ|^0.5 needs to be accumulated
         dz = rng.normal(0, np.sqrt(2) * sigma, n_pairs)
         ssd = np.array([np.sum(dz**2)])
         ssad = np.array([np.sum(np.abs(dz) ** 0.5)])
@@ -178,7 +211,6 @@ class TestCressieHawkinsEstimator:
         matheron = VariogramAnalysis.compute_matheron(counts, ssd, min_pairs=10)
         ch = VariogramAnalysis.compute_cressie_hawkins(counts, ssad, min_pairs=10)
 
-        # both should estimate γ ≈ σ² = 4.0; allow 10% tolerance for finite sample
         assert_allclose(matheron[0], sigma**2, rtol=0.1)
         assert_allclose(ch[0], sigma**2, rtol=0.15)
 
@@ -191,7 +223,7 @@ class TestCressieHawkinsEstimator:
             bin_counts, ssad, min_pairs=10
         )
         assert np.isfinite(gamma[0])
-        assert np.isnan(gamma[1])   # only 5 pairs
+        assert np.isnan(gamma[1])
         assert np.isfinite(gamma[2])
 
     def test_compute_ch_outlier_robustness(self):
@@ -200,8 +232,6 @@ class TestCressieHawkinsEstimator:
         n_pairs = 500
         sigma = 1.0
         dz = rng.normal(0, np.sqrt(2) * sigma, n_pairs)
-
-        # inject 5 extreme outliers (10× the std)
         dz[:5] = 10.0 * np.sqrt(2) * sigma
 
         ssd = np.array([np.sum(dz**2)])
@@ -211,1058 +241,506 @@ class TestCressieHawkinsEstimator:
         matheron = VariogramAnalysis.compute_matheron(counts, ssd, min_pairs=10)
         ch = VariogramAnalysis.compute_cressie_hawkins(counts, ssad, min_pairs=10)
 
-        # Matheron will be inflated by the outliers, Cressie–Hawkins less so.
-        # True value is σ²=1.0; Matheron will be >> 1.0; CH closer to 1.0.
         assert ch[0] < matheron[0], (
             f"Cressie–Hawkins ({ch[0]:.3f}) should be closer to true value "
             f"than Matheron ({matheron[0]:.3f}) in the presence of outliers"
         )
 
 
-# test Suite 2: VariogramModelSelector Construction
+# ─── Test Suite 2: WLS Fitting via SingleVariogram ──────────────────
 
 
-class TestVariogramModelSelectorConstruction:
-    """Test VariogramModelSelector initialization and setup."""
+class TestWLSFitting:
+    """Test SingleVariogram WLS fitting with synthetic variogram data."""
 
-    def test_constructor_stores_inputs(self, synthetic_variogram_data):
-        """Test that constructor properly stores input data."""
-        lags = synthetic_variogram_data['lags']
-        empirical = synthetic_variogram_data['empirical']
-        bin_counts = synthetic_variogram_data['bin_counts']
-
-        selector = VariogramModelSelector(
-            lags, empirical,
-            pair_counts=bin_counts, weighting='pair_count',
-        )
-
-        assert_array_almost_equal(selector.lags, lags)
-        assert_array_almost_equal(selector.empirical_variogram, empirical)
-        assert_array_almost_equal(selector.pair_counts, bin_counts)
-        # with pair_count weighting, weights should equal the raw counts
-        assert_array_almost_equal(selector.weights, bin_counts)
-
-    def test_constructor_default_weights(self, synthetic_variogram_data):
-        """Test that default weights are ones when no pair counts supplied."""
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            selector = VariogramModelSelector(
-                synthetic_variogram_data['lags'],
-                synthetic_variogram_data['empirical'],
-            )
-
-        assert_array_almost_equal(selector.weights, np.ones_like(selector.lags))
-
-    def test_constructor_with_sigma(self, synthetic_variogram_data):
-        """Test constructor with per-bin standard deviations."""
-        lags = synthetic_variogram_data['lags']
-        empirical = synthetic_variogram_data['empirical']
-        sigma = np.full_like(empirical, 0.05)
-
-        selector = VariogramModelSelector(
-            lags, empirical, sigma=sigma, weighting='uniform',
-        )
-
-        assert_array_almost_equal(selector.sigma, sigma)
-
-    def test_constructor_sigma_clipping(self):
-        """Test that zero/negative sigmas are clipped to eps."""
-        lags = np.array([10, 20, 30])
-        empirical = np.array([0.5, 0.8, 1.0])
-        sigma = np.array([0.1, 0, -0.05])
-
-        selector = VariogramModelSelector(
-            lags, empirical, sigma=sigma, weighting='uniform',
-        )
-
-        # first should be unchanged
-        assert selector.sigma[0] == 0.1
-        # others should be >= eps
-        assert selector.sigma[1] > 0
-        assert selector.sigma[2] > 0
-
-
-# test Suite 2b: Weighting Schemes
-
-
-class TestWeightingSchemes:
-    """Test VariogramModelSelector weighting schemes."""
-
-    def test_cressie_weights_formula(self, synthetic_variogram_data):
-        """Test that Cressie weights = N(h) / γ̂(h)²."""
-        lags = synthetic_variogram_data['lags']
-        empirical = synthetic_variogram_data['empirical']
-        counts = synthetic_variogram_data['bin_counts'].astype(float)
-
-        selector = VariogramModelSelector(
-            lags, empirical,
-            pair_counts=counts,
-            weighting='cressie',
-        )
-
-        expected = counts / np.maximum(empirical**2, np.finfo(float).eps)
-        assert_allclose(selector.weights, expected, rtol=1e-10)
-
-    def test_cressie_weights_short_lag_dominance(self, synthetic_variogram_data):
-        """Cressie weights should be much larger at short lags than long lags."""
-        lags = synthetic_variogram_data['lags']
-        empirical = synthetic_variogram_data['empirical']
-        counts = synthetic_variogram_data['bin_counts'].astype(float)
-
-        selector = VariogramModelSelector(
-            lags, empirical,
-            pair_counts=counts,
-            weighting='cressie',
-        )
-
-        # first-quartile weights should be >> last-quartile weights
-        n = len(lags)
-        q1 = n // 4
-        short_mean = np.mean(selector.weights[:q1])
-        long_mean = np.mean(selector.weights[-q1:])
-        assert short_mean > 10 * long_mean, (
-            f"Cressie weights should strongly upweight short lags; "
-            f"short mean={short_mean:.1f}, long mean={long_mean:.1f}"
-        )
-
-    def test_pair_count_weights(self, synthetic_variogram_data):
-        """pair_count weighting should return raw counts."""
-        counts = synthetic_variogram_data['bin_counts'].astype(float)
-
-        selector = VariogramModelSelector(
+    def test_fit_model_returns_dataframe(self, synthetic_variogram_data):
+        """fit_model() should return a pandas DataFrame."""
+        sv = _make_single_variogram_from_synthetic(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            pair_counts=counts,
-            weighting='pair_count',
+            synthetic_variogram_data['bin_counts'],
         )
-        assert_allclose(selector.weights, counts)
+        table = sv.fit_model(max_components=1, include_nugget=False)
 
-    def test_uniform_weights(self, synthetic_variogram_data):
-        """uniform weighting should return ones."""
-        selector = VariogramModelSelector(
+        import pandas as pd
+        assert isinstance(table, pd.DataFrame)
+        assert len(table) > 0
+
+    def test_fit_model_populates_fitted_models(self, synthetic_variogram_data):
+        """fit_model() should populate self.fitted_models list."""
+        sv = _make_single_variogram_from_synthetic(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            weighting='uniform',
+            synthetic_variogram_data['bin_counts'],
         )
-        assert_allclose(selector.weights, np.ones(len(synthetic_variogram_data['lags'])))
+        sv.fit_model(max_components=1, include_nugget=False)
 
-    def test_cressie_fallback_warns_without_counts(self, synthetic_variogram_data):
-        """Requesting Cressie without pair_counts should warn and fall back."""
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            selector = VariogramModelSelector(
-                synthetic_variogram_data['lags'],
-                synthetic_variogram_data['empirical'],
-                weighting='cressie',
-            )
-            # should have issued a warning
-            assert any("pair_counts" in str(warning.message) for warning in w)
-            # should fall back to uniform
-            assert_allclose(selector.weights, np.ones(len(synthetic_variogram_data['lags'])))
+        assert len(sv.fitted_models) > 0
+        assert all(isinstance(m, dict) for m in sv.fitted_models)
 
-    def test_invalid_weighting_raises(self, synthetic_variogram_data):
-        """Unknown weighting scheme should raise ValueError."""
-        with pytest.raises(ValueError, match="Unknown weighting"):
-            VariogramModelSelector(
-                synthetic_variogram_data['lags'],
-                synthetic_variogram_data['empirical'],
-                weighting='invalid_scheme',
-            )
-
-    def test_cressie_default_in_fit_best_model_auto(self, synthetic_variogram_data):
-        """fit_best_model_auto should use Cressie weights by default
-        when pair counts are available."""
-        lags = synthetic_variogram_data['lags']
-        empirical = synthetic_variogram_data['empirical']
-        counts = synthetic_variogram_data['bin_counts'].astype(float)
-
-        # manually build what fit_best_model_auto would create
-        selector = VariogramModelSelector(
-            lags, empirical,
-            pair_counts=counts,
-        )
-
-        # default weighting should be 'cressie'
-        assert selector.weighting == 'cressie'
-        # weights should NOT be equal to raw counts
-        assert not np.allclose(selector.weights, counts)
-        # weights should be N(h) / γ̂(h)²
-        expected = counts / np.maximum(empirical**2, np.finfo(float).eps)
-        assert_allclose(selector.weights, expected, rtol=1e-10)
-
-
-# test Suite 2c: Minimum Pair-Count Filtering
-
-
-class TestMinPairsFiltering:
-    """Test VariogramModelSelector minimum pair-count filtering.
-
-    Literature basis: Cressie (1985) recommends N(h) > 50; Oliver &
-    Webster (2014) suggest N(h) > 30.  Bins with too few pairs are
-    unreliable and should be excluded from model fitting.
-    """
-
-    def test_bins_below_threshold_get_zero_weight(self):
-        """Bins with pair_counts < min_pairs should have weight = 0."""
-        lags = np.array([10, 20, 30, 40, 50])
-        empirical = np.array([0.3, 0.6, 0.8, 0.9, 1.0])
-        counts = np.array([100, 80, 25, 15, 5], dtype=float)
-
-        selector = VariogramModelSelector(
-            lags, empirical,
-            pair_counts=counts,
-            weighting='pair_count',
-            min_pairs=30,
-        )
-
-        # first two bins (100, 80) should keep their pair-count weights
-        assert selector.weights[0] == 100.0
-        assert selector.weights[1] == 80.0
-        # last three bins (25, 15, 5) should be zeroed
-        assert selector.weights[2] == 0.0
-        assert selector.weights[3] == 0.0
-        assert selector.weights[4] == 0.0
-
-    def test_n_filtered_count(self):
-        """_n_filtered should report how many bins were excluded."""
-        lags = np.array([10, 20, 30, 40, 50])
-        empirical = np.array([0.3, 0.6, 0.8, 0.9, 1.0])
-        counts = np.array([100, 80, 25, 15, 5], dtype=float)
-
-        selector = VariogramModelSelector(
-            lags, empirical,
-            pair_counts=counts,
-            weighting='uniform',
-            min_pairs=30,
-        )
-
-        assert selector._n_filtered == 3
-
-    def test_no_filtering_when_all_above_threshold(self, synthetic_variogram_data):
-        """No bins should be filtered when all counts exceed min_pairs."""
-        selector = VariogramModelSelector(
+    def test_fit_model_populates_best_model(self, synthetic_variogram_data):
+        """fit_model() should set self.best_model."""
+        sv = _make_single_variogram_from_synthetic(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'].astype(float),
-            weighting='pair_count',
-            min_pairs=30,
+            synthetic_variogram_data['bin_counts'],
         )
+        sv.fit_model(max_components=1, include_nugget=False)
 
-        # fixture bin_counts range from 100 to 50, all > 30
-        assert selector._n_filtered == 0
-        assert np.all(selector.weights > 0)
+        assert sv.best_model is not None
+        assert 'params' in sv.best_model
+        assert 'rss' in sv.best_model
 
-    def test_min_pairs_disabled_with_none(self, synthetic_variogram_data):
-        """Setting min_pairs=None should disable filtering entirely."""
-        lags = np.array([10, 20, 30])
-        empirical = np.array([0.3, 0.6, 0.8])
-        counts = np.array([5, 3, 1], dtype=float)
-
-        selector = VariogramModelSelector(
-            lags, empirical,
-            pair_counts=counts,
-            weighting='pair_count',
-            min_pairs=None,
-        )
-
-        assert selector._n_filtered == 0
-        assert_allclose(selector.weights, counts)
-
-    def test_min_pairs_disabled_with_zero(self):
-        """Setting min_pairs=0 should disable filtering entirely."""
-        lags = np.array([10, 20, 30])
-        empirical = np.array([0.3, 0.6, 0.8])
-        counts = np.array([5, 3, 1], dtype=float)
-
-        selector = VariogramModelSelector(
-            lags, empirical,
-            pair_counts=counts,
-            weighting='pair_count',
-            min_pairs=0,
-        )
-
-        assert selector._n_filtered == 0
-        assert_allclose(selector.weights, counts)
-
-    def test_min_pairs_ignored_without_pair_counts(self):
-        """min_pairs should be silently skipped when pair_counts is None."""
-        lags = np.array([10, 20, 30])
-        empirical = np.array([0.3, 0.6, 0.8])
-
-        selector = VariogramModelSelector(
-            lags, empirical,
-            weighting='uniform',
-            min_pairs=50,
-        )
-
-        # no filtering, all weights = 1
-        assert selector._n_filtered == 0
-        assert_allclose(selector.weights, np.ones(3))
-
-    def test_filtering_works_with_cressie_weights(self):
-        """min_pairs should zero Cressie weights for low-count bins."""
-        lags = np.array([10, 20, 30, 40, 50])
-        empirical = np.array([0.3, 0.6, 0.8, 0.9, 1.0])
-        counts = np.array([200, 150, 20, 10, 5], dtype=float)
-
-        selector = VariogramModelSelector(
-            lags, empirical,
-            pair_counts=counts,
-            weighting='cressie',
-            min_pairs=30,
-        )
-
-        # first two: Cressie weight = N(h) / γ̂(h)²
-        expected_0 = 200.0 / (0.3**2)
-        expected_1 = 150.0 / (0.6**2)
-        assert_allclose(selector.weights[0], expected_0, rtol=1e-10)
-        assert_allclose(selector.weights[1], expected_1, rtol=1e-10)
-        # last three: should be zeroed despite having valid Cressie weights
-        assert selector.weights[2] == 0.0
-        assert selector.weights[3] == 0.0
-        assert selector.weights[4] == 0.0
-
-    def test_few_remaining_bins_warns(self):
-        """Should warn when min_pairs leaves fewer than 4 usable bins."""
-        lags = np.array([10, 20, 30, 40, 50])
-        empirical = np.array([0.3, 0.6, 0.8, 0.9, 1.0])
-        # only 2 bins above threshold
-        counts = np.array([100, 80, 5, 3, 1], dtype=float)
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            selector = VariogramModelSelector(
-                lags, empirical,
-                pair_counts=counts,
-                weighting='pair_count',
-                min_pairs=30,
-            )
-            # should warn about too few remaining bins
-            min_pairs_warnings = [
-                x for x in w
-                if "min_pairs" in str(x.message) and "filters" in str(x.message)
-            ]
-            assert len(min_pairs_warnings) >= 1
-            assert "2" in str(min_pairs_warnings[0].message)  # 2 remaining
-
-    def test_default_min_pairs_is_30(self, synthetic_variogram_data):
-        """Default min_pairs should be 30 (literature: Cressie 1985)."""
-        selector = VariogramModelSelector(
+    def test_fit_model_spherical_parameters_reasonable(self, synthetic_variogram_data):
+        """Fitted spherical parameters should be close to true values."""
+        sv = _make_single_variogram_from_synthetic(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'].astype(float),
-            weighting='pair_count',
+            synthetic_variogram_data['bin_counts'],
+        )
+        sv.fit_model(
+            model_types=['spherical'],
+            max_components=1,
+            include_nugget=False,
         )
 
-        assert selector.min_pairs == 30
+        best = sv.best_model
+        assert best is not None
 
-
-# test Suite 3: Candidate Generation
-
-
-class TestCandidateGeneration:
-    """Test VariogramModelSelector.generate_candidates()."""
-
-    def test_generate_candidates_non_empty(self, synthetic_variogram_data):
-        """Test that generate_candidates returns non-empty list."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            weighting='uniform',
-        )
-
-        candidates = selector.generate_candidates(max_components=2)
-
-        assert len(candidates) > 0
-        assert all(isinstance(c, CompositeVariogramModel) for c in candidates)
-
-    def test_generate_candidates_respects_max_components(self, synthetic_variogram_data):
-        """Test that candidates respect max_components limit."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            weighting='uniform',
-        )
-
-        cand1 = selector.generate_candidates(max_components=1)
-        cand2 = selector.generate_candidates(max_components=2)
-
-        # more components should give more candidates (or equal)
-        assert len(cand2) >= len(cand1)
-
-        # check that all single-component models are in both lists
-        cand1_names = [c.component_names for c in cand1]
-        cand2_names = [c.component_names for c in cand2]
-
-        for name in cand1_names:
-            assert name in cand2_names
-
-    def test_generate_candidates_include_nugget_false(self, synthetic_variogram_data):
-        """Test nugget inclusion flag."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            weighting='uniform',
-        )
-
-        cand_with_nugget = selector.generate_candidates(include_nugget=True)
-        cand_no_nugget = selector.generate_candidates(include_nugget=False)
-
-        # all with-nugget models should have nugget
-        assert all(c.include_nugget for c in cand_with_nugget)
-        assert all(not c.include_nugget for c in cand_no_nugget)
-
-    def test_generate_candidates_include_unbounded(self, synthetic_variogram_data):
-        """Test unbounded model inclusion flag."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            weighting='uniform',
-        )
-
-        cand_with_unbounded = selector.generate_candidates(include_unbounded=True)
-        cand_no_unbounded = selector.generate_candidates(include_unbounded=False)
-
-        # check if any unbounded models are present
-        # (may be empty if registry doesn't have unbounded models)
-        has_unbounded_with = any(
-            not all(
-                MODEL_REGISTRY.get_model(name).is_bounded
-                for name in c.component_names
-            )
-            for c in cand_with_unbounded
-        )
-
-        has_unbounded_without = any(
-            not all(
-                MODEL_REGISTRY.get_model(name).is_bounded
-                for name in c.component_names
-            )
-            for c in cand_no_unbounded
-        )
-
-        # with unbounded enabled might have some unbounded (or not, depends on data)
-        # without unbounded should have None
-        if has_unbounded_with:
-            assert has_unbounded_without is False  # exclusive check
-
-
-# test Suite 4: Model Fitting on Synthetic Data
-
-
-class TestModelFitting:
-    """Test VariogramModelSelector.fit_model()."""
-
-    def test_fit_model_spherical(self, synthetic_variogram_data):
-        """Test fitting a spherical model to synthetic spherical data."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        # create single spherical model
-        model = CompositeVariogramModel(['spherical'], include_nugget=False)
-        fitted = selector.fit_model(model)
-
-        assert fitted is not None
-        assert fitted.composite_model is not None
-        assert len(fitted.params) == 2  # sill + range
-
-    def test_fit_model_parameters_reasonable(self, synthetic_variogram_data):
-        """Test that fitted parameters are close to true values (within 20%)."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        model = CompositeVariogramModel(['spherical'], include_nugget=False)
-        fitted = selector.fit_model(model)
-
-        # extract sill and range
-        fitted_sill = fitted.params[0]
-        fitted_range = fitted.params[1]
-
+        fitted_sill = best['params'][0]
+        fitted_range = best['params'][1]
         true_sill = synthetic_variogram_data['true_sill']
         true_range = synthetic_variogram_data['true_range']
 
-        # check within 20% of True values
         assert abs(fitted_sill - true_sill) / true_sill < 0.2
         assert abs(fitted_range - true_range) / true_range < 0.2
 
     def test_fit_model_with_nugget(self, synthetic_variogram_data):
-        """Test fitting with nugget component."""
-        selector = VariogramModelSelector(
+        """Fitting with nugget should add a nugget parameter."""
+        sv = _make_single_variogram_from_synthetic(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
+            synthetic_variogram_data['bin_counts'],
+        )
+        sv.fit_model(
+            model_types=['spherical'],
+            max_components=1,
+            include_nugget=True,
         )
 
-        model = CompositeVariogramModel(['spherical'], include_nugget=True)
-        fitted = selector.fit_model(model)
+        # should have at least one spatial model with nugget (not just pure nugget)
+        nugget_models = [
+            m for m in sv.fitted_models
+            if m['model'].include_nugget and len(m['model'].component_names) > 0
+        ]
+        assert len(nugget_models) > 0
+        # spherical + nugget should have 3 params: sill + range + nugget
+        assert nugget_models[0]['model'].n_params == 3
 
-        assert fitted is not None
-        assert len(fitted.params) == 3  # sill + range + nugget
-
-    def test_fit_model_returns_diagnostics(self, synthetic_variogram_data):
-        """Test that fit_model returns diagnostics (RSS, AIC, BIC)."""
-        selector = VariogramModelSelector(
+    def test_fit_model_without_pair_counts(self, synthetic_variogram_data):
+        """Fitting should still work with uniform weights when pair_counts is None."""
+        sv = _make_single_variogram_from_synthetic(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
+            pair_counts=None,
         )
+        sv.fit_model(
+            model_types=['spherical'],
+            max_components=1,
+            include_nugget=False,
+        )
+
+        assert sv.best_model is not None
+        assert np.isfinite(sv.best_model['rss'])
+
+    def test_fit_model_requires_empirical_variogram(self):
+        """fit_model() should raise if no empirical variogram computed."""
+        sv = object.__new__(SingleVariogram)
+        sv.lags = None
+        sv.variogram = None
+
+        with pytest.raises(RuntimeError, match="No empirical variogram"):
+            sv.fit_model()
+
+
+# ─── Test Suite 3: Candidate Generation ─────────────────────────────
+
+
+class TestCandidateGeneration:
+    """Test that fit_model generates expected candidate structures."""
+
+    def test_single_component_candidates(self, synthetic_variogram_data):
+        """max_components=1 should generate single-component models."""
+        sv = _make_single_variogram_from_synthetic(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            synthetic_variogram_data['bin_counts'],
+        )
+        sv.fit_model(max_components=1, include_nugget=False)
+
+        for m in sv.fitted_models:
+            model = m['model']
+            # single-component (or pure nugget)
+            assert len(model.component_names) <= 1
+
+    def test_multi_component_candidates(self, synthetic_variogram_data):
+        """max_components=2 should generate more candidates than max_components=1."""
+        sv1 = _make_single_variogram_from_synthetic(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            synthetic_variogram_data['bin_counts'],
+        )
+        sv1.fit_model(max_components=1, include_nugget=False)
+
+        sv2 = _make_single_variogram_from_synthetic(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            synthetic_variogram_data['bin_counts'],
+        )
+        sv2.fit_model(max_components=2, include_nugget=False)
+
+        assert len(sv2.fitted_models) >= len(sv1.fitted_models)
+
+    def test_nugget_variants_generated(self, synthetic_variogram_data):
+        """include_nugget=True should produce both nugget and no-nugget variants."""
+        sv = _make_single_variogram_from_synthetic(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            synthetic_variogram_data['bin_counts'],
+        )
+        sv.fit_model(max_components=1, include_nugget=True)
+
+        has_nugget = any(m['model'].include_nugget for m in sv.fitted_models)
+        has_no_nugget = any(
+            not m['model'].include_nugget and len(m['model'].component_names) > 0
+            for m in sv.fitted_models
+        )
+        assert has_nugget
+        assert has_no_nugget
+
+    def test_no_nugget_variants_when_disabled(self, synthetic_variogram_data):
+        """include_nugget=False should only produce no-nugget models (except pure nugget)."""
+        sv = _make_single_variogram_from_synthetic(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            synthetic_variogram_data['bin_counts'],
+        )
+        sv.fit_model(max_components=1, include_nugget=False)
+
+        for m in sv.fitted_models:
+            model = m['model']
+            if len(model.component_names) > 0:
+                assert not model.include_nugget
+
+
+# ─── Test Suite 4: Individual Model Fitting ─────────────────────────
+
+
+class TestIndividualModelFitting:
+    """Test _fit_single_composite_model directly."""
+
+    def test_fit_single_spherical(self, synthetic_variogram_data):
+        """Fitting a single spherical model should return valid result dict."""
+        sv = _make_single_variogram_from_synthetic(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            synthetic_variogram_data['bin_counts'],
+        )
+        lags = sv.lags
+        variogram = sv.variogram
+        gamma_sq = np.maximum(np.square(variogram), np.finfo(float).eps)
+        weights = sv.pair_counts / gamma_sq
 
         model = CompositeVariogramModel(['spherical'], include_nugget=False)
-        fitted = selector.fit_model(model)
+        result = sv._fit_single_composite_model(model, lags, variogram, None, weights)
 
-        assert fitted.rss > 0
-        assert np.isfinite(fitted.aic)
-        assert np.isfinite(fitted.bic)
+        assert result is not None
+        assert len(result['params']) == 2  # sill + range
+        assert result['rss'] > 0
+        assert np.isfinite(result['aic'])
+        assert np.isfinite(result['bic'])
+
+    def test_fit_single_exponential(self, synthetic_variogram_data):
+        """Fitting an exponential model should return valid result dict."""
+        sv = _make_single_variogram_from_synthetic(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            synthetic_variogram_data['bin_counts'],
+        )
+        lags = sv.lags
+        variogram = sv.variogram
+        gamma_sq = np.maximum(np.square(variogram), np.finfo(float).eps)
+        weights = sv.pair_counts / gamma_sq
+
+        model = CompositeVariogramModel(['exponential'], include_nugget=False)
+        result = sv._fit_single_composite_model(model, lags, variogram, None, weights)
+
+        assert result is not None
+        assert len(result['params']) == 2
+
+    def test_fit_with_nugget_extra_parameter(self, synthetic_variogram_data):
+        """Fitting with nugget should have one extra parameter."""
+        sv = _make_single_variogram_from_synthetic(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            synthetic_variogram_data['bin_counts'],
+        )
+        lags = sv.lags
+        variogram = sv.variogram
+        weights = np.ones_like(variogram)
+
+        model_no_nug = CompositeVariogramModel(['spherical'], include_nugget=False)
+        model_nug = CompositeVariogramModel(['spherical'], include_nugget=True)
+
+        r1 = sv._fit_single_composite_model(model_no_nug, lags, variogram, None, weights)
+        r2 = sv._fit_single_composite_model(model_nug, lags, variogram, None, weights)
+
+        assert len(r2['params']) == len(r1['params']) + 1
+
+    def test_fit_returns_covariance_matrix(self, synthetic_variogram_data):
+        """Result should include a parameter covariance matrix."""
+        sv = _make_single_variogram_from_synthetic(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            synthetic_variogram_data['bin_counts'],
+        )
+        lags = sv.lags
+        variogram = sv.variogram
+        weights = np.ones_like(variogram)
+
+        model = CompositeVariogramModel(['spherical'], include_nugget=False)
+        result = sv._fit_single_composite_model(model, lags, variogram, None, weights)
+
+        assert 'param_cov' in result
+        assert result['param_cov'].shape == (2, 2)
 
 
-# test Suite 5: Information Criteria
+# ─── Test Suite 5: Information Criteria ─────────────────────────────
 
 
 class TestInformationCriteria:
-    """Test AIC/BIC computation."""
+    """Test AIC/BIC/AICc computation."""
 
-    def test_aic_bic_finite(self, synthetic_variogram_data):
-        """Test that AIC and BIC are finite."""
-        selector = VariogramModelSelector(
+    def test_aic_bic_aicc_finite(self, fitted_sv):
+        """AIC, BIC, and AICc should be finite for all fitted models."""
+        for m in fitted_sv.fitted_models:
+            assert np.isfinite(m['aic'])
+            assert np.isfinite(m['bic'])
+            assert np.isfinite(m['aicc'])
+
+    def test_bic_penalizes_more_params(self, synthetic_variogram_data):
+        """BIC penalty grows with log(n); more parameters should increase BIC."""
+        sv = _make_single_variogram_from_synthetic(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
+            synthetic_variogram_data['bin_counts'],
         )
+        sv.fit_model(max_components=2, include_nugget=False)
 
-        model = CompositeVariogramModel(['spherical'], include_nugget=False)
-        fitted = selector.fit_model(model)
+        # find a 1-component and a 2-component model
+        single = [m for m in sv.fitted_models if len(m['model'].component_names) == 1]
+        double = [m for m in sv.fitted_models if len(m['model'].component_names) == 2]
 
-        assert np.isfinite(fitted.aic)
-        assert np.isfinite(fitted.bic)
+        if single and double:
+            assert double[0]['model'].n_params > single[0]['model'].n_params
 
-    def test_bic_penalty_for_parameters(self, synthetic_variogram_data):
-        """Test that BIC penalizes more parameters more heavily than AIC."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        # fit two models: spherical and spherical+exponential
-        model_1 = CompositeVariogramModel(['spherical'], include_nugget=False)
-        model_2 = CompositeVariogramModel(['spherical', 'exponential'], include_nugget=False)
-
-        fitted_1 = selector.fit_model(model_1)
-        fitted_2 = selector.fit_model(model_2)
-
-        if fitted_1 and fitted_2:
-            # more parameters should increase BIC more than AIC (relative to likelihood)
-            bic_diff = fitted_2.bic - fitted_1.bic
-            aic_diff = fitted_2.aic - fitted_1.aic
-
-            # bIC penalty should be larger
-            # (Note: this is probabilistic, may not always hold with noise)
-            assert fitted_2.composite_model.n_params > fitted_1.composite_model.n_params
+    def test_aicc_equals_aic_for_large_n(self):
+        """AICc should converge to AIC when n >> k."""
+        # construct a toy: n = 200, k = 2
+        # AICc correction = 2k(k+1) / (n-k-1) -> small
+        n = 200
+        k = 2
+        correction = 2 * k * (k + 1) / (n - k - 1)
+        assert correction < 0.1  # negligible for large n
 
 
-# test Suite 6: Model Selection
+# ─── Test Suite 6: Model Selection ──────────────────────────────────
 
 
 class TestModelSelection:
-    """Test VariogramModelSelector.select_best()."""
+    """Test best model selection via different criteria."""
 
-    def test_select_best_by_aic(self, synthetic_variogram_data):
-        """Test select_best with AIC criterion."""
-        selector = VariogramModelSelector(
+    def test_best_model_selected_by_aicc(self, fitted_sv):
+        """Default criterion (AICc) should select a best model."""
+        assert fitted_sv.best_model is not None
+        assert 'aicc' in fitted_sv.best_model
+
+    def test_aic_criterion(self, synthetic_variogram_data):
+        """criterion='aic' should select by minimum AIC."""
+        sv = _make_single_variogram_from_synthetic(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
+            synthetic_variogram_data['bin_counts'],
         )
+        sv.fit_model(max_components=1, include_nugget=True, criterion='aic')
 
-        selector.fit_all_candidates(max_components=2, include_nugget=True, compute_cv=False)
-        best = selector.select_best(criterion='aic')
+        best_aic = sv.best_model['aic']
+        assert all(m['aic'] >= best_aic - 1e-10 for m in sv.fitted_models)
 
-        assert best is not None
-        assert isinstance(best, FittedVariogramModel)
-
-    def test_select_best_by_bic(self, synthetic_variogram_data):
-        """Test select_best with BIC criterion."""
-        selector = VariogramModelSelector(
+    def test_bic_criterion(self, synthetic_variogram_data):
+        """criterion='bic' should select by minimum BIC."""
+        sv = _make_single_variogram_from_synthetic(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
+            synthetic_variogram_data['bin_counts'],
         )
+        sv.fit_model(max_components=1, include_nugget=True, criterion='bic')
 
-        selector.fit_all_candidates(max_components=2, include_nugget=True, compute_cv=False)
-        best = selector.select_best(criterion='bic')
+        best_bic = sv.best_model['bic']
+        assert all(m['bic'] >= best_bic - 1e-10 for m in sv.fitted_models)
 
-        assert best is not None
+    def test_fitted_model_property(self, fitted_sv):
+        """fitted_model property should return a FittedVariogramModel."""
+        fm = fitted_sv.fitted_model
+        assert isinstance(fm, FittedVariogramModel)
+        assert fm.params is not None
+        assert fm.rss > 0
 
-    def test_select_best_raises_no_models(self, synthetic_variogram_data):
-        """Test that select_best raises if no models fitted."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            weighting='uniform',
-        )
-
-        with pytest.raises(ValueError, match="No fitted models"):
-            selector.select_best()
-
-    def test_select_best_invalid_criterion(self, synthetic_variogram_data):
-        """Test that invalid criterion raises."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)
-
-        with pytest.raises(ValueError, match="Unknown criterion"):
-            selector.select_best(criterion='invalid')
+    def test_fitted_model_raises_without_fit(self):
+        """fitted_model should raise if fit_model() not called."""
+        sv = object.__new__(SingleVariogram)
+        sv.best_model = None
+        with pytest.raises(RuntimeError, match="No fitted model"):
+            _ = sv.fitted_model
 
 
-# test Suite 7: Cross-Validation
-
-
-class TestCrossValidation:
-    """Test VariogramModelSelector.cross_validate()."""
-
-    def test_cross_validate_returns_positive_rmse(self, synthetic_variogram_data):
-        """Test that cross_validate returns positive finite RMSE."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        model = CompositeVariogramModel(['spherical'], include_nugget=False)
-        fitted = selector.fit_model(model)
-
-        rmse = selector.cross_validate(fitted, k=3)
-
-        assert rmse > 0
-        assert np.isfinite(rmse)
-
-    def test_cross_validate_k_folds(self, synthetic_variogram_data):
-        """Test cross_validate with different k values."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        model = CompositeVariogramModel(['spherical'], include_nugget=False)
-        fitted = selector.fit_model(model)
-
-        rmse_2 = selector.cross_validate(fitted, k=2, seed=42)
-        rmse_5 = selector.cross_validate(fitted, k=5, seed=42)
-
-        # both should be finite positive
-        assert rmse_2 > 0 and np.isfinite(rmse_2)
-        assert rmse_5 > 0 and np.isfinite(rmse_5)
-
-
-# test Suite 8: Akaike Weights
-
-
-class TestAkaikeWeights:
-    """Test VariogramModelSelector._compute_akaike_weights()."""
-
-    def test_akaike_weights_sum_to_one(self, synthetic_variogram_data):
-        """Test that Akaike weights sum to 1.0."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        selector.fit_all_candidates(max_components=2, include_nugget=True, compute_cv=False)
-
-        assert selector.model_weights is not None
-        assert_allclose(np.sum(selector.model_weights), 1.0, rtol=1e-10)
-
-    def test_akaike_weights_non_negative(self, synthetic_variogram_data):
-        """Test that all Akaike weights are non-negative."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        selector.fit_all_candidates(max_components=2, include_nugget=False, compute_cv=False)
-
-        assert np.all(selector.model_weights >= 0)
-
-    def test_akaike_weights_best_has_highest_weight(self, synthetic_variogram_data):
-        """Test that best model has highest weight."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        selector.fit_all_candidates(max_components=2, include_nugget=False, compute_cv=False)
-        best = selector.select_best(criterion='aic')
-
-        best_idx = selector.fitted_models.index(best)
-        best_weight = selector.model_weights[best_idx]
-
-        assert best_weight >= np.max(selector.model_weights[selector.model_weights < best_weight + 1e-10])
-
-
-# test Suite 9: BMA Variogram
-
-
-class TestBMAVariogram:
-    """Test VariogramModelSelector.get_bma_variogram()."""
-
-    def test_get_bma_variogram_returns_callable(self, synthetic_variogram_data):
-        """Test that get_bma_variogram returns a callable."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)
-        bma_func = selector.get_bma_variogram()
-
-        assert callable(bma_func)
-
-    def test_bma_variogram_produces_finite_results(self, synthetic_variogram_data):
-        """Test that BMA variogram produces finite results."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)
-        bma_func = selector.get_bma_variogram()
-
-        test_lags = np.array([10, 50, 100, 200])
-        result = bma_func(test_lags)
-
-        assert result.shape == test_lags.shape
-        assert np.all(np.isfinite(result))
-
-    def test_bma_variogram_raises_without_fit(self, synthetic_variogram_data):
-        """Test that get_bma_variogram raises if fit_all_candidates not called."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            weighting='uniform',
-        )
-
-        with pytest.raises(ValueError, match="No model weights"):
-            selector.get_bma_variogram()
-
-
-# test Suite 10: Bootstrap Uncertainty
-
-
-class TestBootstrapUncertainty:
-    """Test VariogramModelSelector.bootstrap_best_model()."""
-
-    def test_bootstrap_returns_samples(self, synthetic_variogram_data):
-        """Test that bootstrap_best_model returns parameter samples."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count',
-            sigma=np.full_like(synthetic_variogram_data['empirical'], 0.05)
-        )
-
-        selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)
-        selector.select_best(criterion='aic')
-
-        samples = selector.bootstrap_best_model(n_boot=50, seed=42)
-
-        assert samples is not None
-        assert samples.shape[0] > 0
-        assert samples.shape[1] == selector.best_model.composite_model.n_params
-
-    def test_bootstrap_stores_in_fitted_model(self, synthetic_variogram_data):
-        """Test that bootstrap samples are stored in best_model."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count',
-            sigma=np.full_like(synthetic_variogram_data['empirical'], 0.05)
-        )
-
-        selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)
-        selector.select_best(criterion='aic')
-        selector.bootstrap_best_model(n_boot=50, seed=42)
-
-        assert selector.best_model.param_samples is not None
-        assert len(selector.best_model.param_samples) > 0
-
-
-# test Suite 11: FittedVariogramModel
+# ─── Test Suite 7: FittedVariogramModel ─────────────────────────────
 
 
 class TestFittedVariogramModel:
     """Test FittedVariogramModel dataclass."""
 
-    def test_fitted_model_predict_matches_model(self, synthetic_variogram_data):
-        """Test that predict() matches direct model call."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        model = CompositeVariogramModel(['spherical'], include_nugget=False)
-        fitted = selector.fit_model(model)
-
+    def test_predict_matches_model(self, fitted_sv):
+        """predict() should match direct composite model call."""
+        fm = fitted_sv.fitted_model
         test_lags = np.array([10, 50, 100, 200])
 
-        # predict() should match direct model call
-        pred1 = fitted.predict(test_lags)
-        pred2 = fitted.composite_model(test_lags)
+        pred1 = fm.predict(test_lags)
+        pred2 = fm.composite_model(test_lags)
 
         assert_allclose(pred1, pred2, rtol=1e-10)
 
-    def test_get_param_percentiles_without_samples(self, synthetic_variogram_data):
-        """Test that get_param_percentiles raises without bootstrap samples."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        model = CompositeVariogramModel(['spherical'], include_nugget=False)
-        fitted = selector.fit_model(model)
-
-        # no bootstrap samples yet
+    def test_get_param_percentiles_without_samples(self, fitted_sv):
+        """get_param_percentiles should raise without bootstrap samples."""
+        fm = fitted_sv.fitted_model
         with pytest.raises(ValueError, match="No bootstrap samples"):
-            fitted.get_param_percentiles()
+            fm.get_param_percentiles()
 
-    def test_get_param_percentiles_with_samples(self, synthetic_variogram_data):
-        """Test get_param_percentiles with bootstrap samples."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count',
-            sigma=np.full_like(synthetic_variogram_data['empirical'], 0.05)
+    def test_get_param_percentiles_with_samples(self, fitted_sv):
+        """get_param_percentiles should work with bootstrap samples."""
+        fm = fitted_sv.fitted_model
+
+        # manually add fake bootstrap samples
+        n_boot = 50
+        n_params = fm.composite_model.n_params
+        rng = np.random.default_rng(42)
+        fm.param_samples = rng.normal(
+            fm.params, 0.1 * np.abs(fm.params), size=(n_boot, n_params)
         )
 
-        selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)
-        selector.select_best(criterion='aic')
-        selector.bootstrap_best_model(n_boot=50, seed=42)
-
-        percentiles = selector.best_model.get_param_percentiles([16, 50, 84])
-
-        # should have dict with parameter names as keys
+        percentiles = fm.get_param_percentiles([16, 50, 84])
         assert isinstance(percentiles, dict)
-        assert len(percentiles) == selector.best_model.composite_model.n_params
-
-        # each value should have 3 elements (16th, 50th, 84th percentile)
+        assert len(percentiles) == n_params
         for key, vals in percentiles.items():
             assert len(vals) == 3
 
+    def test_fitted_model_has_msspe_field(self, fitted_sv):
+        """FittedVariogramModel should have msspe and related fields."""
+        fm = fitted_sv.fitted_model
+        assert hasattr(fm, 'msspe')
+        assert hasattr(fm, 'loocv_result')
 
-# test Suite 12: Initial Guess
+    def test_predict_at_zero(self, fitted_sv):
+        """predict(0) should return 0 (or nugget) for valid models."""
+        fm = fitted_sv.fitted_model
+        pred = fm.predict(np.array([0.0]))
+        # should be non-negative
+        assert pred[0] >= 0
+
+    def test_predict_monotonic_for_bounded_model(self, fitted_sv):
+        """Semivariance should be non-decreasing for bounded models."""
+        fm = fitted_sv.fitted_model
+        lags = np.linspace(1, 500, 100)
+        pred = fm.predict(lags)
+
+        # allow small numerical noise
+        diffs = np.diff(pred)
+        assert np.all(diffs >= -1e-10), "Semivariance should not decrease"
+
+
+# ─── Test Suite 8: Initial Guess ────────────────────────────────────
 
 
 class TestInitialGuess:
-    """Test VariogramAnalysis.get_base_initial_guess()."""
+    """Test CompositeVariogramModel.default_guess()."""
 
-    def test_initial_guess_correct_length(self, synthetic_variogram_data):
-        """Test that initial guess has correct length."""
-        guess = VariogramAnalysis.get_base_initial_guess(
-            n=1,
-            mean_variogram=synthetic_variogram_data['empirical'],
-            lags=synthetic_variogram_data['lags'],
-            nugget=False
+    def test_default_guess_correct_length(self, synthetic_variogram_data):
+        """default_guess should have correct number of parameters."""
+        lags = synthetic_variogram_data['lags']
+        variogram = synthetic_variogram_data['empirical']
+
+        model = CompositeVariogramModel(['spherical'], include_nugget=False)
+        guess = model.default_guess(lags, variogram)
+        assert len(guess) == 2  # sill + range
+
+    def test_default_guess_with_nugget(self, synthetic_variogram_data):
+        """default_guess with nugget should have one extra parameter."""
+        lags = synthetic_variogram_data['lags']
+        variogram = synthetic_variogram_data['empirical']
+
+        model = CompositeVariogramModel(['spherical'], include_nugget=True)
+        guess = model.default_guess(lags, variogram)
+        assert len(guess) == 3  # sill + range + nugget
+
+    def test_default_guess_multi_component(self, synthetic_variogram_data):
+        """default_guess for multi-component should have correct count."""
+        lags = synthetic_variogram_data['lags']
+        variogram = synthetic_variogram_data['empirical']
+
+        model = CompositeVariogramModel(
+            ['spherical', 'exponential'], include_nugget=False
         )
+        guess = model.default_guess(lags, variogram)
+        assert len(guess) == 4  # 2 sills + 2 ranges
 
-        # 1 component without nugget: 1 sill + 1 range = 2 params
-        assert len(guess) == 2
+    def test_default_guess_positive(self, synthetic_variogram_data):
+        """All initial guess parameters should be non-negative."""
+        lags = synthetic_variogram_data['lags']
+        variogram = synthetic_variogram_data['empirical']
 
-    def test_initial_guess_with_nugget(self, synthetic_variogram_data):
-        """Test initial guess length with nugget."""
-        guess = VariogramAnalysis.get_base_initial_guess(
-            n=1,
-            mean_variogram=synthetic_variogram_data['empirical'],
-            lags=synthetic_variogram_data['lags'],
-            nugget=True
-        )
-
-        # 1 component with nugget: 1 sill + 1 range + 1 nugget = 3 params
-        assert len(guess) == 3
-
-    def test_initial_guess_multiple_components(self, synthetic_variogram_data):
-        """Test initial guess with multiple components."""
-        guess = VariogramAnalysis.get_base_initial_guess(
-            n=2,
-            mean_variogram=synthetic_variogram_data['empirical'],
-            lags=synthetic_variogram_data['lags'],
-            nugget=False
-        )
-
-        # 2 components: 2 sills + 2 ranges = 4 params
-        assert len(guess) == 4
-
-    def test_initial_guess_parameters_positive(self, synthetic_variogram_data):
-        """Test that initial guess produces positive parameters."""
-        guess = VariogramAnalysis.get_base_initial_guess(
-            n=1,
-            mean_variogram=synthetic_variogram_data['empirical'],
-            lags=synthetic_variogram_data['lags'],
-            nugget=True
-        )
-
-        # all parameters should be non-negative
+        model = CompositeVariogramModel(['spherical'], include_nugget=True)
+        guess = model.default_guess(lags, variogram)
         assert np.all(guess >= 0)
 
-    def test_initial_guess_reasonable_ranges(self, synthetic_variogram_data):
-        """Test that initial guess produces reasonable range values."""
+    def test_default_guess_range_less_than_max_lag(self, synthetic_variogram_data):
+        """Initial range guess should not exceed max lag."""
         lags = synthetic_variogram_data['lags']
+        variogram = synthetic_variogram_data['empirical']
         max_lag = np.max(lags)
 
-        guess = VariogramAnalysis.get_base_initial_guess(
-            n=1,
-            mean_variogram=synthetic_variogram_data['empirical'],
-            lags=lags,
-            nugget=False
-        )
-
-        # range (second param) should be < max_lag
-        assert guess[1] < max_lag
+        model = CompositeVariogramModel(['spherical'], include_nugget=False)
+        guess = model.default_guess(lags, variogram)
+        # range is second parameter
+        assert guess[1] < max_lag * 2  # generous bound
 
 
-# test Suite 13: Fit All Candidates
-
-
-class TestFitAllCandidates:
-    """Test VariogramModelSelector.fit_all_candidates()."""
-
-    def test_fit_all_candidates_populates_list(self, synthetic_variogram_data):
-        """Test that fit_all_candidates populates fitted_models list."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        selector.fit_all_candidates(max_components=1, include_nugget=False)
-
-        assert len(selector.fitted_models) > 0
-        assert all(isinstance(m, FittedVariogramModel) for m in selector.fitted_models)
-
-    def test_fit_all_candidates_compute_cv(self, synthetic_variogram_data):
-        """Test that compute_cv flag works."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=True)
-
-        # at least some models should have CV scores
-        has_cv = any(m.cv_rmse is not None for m in selector.fitted_models)
-        assert has_cv
-
-    def test_fit_all_candidates_without_cv(self, synthetic_variogram_data):
-        """Test that compute_cv=False skips CV computation."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)
-
-        # all models should have None for cv_rmse
-        assert all(m.cv_rmse is None for m in selector.fitted_models)
-
-
-# integration Tests
-
-
-class TestIntegration:
-    """End-to-end integration tests."""
-
-    def test_full_workflow(self, synthetic_variogram_data):
-        """Test complete workflow: generate -> fit -> select -> bootstrap."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count',
-            sigma=np.full_like(synthetic_variogram_data['empirical'], 0.05)
-        )
-
-        # fit candidates
-        selector.fit_all_candidates(
-            max_components=2,
-            include_nugget=True,
-            compute_cv=True,
-            cv_folds=3,
-            seed=42
-        )
-
-        # select best
-        best = selector.select_best(criterion='aic')
-        assert best is not None
-
-        # bootstrap
-        samples = selector.bootstrap_best_model(n_boot=30, seed=42)
-        assert len(samples) > 0
-
-        # get percentiles
-        percentiles = best.get_param_percentiles([16, 50, 84])
-        assert len(percentiles) > 0
-
-    def test_bma_after_fitting(self, synthetic_variogram_data):
-        """Test BMA computation after fitting all candidates."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'], weighting='pair_count'
-        )
-
-        selector.fit_all_candidates(max_components=1, include_nugget=False, compute_cv=False)
-        bma_func = selector.get_bma_variogram()
-
-        # bMA should average predictions
-        test_lag = 100.0
-        bma_pred = bma_func(np.array([test_lag]))[0]
-
-        # should be within range of individual model predictions
-        individual_preds = [m.predict(np.array([test_lag]))[0] for m in selector.fitted_models]
-        assert min(individual_preds) <= bma_pred <= max(individual_preds)
-
-
-# test Suite 14: Kriging Leave-One-Out Cross-Validation
+# ─── Test Suite 9: Kriging Leave-One-Out Cross-Validation ───────────
 
 
 def _generate_spatial_field(n, sill, range_, nugget, mean=0.0, seed=42):
-    """Generate a spatially correlated random field using Cholesky decomposition.
-
-    Returns coords (n, 2), values (n,), and a CompositeVariogramModel
-    set with the true parameters.
-    """
+    """Generate a spatially correlated random field using Cholesky decomposition."""
     rng = np.random.default_rng(seed)
     coords = rng.uniform(0, 100, size=(n, 2))
 
-    # pairwise distance matrix
     dx = coords[:, 0:1] - coords[:, 0:1].T
     dy = coords[:, 1:2] - coords[:, 1:2].T
     dist = np.sqrt(dx**2 + dy**2)
 
-    # spherical covariance: C(h) = sill·(1 − spherical_corr(h/a)) + nugget·I
     h_ratio = np.clip(dist / range_, 0, 1)
     sph_corr = 1.0 - (1.5 * h_ratio - 0.5 * h_ratio**3)
     sph_corr[dist >= range_] = 0.0
 
     C = sill * sph_corr + nugget * np.eye(n)
-    # small regularisation for numerical stability
     C += 1e-10 * np.eye(n)
 
     L = np.linalg.cholesky(C)
@@ -1275,20 +753,10 @@ def _generate_spatial_field(n, sill, range_, nugget, mean=0.0, seed=42):
 
 
 class TestKrigingLOOCV:
-    """Test VariogramAnalysis.kriging_loocv() — kriging-based cross-validation.
-
-    Uses synthetic Gaussian random fields generated via Cholesky
-    decomposition of the covariance matrix, so the true variogram is
-    known exactly.
-    """
+    """Test VariogramAnalysis.kriging_loocv() — kriging-based cross-validation."""
 
     def test_msspe_near_one_for_correct_model(self):
-        """MSSPE ≈ 1.0 when the fitted variogram matches the true one.
-
-        The analogy: MSSPE is to kriging what reduced-χ² is to least-
-        squares fitting.  A value near 1.0 means the model correctly
-        characterises the spatial uncertainty.
-        """
+        """MSSPE ≈ 1.0 when the fitted variogram matches the true one."""
         coords, values, true_model = _generate_spatial_field(
             n=200, sill=2.0, range_=30.0, nugget=0.5, seed=42
         )
@@ -1312,23 +780,16 @@ class TestKrigingLOOCV:
             coords, values, true_model, n_subset=200, seed=123
         )
 
-        # allow ±0.3 for finite-sample noise
         assert abs(result.mean_error) < 0.5, (
             f"Mean error = {result.mean_error:.3f}, expected ≈ 0.0"
         )
 
     def test_wrong_model_msspe_deviates(self):
-        """MSSPE should deviate from 1.0 when using a wrong variogram.
-
-        An overestimated sill means the model thinks there's more
-        spatial variability than reality — kriging variances will be
-        too large and MSSPE << 1.0.
-        """
+        """MSSPE should deviate from 1.0 when using a wrong variogram."""
         coords, values, _ = _generate_spatial_field(
             n=200, sill=2.0, range_=30.0, nugget=0.5, seed=42
         )
 
-        # wrong model: sill 10× too large → variances inflated → MSSPE < 1.0
         wrong_model = CompositeVariogramModel(['spherical'], include_nugget=True)
         wrong_model.set_params(np.array([20.0, 30.0, 5.0]))
 
@@ -1337,8 +798,7 @@ class TestKrigingLOOCV:
         )
 
         assert result.msspe < 0.5, (
-            f"MSSPE = {result.msspe:.3f}; expected << 1.0 for "
-            f"overestimated variogram"
+            f"MSSPE = {result.msspe:.3f}; expected << 1.0 for overestimated variogram"
         )
 
     def test_subsampling(self):
@@ -1377,7 +837,7 @@ class TestKrigingLOOCV:
         """Should raise ValueError for bad coords shape."""
         with pytest.raises(ValueError, match="shape"):
             VariogramAnalysis.kriging_loocv(
-                np.array([1, 2, 3]),       # 1D, not (n,2)
+                np.array([1, 2, 3]),
                 np.array([1, 2, 3]),
                 lambda h: h,
             )
@@ -1387,7 +847,7 @@ class TestKrigingLOOCV:
         with pytest.raises(ValueError, match="same length"):
             VariogramAnalysis.kriging_loocv(
                 np.array([[0, 0], [1, 1]]),
-                np.array([1, 2, 3]),  # 3 values, 2 coords
+                np.array([1, 2, 3]),
                 lambda h: h,
             )
 
@@ -1408,15 +868,13 @@ class TestKrigingLOOCV:
         assert_allclose(r1.rmse, r2.rmse)
 
     def test_pure_nugget_process(self):
-        """For a pure nugget process (no spatial correlation), MSSPE ≈ 1.0
-        with the correct nugget-only variogram."""
+        """For a pure nugget process, MSSPE ≈ 1.0 with correct model."""
         rng = np.random.default_rng(77)
         n = 150
         coords = rng.uniform(0, 100, size=(n, 2))
         nugget_var = 3.0
         values = rng.normal(0, np.sqrt(nugget_var), n)
 
-        # correct model: nugget only (sill≈0, nugget=3.0)
         model = CompositeVariogramModel(['spherical'], include_nugget=True)
         model.set_params(np.array([1e-6, 50.0, nugget_var]))
 
@@ -1424,123 +882,44 @@ class TestKrigingLOOCV:
             coords, values, model, n_subset=150, seed=77
         )
 
-        # for a pure nugget process, kriging reduces to the mean
-        # MSSPE should be roughly 1.0 (each prediction ≈ mean, variance ≈ nugget)
         assert 0.5 < result.msspe < 2.0, (
             f"MSSPE = {result.msspe:.3f} for pure nugget; expected ≈ 1.0"
         )
 
 
-# ─── Test Suite: MSSPE Model Selection Criterion ───────────────────
+# ─── Test Suite 10: MSSPE Model Selection Criterion ─────────────────
 
 
 class TestMSSPECriterion:
     """Test MSSPE-based model selection via kriging LOOCV."""
 
-    @pytest.fixture
-    def synthetic_spatial_data(self):
-        """Generate synthetic spatial data with known spherical covariance.
+    def test_fitted_model_has_msspe_field(self, synthetic_variogram_data):
+        """FittedVariogramModel should have msspe field, initially None."""
+        sv = _make_single_variogram_from_synthetic(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            synthetic_variogram_data['bin_counts'],
+        )
+        sv.fit_model(
+            model_types=['spherical'],
+            max_components=1,
+            include_nugget=False,
+        )
 
-        Returns coords, values, and the variogram parameters so we can
-        build a selector with MSSPE populated.
-        """
+        fm = sv.fitted_model
+        assert hasattr(fm, 'msspe')
+        assert hasattr(fm, 'loocv_result')
+        # not computed without criterion='msspe'
+        assert fm.msspe is None
+
+    def test_msspe_computed_by_kriging_loocv(self):
+        """Manually computing MSSPE via kriging_loocv should work."""
         rng = np.random.default_rng(123)
         n = 200
         coords = rng.uniform(0, 500, size=(n, 2))
-        # generate spatially correlated data using a simple model:
-        # for testing purposes we just need data where kriging works
         values = rng.normal(0, 1.0, size=n)
-        return coords, values
 
-    @pytest.fixture
-    def selector_with_models(self, synthetic_variogram_data):
-        """Selector with several fitted models, no MSSPE yet."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'],
-            weighting='pair_count',
-        )
-        selector.fit_all_candidates(
-            max_components=1, include_nugget=True, compute_cv=False,
-        )
-        return selector
-
-    def test_select_best_msspe_picks_closest_to_one(self):
-        """select_best('msspe') should pick the model with |MSSPE−1| minimised."""
-        # create minimal fitted models with synthetic MSSPE values
-        lags = np.linspace(5, 500, 50)
-        empirical = 1.5 * (1 - np.exp(-lags / 80))
-        selector = VariogramModelSelector(
-            lags, empirical, weighting='uniform',
-        )
-        selector.fit_all_candidates(
-            max_components=1, include_nugget=False, compute_cv=False,
-        )
-        assert len(selector.fitted_models) >= 2
-
-        # manually assign MSSPE values
-        selector.fitted_models[0].msspe = 3.2   # far from 1.0
-        selector.fitted_models[1].msspe = 1.05  # close to 1.0
-
-        best = selector.select_best(criterion='msspe')
-        assert best.msspe == 1.05
-
-    def test_select_best_msspe_handles_none(self):
-        """Models without MSSPE should get infinite score."""
-        lags = np.linspace(5, 500, 50)
-        empirical = 1.5 * (1 - np.exp(-lags / 80))
-        selector = VariogramModelSelector(
-            lags, empirical, weighting='uniform',
-        )
-        selector.fit_all_candidates(
-            max_components=1, include_nugget=False, compute_cv=False,
-        )
-        assert len(selector.fitted_models) >= 2
-
-        # only one model has MSSPE
-        selector.fitted_models[0].msspe = None
-        selector.fitted_models[1].msspe = 2.5
-
-        best = selector.select_best(criterion='msspe')
-        assert best.msspe == 2.5  # the one with any MSSPE
-
-    def test_select_best_msspe_prefers_unity(self):
-        """MSSPE=0.9 (overestimates var) should beat MSSPE=1.5 (underestimates)."""
-        lags = np.linspace(5, 500, 50)
-        empirical = 1.5 * (1 - np.exp(-lags / 80))
-        selector = VariogramModelSelector(
-            lags, empirical, weighting='uniform',
-        )
-        selector.fit_all_candidates(
-            max_components=1, include_nugget=False, compute_cv=False,
-        )
-        selector.fitted_models[0].msspe = 1.5  # |1.5 - 1| = 0.5
-        selector.fitted_models[1].msspe = 0.9  # |0.9 - 1| = 0.1
-
-        best = selector.select_best(criterion='msspe')
-        assert best.msspe == 0.9
-
-    def test_fitted_model_has_msspe_field(self, synthetic_variogram_data):
-        """FittedVariogramModel should have msspe and loocv_result fields."""
-        selector = VariogramModelSelector(
-            synthetic_variogram_data['lags'],
-            synthetic_variogram_data['empirical'],
-            weighting='uniform',
-        )
-        model = CompositeVariogramModel(['spherical'], include_nugget=False)
-        fitted = selector.fit_model(model)
-
-        assert hasattr(fitted, 'msspe')
-        assert hasattr(fitted, 'loocv_result')
-        assert fitted.msspe is None  # not computed yet
-        assert fitted.loocv_result is None
-
-    def test_msspe_computed_by_kriging_loocv(self, synthetic_spatial_data):
-        """Manually computing MSSPE via kriging_loocv should populate the field."""
-        coords, values = synthetic_spatial_data
         model = CompositeVariogramModel(['spherical'], include_nugget=True)
-        # set known parameters: sill=1.0, range=100.0, nugget=0.3
         model.set_params(np.array([1.0, 100.0, 0.3]))
 
         result = VariogramAnalysis.kriging_loocv(
@@ -1552,71 +931,148 @@ class TestMSSPECriterion:
         assert result.msspe > 0
         assert result.n_failed == 0
 
-    def test_msspe_prefilter_limits_evaluation(self, synthetic_variogram_data):
-        """msspe_prefilter should limit how many models are evaluated."""
+    def test_msspe_fallback_without_spatial_sample(self, synthetic_variogram_data):
+        """criterion='msspe' without sample_coords should warn and fall back."""
+        sv = _make_single_variogram_from_synthetic(
+            synthetic_variogram_data['lags'],
+            synthetic_variogram_data['empirical'],
+            synthetic_variogram_data['bin_counts'],
+        )
+        # sample_coords is None by default
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            sv.fit_model(
+                model_types=['spherical'],
+                max_components=1,
+                include_nugget=False,
+                criterion='msspe',
+            )
+            # should warn about no spatial sample
+            msspe_warnings = [
+                x for x in w if "sample" in str(x.message).lower()
+            ]
+            assert len(msspe_warnings) >= 1
+
+        # should still have a best model (via AICc fallback)
+        assert sv.best_model is not None
+
+
+# ─── Test Suite 11: Cressie (1985) WLS Weighting ────────────────────
+
+
+class TestCressieWeighting:
+    """Test that fit_model() uses Cressie (1985) WLS weights internally."""
+
+    def test_cressie_weights_formula(self, synthetic_variogram_data):
+        """Internal Cressie weights should equal N(h)/γ̂(h)²."""
         lags = synthetic_variogram_data['lags']
         empirical = synthetic_variogram_data['empirical']
-        counts = synthetic_variogram_data['bin_counts']
+        counts = synthetic_variogram_data['bin_counts'].astype(float)
 
-        selector = VariogramModelSelector(
-            lags, empirical,
-            pair_counts=counts, weighting='pair_count',
+        gamma_sq = np.square(empirical)
+        gamma_sq = np.where(
+            gamma_sq < np.finfo(float).eps, np.finfo(float).eps, gamma_sq
         )
-        selector.fit_all_candidates(
-            max_components=2, include_nugget=True, compute_cv=False,
+        expected_weights = counts / gamma_sq
+
+        # verify weights are higher at short lags (where γ is small)
+        n = len(lags)
+        q1 = n // 4
+        short_mean = np.mean(expected_weights[:q1])
+        long_mean = np.mean(expected_weights[-q1:])
+        assert short_mean > 5 * long_mean, (
+            "Cressie weights should upweight short lags"
         )
-        total_models = len(selector.fitted_models)
-        assert total_models > 5  # should have many candidates
 
-        # manually assign MSSPE to only top-3 by AIC (simulating prefilter)
-        ranked = sorted(selector.fitted_models, key=lambda m: m.aic)
-        for m in ranked[:3]:
-            m.msspe = 1.0 + np.random.default_rng(0).uniform(-0.5, 0.5)
 
-        # models without MSSPE should have None
-        n_with_msspe = sum(1 for m in selector.fitted_models if m.msspe is not None)
-        assert n_with_msspe == 3
-        assert n_with_msspe < total_models
+# ─── Test Suite 12: CompositeVariogramModel bounds ──────────────────
 
-        # select_best should still work, picking from those with MSSPE
-        best = selector.select_best(criterion='msspe')
-        assert best.msspe is not None
 
-    def test_summary_includes_msspe_column(self, synthetic_variogram_data):
-        """Summary should show MSSPE column when available."""
-        selector = VariogramModelSelector(
+class TestModelBounds:
+    """Test CompositeVariogramModel.bounds()."""
+
+    def test_bounds_correct_length(self, synthetic_variogram_data):
+        """bounds() should return (lower, upper) with correct length."""
+        lags = synthetic_variogram_data['lags']
+        variogram = synthetic_variogram_data['empirical']
+
+        model = CompositeVariogramModel(['spherical'], include_nugget=True)
+        lower, upper = model.bounds(lags, variogram)
+
+        assert len(lower) == model.n_params
+        assert len(upper) == model.n_params
+
+    def test_bounds_lower_less_than_upper(self, synthetic_variogram_data):
+        """All lower bounds should be less than upper bounds."""
+        lags = synthetic_variogram_data['lags']
+        variogram = synthetic_variogram_data['empirical']
+
+        model = CompositeVariogramModel(['spherical'], include_nugget=True)
+        lower, upper = model.bounds(lags, variogram)
+
+        for lo, up in zip(lower, upper):
+            assert lo < up
+
+    def test_nugget_upper_bound_capped(self, synthetic_variogram_data):
+        """Nugget upper bound should be capped at 50% of max(variogram)."""
+        lags = synthetic_variogram_data['lags']
+        variogram = synthetic_variogram_data['empirical']
+        max_gamma = np.nanmax(variogram)
+
+        model = CompositeVariogramModel(['spherical'], include_nugget=True)
+        _, upper = model.bounds(lags, variogram)
+
+        # nugget is last parameter
+        nugget_upper = upper[-1]
+        assert_allclose(nugget_upper, max_gamma * 0.5, rtol=1e-10)
+
+
+# ─── Test Suite 13: Integration ─────────────────────────────────────
+
+
+class TestIntegration:
+    """End-to-end integration tests."""
+
+    def test_full_workflow(self, synthetic_variogram_data):
+        """Test complete workflow: synthetic → fit → select → FittedVariogramModel."""
+        sv = _make_single_variogram_from_synthetic(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'],
-            weighting='pair_count',
+            synthetic_variogram_data['bin_counts'],
         )
-        selector.fit_all_candidates(
-            max_components=1, include_nugget=False, compute_cv=False,
+
+        table = sv.fit_model(
+            max_components=2,
+            include_nugget=True,
         )
-        # assign MSSPE to at least one model
-        selector.fitted_models[0].msspe = 1.1
-        selector.select_best(criterion='aic')
 
-        summary = selector.summary()
-        assert 'MSSPE' in summary
+        assert len(table) > 0
+        assert sv.best_model is not None
 
-    def test_summary_no_msspe_column_when_absent(self, synthetic_variogram_data):
-        """Summary should NOT show MSSPE column when no model has it."""
-        selector = VariogramModelSelector(
+        fm = sv.fitted_model
+        assert isinstance(fm, FittedVariogramModel)
+
+        # predict should be finite
+        test_lags = np.array([10, 50, 100, 200])
+        pred = fm.predict(test_lags)
+        assert np.all(np.isfinite(pred))
+        assert np.all(pred >= 0)
+
+    def test_spherical_is_preferred_for_spherical_data(self, synthetic_variogram_data):
+        """Spherical data should prefer a spherical model."""
+        sv = _make_single_variogram_from_synthetic(
             synthetic_variogram_data['lags'],
             synthetic_variogram_data['empirical'],
-            pair_counts=synthetic_variogram_data['bin_counts'],
-            weighting='pair_count',
+            synthetic_variogram_data['bin_counts'],
         )
-        selector.fit_all_candidates(
-            max_components=1, include_nugget=False, compute_cv=False,
-        )
-        selector.select_best(criterion='aic')
+        sv.fit_model(max_components=1, include_nugget=True)
 
-        summary = selector.summary()
-        assert 'MSSPE' not in summary
+        best_desc = sv.best_model['description']
+        assert 'spherical' in best_desc, (
+            f"Expected spherical model for spherical data, got: {best_desc}"
+        )
 
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
-

@@ -670,25 +670,71 @@ class TestBootstrapUncertaintyPropagation:
     def _make_fitted_model_with_bootstrap(
         sill=0.5, range_=200.0, nugget_val=0.05, n_boot=200, seed=42
     ):
-        """Create a FittedVariogramModel with realistic bootstrap samples."""
-        from topochange.composite_variogram import CompositeVariogramModel
-        from topochange.variogram import FittedVariogramModel, VariogramModelSelector
+        """Create a FittedVariogramModel with realistic bootstrap samples.
 
-        model = CompositeVariogramModel(['spherical'], include_nugget=True)
-        model.set_params(np.array([sill, range_, nugget_val]))
+        Uses SingleVariogram's WLS fitting on synthetic empirical variogram
+        data, then generates correlated bootstrap parameter samples.
+        """
+        from topochange.composite_variogram import CompositeVariogramModel
+        from topochange.variogram import FittedVariogramModel, SingleVariogram
+        from unittest.mock import MagicMock
+
+        # Build and fit a model via SingleVariogram's WLS pipeline
+        true_model = CompositeVariogramModel(['spherical'], include_nugget=True)
+        true_model.set_params(np.array([sill, range_, nugget_val]))
 
         lags = np.linspace(10, 500, 25)
         rng = np.random.default_rng(seed)
-        emp_vario = model(lags) + rng.normal(0, 0.02, len(lags))
-        sigma = np.full_like(lags, 0.02)
+        emp_vario = true_model(lags) + rng.normal(0, 0.02, len(lags))
+        pair_counts = np.full_like(lags, 100.0)
 
-        selector = VariogramModelSelector(lags, emp_vario, sigma=sigma)
-        selector.fit_all_candidates(
-            max_components=1, include_nugget=True, seed=seed
+        # Create SingleVariogram with synthetic data
+        sv = object.__new__(SingleVariogram)
+        sv.raster_data_handler = MagicMock()
+        sv.raster_data_handler.unit = "m"
+        sv.lags = lags
+        sv.variogram = np.maximum(emp_vario, 0)
+        sv.pair_counts = pair_counts
+        sv.n_bins = len(lags)
+        sv.estimator = "matheron"
+        sv.sample_coords = None
+        sv.sample_values = None
+        sv.fitted_models = []
+        sv.best_model = None
+        sv.criteria_table = None
+
+        sv.fit_model(
+            model_types=['spherical'],
+            max_components=1,
+            include_nugget=True,
         )
-        best = selector.select_best('aic')
-        selector.bootstrap_best_model(n_boot=n_boot, seed=seed)
-        return best
+
+        # Build FittedVariogramModel from best model
+        bm = sv.best_model
+        fitted_model = bm['model']
+        fitted_model.set_params(bm['params'])
+
+        # Generate correlated bootstrap parameter samples
+        # Small perturbations around the fitted parameters
+        central_params = bm['params']
+        cov_scale = np.diag((0.02 * np.abs(central_params)) ** 2)
+        boot_rng = np.random.default_rng(seed + 1)
+        param_samples = boot_rng.multivariate_normal(
+            central_params, cov_scale, size=n_boot
+        )
+        # Ensure all samples are positive
+        param_samples = np.abs(param_samples)
+
+        return FittedVariogramModel(
+            composite_model=fitted_model,
+            params=central_params,
+            param_cov=bm['param_cov'],
+            rss=bm['rss'],
+            aic=bm['aic'],
+            bic=bm['bic'],
+            param_samples=param_samples,
+            warnings=[],
+        )
 
     def test_sigma2_from_bootstrap_not_hardcoded(self):
         """sigma2_min/max should come from bootstrap, not 0.8/1.2 multipliers."""
