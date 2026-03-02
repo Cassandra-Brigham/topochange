@@ -14,13 +14,14 @@ from shapely.geometry import Polygon, MultiPolygon, box, Point
 from shapely.ops import unary_union
 from pathlib import Path
 import geopandas as gpd
-from typing import Optional, Callable, Tuple, List, Dict, Any
+from typing import Optional, Callable, Tuple, List, Dict, Any, Union
 
 from rasterio.features import geometry_mask
 
 from .variogram import (
     RasterDataHandler,
-    VariogramAnalysis,
+    SingleVariogram,
+    GridVariogram,
     FittedVariogramModel,
 )
 
@@ -29,9 +30,9 @@ class RegionalUncertaintyEstimator:
     """
     Estimate regional uncertainty σ_A over a polygon.
 
-    Supports both legacy spherical models and the new model-agnostic
-    FittedVariogramModel/CompositeVariogramModel approach.
-    
+    Uses FittedVariogramModel/CompositeVariogramModel for model-agnostic
+    uncertainty propagation via Krige's relation.
+
     Computes central, min, and max uncertainty estimates based on
     bootstrap parameter percentiles (16th, 50th, 84th).
     """
@@ -47,7 +48,7 @@ class RegionalUncertaintyEstimator:
     def __init__(
         self,
         raster_data_handler: RasterDataHandler,
-        variogram_analysis: VariogramAnalysis,
+        variogram_analysis: Union[SingleVariogram, GridVariogram],
         area_of_interest,
         stable_geoms=None,
         unstable_geoms=None,
@@ -57,10 +58,12 @@ class RegionalUncertaintyEstimator:
         self.raster_data_handler = raster_data_handler
         self.variogram_analysis = variogram_analysis
 
+        # Auto-derive fitted_model from variogram object if not provided
+        if fitted_model is None:
+            fitted_model = variogram_analysis.fitted_model
+
         # --- Setup gamma functions (central, min, max) ---
-        self._setup_gamma_functions(
-            variogram_analysis, fitted_model
-        )
+        self._setup_gamma_functions(fitted_model)
 
         # --- Resolve Polygon of interest ---
         if isinstance(area_of_interest, (str, Path)):
@@ -109,69 +112,60 @@ class RegionalUncertaintyEstimator:
 
     def _setup_gamma_functions(
         self,
-        va: VariogramAnalysis,
-        fitted_model: Optional[FittedVariogramModel],
+        fitted_model: FittedVariogramModel,
     ) -> None:
         """Setup gamma functions for central, min, max parameter estimates."""
-        
+
         # initialize all gamma functions to None
         self.gamma_func = None
         self.gamma_func_min = None
         self.gamma_func_max = None
-        
+
         # component-wise gamma functions
         self.gamma_funcs_components: List[Optional[Callable]] = [None, None, None]
         self.gamma_funcs_components_min: List[Optional[Callable]] = [None, None, None]
         self.gamma_funcs_components_max: List[Optional[Callable]] = [None, None, None]
-        
+
         # total variance (sill + nugget)
         self.sigma2 = None
         self.sigma2_min = None
         self.sigma2_max = None
 
-        if fitted_model is not None:
-            # validate model is suitable for uncertainty propagation
-            if not fitted_model.composite_model.is_stationary:
-                unbounded = fitted_model.composite_model.unbounded_components
-                raise ValueError(
-                    f"Non-stationary variogram models ({unbounded}) cannot be used "
-                    f"for uncertainty propagation because they have infinite variance. "
-                    f"Consider detrending your data or using a bounded model "
-                    f"(spherical, exponential, gaussian, matern, damped_hole_effect)."
-                )
+        # validate model is suitable for uncertainty propagation
+        if not fitted_model.composite_model.is_stationary:
+            unbounded = fitted_model.composite_model.unbounded_components
+            raise ValueError(
+                f"Non-stationary variogram models ({unbounded}) cannot be used "
+                f"for uncertainty propagation because they have infinite variance. "
+                f"Consider detrending your data or using a bounded model "
+                f"(spherical, exponential, gaussian, matern, damped_hole_effect)."
+            )
 
-            # warn about Gaussian without nugget (numerical instability risk)
-            cm = fitted_model.composite_model
-            has_gaussian = 'gaussian' in cm.component_names
-            has_nugget = cm.include_nugget and cm.get_nugget() > 0
-            if has_gaussian and not has_nugget:
-                warnings.warn(
-                    "Gaussian variogram model without nugget may cause numerical "
-                    "instability. The model implies infinite differentiability at h=0, "
-                    "which can lead to ill-conditioned covariance matrices. Consider "
-                    "adding a small nugget effect.",
-                    UserWarning,
-                    stacklevel=2
-                )
+        # warn about Gaussian without nugget (numerical instability risk)
+        cm = fitted_model.composite_model
+        has_gaussian = 'gaussian' in cm.component_names
+        has_nugget = cm.include_nugget and cm.get_nugget() > 0
+        if has_gaussian and not has_nugget:
+            warnings.warn(
+                "Gaussian variogram model without nugget may cause numerical "
+                "instability. The model implies infinite differentiability at h=0, "
+                "which can lead to ill-conditioned covariance matrices. Consider "
+                "adding a small nugget effect.",
+                UserWarning,
+                stacklevel=2
+            )
 
-            # new approach: use FittedVariogramModel
-            self.gamma_func = fitted_model.predict
-            self.sigma2 = fitted_model.composite_model.get_total_sill()
-            
-            # min/max from bootstrap if available
-            if fitted_model.param_samples is not None and len(fitted_model.param_samples) > 0:
-                self._setup_minmax_from_bootstrap(fitted_model)
-            else:
-                self.gamma_func_min = self.gamma_func
-                self.gamma_func_max = self.gamma_func
-                self.sigma2_min = self.sigma2
-                self.sigma2_max = self.sigma2
-                
-        elif va.best_model_func is not None:
-            # legacy spherical model
-            self._setup_legacy_gamma(va)
+        self.gamma_func = fitted_model.predict
+        self.sigma2 = fitted_model.composite_model.get_total_sill()
+
+        # min/max from bootstrap if available
+        if fitted_model.param_samples is not None and len(fitted_model.param_samples) > 0:
+            self._setup_minmax_from_bootstrap(fitted_model)
         else:
-            raise ValueError("No variogram model available. Fit a model first.")
+            self.gamma_func_min = self.gamma_func
+            self.gamma_func_max = self.gamma_func
+            self.sigma2_min = self.sigma2
+            self.sigma2_max = self.sigma2
 
     def _setup_minmax_from_bootstrap(self, fitted_model: FittedVariogramModel) -> None:
         """Store bootstrap samples for sample-based uncertainty propagation.
@@ -305,11 +299,8 @@ class RegionalUncertaintyEstimator:
             raise ValueError("No bootstrap samples. Fit model with bootstrap first.")
 
         samples = self._bootstrap_samples
-        model = self._bootstrap_model  # None for legacy path
+        model = self._bootstrap_model
         central_params = self._bootstrap_central_params
-
-        # Legacy path uses a plain function, not a CompositeVariogramModel
-        is_legacy = model is None and hasattr(self, '_legacy_model_func')
 
         # Subsample bootstrap ensemble if large
         rng = np.random.default_rng(seed)
@@ -330,25 +321,12 @@ class RegionalUncertaintyEstimator:
         for k, bi in enumerate(boot_idx):
             params_k = samples[bi]
 
-            if is_legacy:
-                # Legacy path: model_func(h, *params), sigma2 = sum(sills) + nugget
-                n_comp = self._legacy_n_components
-                sills_k = params_k[:n_comp]
-                sigma2_k = float(np.sum(sills_k))
-                if self._legacy_has_nugget:
-                    sigma2_k += float(params_k[-1])
-                if sigma2_k <= 0:
-                    sigma_a_values[k] = np.nan
-                    continue
-                gamma_k = self._legacy_model_func(h_pairs, *params_k)
-            else:
-                # New path: CompositeVariogramModel
-                model.set_params(params_k)
-                sigma2_k = model.get_total_sill()
-                if sigma2_k is None or sigma2_k <= 0:
-                    sigma_a_values[k] = np.nan
-                    continue
-                gamma_k = model(h_pairs)
+            model.set_params(params_k)
+            sigma2_k = model.get_total_sill()
+            if sigma2_k is None or sigma2_k <= 0:
+                sigma_a_values[k] = np.nan
+                continue
+            gamma_k = model(h_pairs)
 
             # C(h) = sigma2 - gamma(h)
             cov_k = sigma2_k - gamma_k
@@ -356,9 +334,8 @@ class RegionalUncertaintyEstimator:
 
             sigma_a_values[k] = math.sqrt(max(var_mean_k, 0.0))
 
-        # Restore central params (new path only)
-        if model is not None:
-            model.set_params(central_params)
+        # Restore central params
+        model.set_params(central_params)
 
         # Remove failed evaluations
         valid = np.isfinite(sigma_a_values)
@@ -410,103 +387,6 @@ class RegionalUncertaintyEstimator:
         pts = np.array(pts)
         X, Y = pts[:n_pairs], pts[n_pairs:2 * n_pairs]
         return np.linalg.norm(X - Y, axis=1)
-
-    def _setup_legacy_gamma(self, va: VariogramAnalysis) -> None:
-        """Setup gamma functions from legacy spherical model.
-
-        When bootstrap ``param_samples`` are available on the
-        VariogramAnalysis object, stores them for propagation-time
-        evaluation (same approach as ``_setup_minmax_from_bootstrap``).
-        sigma2_min/max are computed from the joint bootstrap samples
-        rather than from independent marginal percentiles, which avoids
-        the same class of bug as the one fixed in the new path.
-        """
-        # central estimates
-        self.sills = np.array(va.sills, dtype=float)
-        self.ranges = np.array(va.ranges, dtype=float)
-        self.nugget = getattr(va, 'best_nugget', 0.0) or 0.0
-        self.sigma2 = self.nugget + float(np.sum(self.sills))
-
-        has_nugget = va.best_model_config.get('nugget', False)
-        model_func = va.best_model_func
-        n_components = len(self.sills)
-
-        # central gamma function
-        params = list(self.sills) + list(self.ranges)
-        if has_nugget:
-            params.append(self.nugget)
-        self.gamma_func = lambda h, p=params: model_func(np.asarray(h, dtype=float), *p)
-
-        # Store bootstrap samples for propagation-time evaluation
-        legacy_samples = getattr(va, 'param_samples', None)
-        if legacy_samples is not None and len(legacy_samples) > 1:
-            # Compute sigma2 from joint bootstrap samples (not marginal pctiles).
-            # Legacy param layout: [sill_1, ..., sill_n, range_1, ..., range_n, nugget?]
-            sill_cols = legacy_samples[:, :n_components]
-            total_sills = np.sum(sill_cols, axis=1)
-            if has_nugget:
-                nugget_col = legacy_samples[:, -1]
-                sigma2_samples = total_sills + nugget_col
-            else:
-                sigma2_samples = total_sills
-            self.sigma2_min = float(np.percentile(sigma2_samples, 16))
-            self.sigma2_max = float(np.percentile(sigma2_samples, 84))
-
-            # Store for _propagate_bootstrap_uncertainty
-            self._legacy_bootstrap_samples = legacy_samples
-            self._legacy_model_func = model_func
-            self._legacy_has_nugget = has_nugget
-            self._legacy_n_components = n_components
-            # Mark bootstrap as available so propagation uses it
-            self._bootstrap_samples = legacy_samples
-            self._bootstrap_model = None  # signal legacy mode
-            self._bootstrap_central_params = np.array(params)
-        else:
-            # No bootstrap — fall back to marginal percentiles (best we can do)
-            sills_min = np.array(getattr(va, 'sills_min', self.sills), dtype=float)
-            sills_max = np.array(getattr(va, 'sills_max', self.sills), dtype=float)
-            nugget_min = getattr(va, 'min_nugget', self.nugget) or 0.0
-            nugget_max = getattr(va, 'max_nugget', self.nugget) or 0.0
-            self.sigma2_min = nugget_min + float(np.sum(sills_min))
-            self.sigma2_max = nugget_max + float(np.sum(sills_max))
-
-        # min/max gamma functions (used for component-wise and as legacy fallbacks)
-        sills_min = np.array(getattr(va, 'sills_min', self.sills), dtype=float)
-        sills_max = np.array(getattr(va, 'sills_max', self.sills), dtype=float)
-        ranges_min = np.array(getattr(va, 'ranges_min', self.ranges), dtype=float)
-        ranges_max = np.array(getattr(va, 'ranges_max', self.ranges), dtype=float)
-        nugget_min = getattr(va, 'min_nugget', self.nugget) or 0.0
-        nugget_max = getattr(va, 'max_nugget', self.nugget) or 0.0
-
-        params_min = list(sills_min) + list(ranges_min)
-        if has_nugget:
-            params_min.append(nugget_min)
-        self.gamma_func_min = lambda h, p=params_min: model_func(np.asarray(h, dtype=float), *p)
-
-        params_max = list(sills_max) + list(ranges_max)
-        if has_nugget:
-            params_max.append(nugget_max)
-        self.gamma_func_max = lambda h, p=params_max: model_func(np.asarray(h, dtype=float), *p)
-
-        # component-wise gamma functions (for multi-component models)
-        for i in range(min(n_components, 3)):
-            # central
-            p = [self.sills[i], self.ranges[i]]
-            if has_nugget:
-                p.append(self.nugget)
-            self.gamma_funcs_components[i] = lambda h, p=p: model_func(np.asarray(h, dtype=float), *p)
-
-            # min
-            p_min = [sills_min[i], ranges_min[i]]
-            if has_nugget:
-                p_min.append(nugget_min)
-            self.gamma_funcs_components_min[i] = lambda h, p=p_min: model_func(np.asarray(h, dtype=float), *p)
-
-            # max
-            p_max = [sills_max[i], ranges_max[i]]
-            if has_nugget:
-                p_max.append(nugget_max)
-            self.gamma_funcs_components_max[i] = lambda h, p=p_max: model_func(np.asarray(h, dtype=float), *p)
 
     def _init_result_storage(self) -> None:
         """Initialize all result storage attributes."""
@@ -659,7 +539,7 @@ class RegionalUncertaintyEstimator:
                 self.polygon, self.gamma_func, self.sigma2, n_pairs, seed
             )
 
-        # min/max via bootstrap propagation (preferred) or legacy fallback
+        # min/max via bootstrap propagation or fallback to central estimate
         has_bootstrap = (
             hasattr(self, '_bootstrap_samples')
             and self._bootstrap_samples is not None
@@ -672,7 +552,7 @@ class RegionalUncertaintyEstimator:
             self.mean_correlated_polygon_min = p16
             self.mean_correlated_polygon_max = p84
         else:
-            # Legacy path: independent min/max gamma functions
+            # No bootstrap: use central gamma for min/max
             if self.gamma_func_min is not None:
                 self.mean_correlated_polygon_min = self.estimate_std_mean_monte_carlo(
                     self.polygon, self.gamma_func_min, self.sigma2_min, n_pairs, seed
@@ -723,7 +603,7 @@ class RegionalUncertaintyEstimator:
                 raster_geom, self.gamma_func, self.sigma2, n_pairs, seed
             )
 
-        # min/max via bootstrap propagation (preferred) or legacy fallback
+        # min/max via bootstrap propagation or fallback to central estimate
         has_bootstrap = (
             hasattr(self, '_bootstrap_samples')
             and self._bootstrap_samples is not None
@@ -736,7 +616,7 @@ class RegionalUncertaintyEstimator:
             self.mean_correlated_raster_min = p16
             self.mean_correlated_raster_max = p84
         else:
-            # Legacy path
+            # No bootstrap: use central gamma for min/max
             if self.gamma_func_min is not None:
                 self.mean_correlated_raster_min = self.estimate_std_mean_monte_carlo(
                     raster_geom, self.gamma_func_min, self.sigma2_min, n_pairs, seed
