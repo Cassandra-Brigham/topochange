@@ -22,7 +22,6 @@ from .variogram import (
     RasterDataHandler,
     VariogramAnalysis,
     FittedVariogramModel,
-    VariogramModelSelector,
 )
 
 
