@@ -5679,6 +5679,51 @@ class SingleVariogram:
 
         return param_samples
 
+    # ── FittedVariogramModel bridge ──────────────────────────────────
+
+    @property
+    def fitted_model(self) -> "FittedVariogramModel":
+        """Build a :class:`FittedVariogramModel` from the current best model.
+
+        This bridges the ``SingleVariogram`` / ``GridVariogram`` workflow
+        to the :class:`RegionalUncertaintyEstimator`, which expects a
+        ``FittedVariogramModel`` with ``param_samples`` for bootstrap
+        uncertainty propagation.
+
+        Returns
+        -------
+        FittedVariogramModel
+            Populated with the best-fit model, parameters, covariance,
+            and bootstrap samples (if :meth:`bootstrap_parameters` has
+            been called).
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`fit_model` has not been called.
+        """
+        if self.best_model is None:
+            raise RuntimeError(
+                "No fitted model. Call fit_model() first."
+            )
+        bm = self.best_model
+        model = bm["model"]
+        model.set_params(bm["params"])
+
+        return FittedVariogramModel(
+            composite_model=model,
+            params=bm["params"],
+            param_cov=bm["param_cov"],
+            rss=bm["rss"],
+            aic=bm["aic"],
+            bic=bm["bic"],
+            param_samples=bm.get("param_samples"),
+            warnings=bm.get("warnings", []),
+            msspe=bm.get("msspe"),
+            msspe_std=bm.get("msspe_std"),
+            msspe_n_runs=bm.get("msspe_n_runs", 0),
+        )
+
     # ── plotting ────────────────────────────────────────────────────
 
     def plot_single_variogram(
@@ -6620,6 +6665,83 @@ class GridVariogram:
             )
 
         return param_samples
+
+    # ── FittedVariogramModel bridge ──────────────────────────────────
+
+    @property
+    def fitted_model(self) -> "FittedVariogramModel":
+        """Build a :class:`FittedVariogramModel` from the central model.
+
+        This bridges the ``GridVariogram`` ensemble workflow to the
+        :class:`RegionalUncertaintyEstimator`, which expects a
+        ``FittedVariogramModel`` with ``param_samples`` for bootstrap
+        uncertainty propagation.
+
+        The model is constructed from the central (modal) model
+        evaluated at its median parameters.  If
+        :meth:`bootstrap_parameters` has been called, the bootstrap
+        parameter samples are attached.
+
+        Returns
+        -------
+        FittedVariogramModel
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`run` has not been called with ``fit_model=True``.
+        """
+        if self.central_model_name is None:
+            raise RuntimeError(
+                "No central model. Call run() with fit_model=True first."
+            )
+
+        # find a reference fitted-model dict matching the central name
+        ref_fm = None
+        for sv in self.variograms:
+            if sv.best_model is not None and sv.best_model["description"] == self.central_model_name:
+                ref_fm = sv.best_model
+                break
+
+        if ref_fm is None:
+            raise RuntimeError(
+                f"Could not find a fitted model matching "
+                f"'{self.central_model_name}'."
+            )
+
+        model = copy.deepcopy(ref_fm["model"])
+
+        # set median parameters from central_params
+        median_params = ref_fm["params"].copy()
+        if self.central_params is not None:
+            param_idx = 0
+            for i, spec in enumerate(model._components):
+                for j, pname in enumerate(spec.param_names):
+                    key = f"{model.component_names[i]}_{pname}"
+                    if key in self.central_params:
+                        median_params[param_idx] = self.central_params[key]["median"]
+                    param_idx += 1
+            if model.include_nugget and "nugget" in self.central_params:
+                median_params[-1] = self.central_params["nugget"]["median"]
+
+        model.set_params(median_params)
+
+        # attach bootstrap samples if available
+        param_samples = getattr(self, "bootstrap_param_samples", None)
+
+        return FittedVariogramModel(
+            composite_model=model,
+            params=median_params,
+            param_cov=ref_fm["param_cov"],
+            rss=ref_fm["rss"],
+            aic=ref_fm["aic"],
+            bic=ref_fm["bic"],
+            param_samples=param_samples,
+            warnings=ref_fm.get("warnings", []),
+            msspe=ref_fm.get("msspe"),
+            msspe_std=ref_fm.get("msspe_std"),
+            msspe_n_runs=ref_fm.get("msspe_n_runs", 0),
+        )
 
     def summary(self) -> str:
         """Human-readable summary of ensemble results.
