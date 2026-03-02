@@ -77,53 +77,72 @@ The variogram computation is accelerated using [Numba](https://numba.pydata.org/
 
 ```
 topochange/
-├── src/topochange/               # Package source code
-│   ├── __init__.py                # Public API exports
-│   ├── raster.py                  # GeoTIFF loading, metadata, unit conversions
-│   ├── rasterpair.py              # Raster pair operations, CRS transforms, differencing
-│   ├── pointcloud.py              # LAS/LAZ loading via PDAL, metadata, CRS transforms
-│   ├── pointcloudpair.py          # Point cloud pair comparison, registration
-│   ├── variogram.py               # Empirical variogram computation, model fitting
-│   ├── variogram_models.py        # Spherical, exponential, Gaussian, Matern models
-│   ├── composite_variogram.py     # Composite/nested variogram builder
-│   ├── uncertainty.py             # Regional uncertainty propagation (Krige's relation)
-│   ├── stable_area_analysis.py    # Interactive stable area identification
-│   ├── alignment.py               # ICP registration via small_gicp
-│   ├── alignment_utils.py         # Registration preprocessing and quality metrics
-│   ├── data_access.py             # OpenTopography API integration
-│   ├── pipeline_builder.py        # Automated CRS/datum transformation pipelines
-│   ├── velocity_model_registry.py # Crustal deformation model management
-│   ├── crs_history.py             # CRS transformation history tracking
-│   ├── crs_utils.py               # CRS conversion utilities
-│   ├── geoid_utils.py             # Geoid grid discovery (EGM96, EGM2008, etc.)
-│   ├── unit_utils.py              # Unit conversions (meters, feet, US survey feet)
-│   ├── time_utils.py              # Epoch and time conversions
-│   ├── pdal_wrapper.py            # Colab-compatible PDAL integration
-│   ├── deformation_utils.py       # Velocity model selection
-│   └── velocity_model_converters.py # Model format conversion utilities
+├── src/topochange/                  # Package source code
+│   ├── __init__.py                  # Public API exports
+│   ├── raster.py                    # GeoTIFF loading, metadata, unit conversions
+│   ├── rasterpair.py                # Raster pair operations, CRS transforms, differencing
+│   ├── pointcloud.py                # LAS/LAZ loading via PDAL, metadata, CRS transforms
+│   ├── pointcloudpair.py            # Point cloud pair comparison, registration
+│   ├── variogram.py                 # Empirical variogram computation, bootstrap CIs
+│   ├── variogram_models.py          # Spherical, exponential, Gaussian, Matérn, damped hole-effect models
+│   ├── composite_variogram.py       # Composite/nested variogram builder
+│   ├── uncertainty.py               # Regional & derivative uncertainty propagation
+│   ├── stable_area_analysis.py      # Interactive stable area identification
+│   ├── alignment.py                 # ICP registration via small_gicp
+│   ├── alignment_utils.py           # Registration preprocessing and quality metrics
+│   ├── data_access.py               # OpenTopography API integration and EPT downloads
+│   ├── pipeline_builder.py          # Automated CRS/datum transformation pipelines
+│   ├── velocity_model_registry.py   # Crustal deformation model management (20+ models)
+│   ├── velocity_model_converters.py # Velocity model format conversion utilities
+│   ├── deformation_utils.py         # Velocity model selection
+│   ├── crs_history.py               # CRS transformation history tracking
+│   ├── crs_utils.py                 # CRS conversion utilities
+│   ├── geoid_utils.py               # Geoid grid discovery (EGM96, EGM2008, etc.)
+│   ├── unit_utils.py                # Unit conversions (meters, feet, US survey feet)
+│   ├── time_utils.py                # Epoch and time conversions
+│   ├── pdal_wrapper.py              # Colab-compatible PDAL integration
+│   └── data/                        # Bundled data files (velocity model registry YAML)
 │
 ├── 1_DifferencingWorkflow_user_pointclouds.ipynb  # Point cloud workflow
 ├── 2_DifferencingWorkflow_user_dems.ipynb         # Raster DEM workflow
 ├── 3_DifferencingWorkflow_download_data.ipynb     # Data download + full pipeline
-├── benchmark_variogram_notebook.ipynb             # Performance benchmarking
-├── benchmark_variogram.py                         # Benchmark script
 │
-├── tests/                         # Test suite (pytest)
-│   ├── test_alignment.py
+├── tests/                           # Test suite (pytest, 18 test files)
+│   ├── conftest.py                  # Shared fixtures and configuration
+│   ├── test_raster_and_rasterpair.py
 │   ├── test_pointcloud_metadata.py
 │   ├── test_pointcloud_transformation.py
+│   ├── test_alignment.py
 │   ├── test_dem_creation.py
-│   └── test_option1_integration.py
+│   ├── test_option1_integration.py
+│   ├── test_variogram_analysis.py
+│   ├── test_variogram_models.py
+│   ├── test_synthetic_variogram_fitting.py
+│   ├── test_composite_variogram.py
+│   ├── test_uncertainty.py
+│   ├── test_crs_utils.py
+│   ├── test_metadata_propagation.py
+│   ├── test_data_access_pipelines.py
+│   ├── test_synthetic_stress.py
+│   ├── test_performance_optimizations.py
+│   ├── test_audit_fixes.py
+│   └── test_utils.py
 │
-├── test_data/                     # Example datasets
-│   ├── chalk_creek/               # Small reference case (.laz, .tif)
-│   └── paper_examples/            # Case study data (Arizona, California)
+├── test_data/                       # Example datasets
+│   ├── quick_test/                  # Small reference case for fast testing
+│   ├── chalk_creek/                 # Chalk Creek case study (.laz, .tif)
+│   ├── paper_examples/              # Manuscript case studies (AZ, CA, IN, CO, NZ, GA, WA)
+│   ├── test_dems/                   # DEM-only test data
+│   ├── polygons/                    # Stable area polygon definitions
+│   └── ...                          # Additional datasets (slumgullion, yakima, etc.)
 │
-├── pyproject.toml                 # Package configuration and dependencies
-├── requirements.txt               # Dependency list with annotations
-├── pytest.ini                     # Test configuration
-├── CITATION.cff                   # Citation metadata
-└── README.md                      # This file
+├── pyproject.toml                   # Package configuration and dependencies
+├── requirements.txt                 # Dependency list with annotations
+├── pytest.ini                       # Test configuration
+├── CITATION.cff                     # Citation metadata
+├── MANIFEST.in                      # Package data manifest
+├── run_tests.py                     # Test runner script
+└── README.md                        # This file
 ```
 
 ---
@@ -171,16 +190,22 @@ pip install -e .
 # Interactive Jupyter widgets (ipyleaflet, ipywidgets)
 pip install -e ".[interactive]"
 
-# Point cloud support (PDAL) — if not already installed via conda
+# Point cloud support (PDAL, laspy) — if not already installed via conda
 pip install -e ".[pointcloud]"
 
 # Point cloud alignment (small_gicp)
 pip install -e ".[alignment]"
 
+# OpenTopography data access (boto3; also requires GDAL via conda)
+pip install -e ".[data_access]"
+
+# Velocity model format converters (xarray)
+pip install -e ".[converters]"
+
 # All optional dependencies
 pip install -e ".[all]"
 
-# Development tools (pytest, black, ruff)
+# Development tools (pytest, pytest-cov, black, ruff)
 pip install -e ".[dev]"
 ```
 
@@ -188,13 +213,15 @@ pip install -e ".[dev]"
 
 | Category | Packages |
 |----------|----------|
-| **Core scientific** | numpy, pandas, scipy, matplotlib |
+| **Core scientific** | numpy, pandas, scipy, matplotlib, colormaps |
 | **Geospatial** | rasterio, pyproj, geopandas, shapely, rioxarray |
 | **Performance** | numba |
 | **Networking / config** | requests, pyyaml |
 | **Optional: interactive** | ipyleaflet, ipywidgets |
-| **Optional: point cloud** | pdal |
+| **Optional: point cloud** | pdal, laspy |
 | **Optional: alignment** | small_gicp |
+| **Optional: data access** | boto3 (+ GDAL via conda) |
+| **Optional: converters** | xarray |
 | **Optional: dev** | pytest, pytest-cov, black, ruff |
 
 ### Google Colab Setup
@@ -256,7 +283,7 @@ After the environment is ready:
 ### Comparing two DEMs (rasters)
 
 ```python
-from topochange import Raster, RasterPair, VariogramAnalysis
+from topochange import Raster, RasterPair, RasterDataHandler, SingleVariogram
 
 # Load two DEMs
 dem_old = Raster.from_file("dem_2019.tif")
@@ -268,8 +295,8 @@ diff = pair.compute_difference()
 
 # Run variogram analysis on the difference raster
 handler = RasterDataHandler(diff)
-analysis = VariogramAnalysis(handler)
-results = analysis.run()
+variogram = SingleVariogram(handler)
+results = variogram.run()
 ```
 
 ### Comparing two point clouds
@@ -289,7 +316,7 @@ pair = PointCloudPair(pc_old, pc_new)
 
 ## Jupyter Notebook Workflows
 
-The repository includes four notebooks that demonstrate complete workflows from data loading through uncertainty quantification:
+The repository includes three notebooks that demonstrate complete workflows from data loading through uncertainty quantification:
 
 | Notebook | Description | Input Data |
 |----------|-------------|------------|
@@ -311,22 +338,51 @@ The repository includes four notebooks that demonstrate complete workflows from 
 | `PointCloud` | `pointcloud` | Load LAS/LAZ via PDAL, extract metadata, CRS transforms |
 | `PointCloudPair` | `pointcloudpair` | Compare two point clouds: intersection, registration, DEM generation |
 
-### Uncertainty Analysis
+### Variogram Analysis and Uncertainty
 
-| Class | Module | Description |
-|-------|--------|-------------|
+| Class / Function | Module | Description |
+|------------------|--------|-------------|
 | `RasterDataHandler` | `variogram` | Sample raster data for variogram computation |
-| `VariogramAnalysis` | `variogram` | Compute empirical variograms with bootstrap confidence intervals |
-| `VariogramModelSelector` | `variogram` | Fit and select nested variogram models via AIC |
+| `SingleVariogram` | `variogram` | Single-resolution empirical variogram with bootstrap CIs |
+| `GridVariogram` | `variogram` | Multi-resolution grid-based variogram computation |
+| `KrigingLOOCVResult` | `variogram` | Leave-one-out cross-validation diagnostics |
+| `AggregatedLOOCVResult` | `variogram` | Aggregated LOOCV results across resolutions |
+| `MODEL_REGISTRY` | `variogram_models` | Registry of available variogram model types |
+| `VariogramModelRegistry` | `variogram_models` | Fit and select nested variogram models via AIC/BIC |
 | `CompositeVariogramModel` | `composite_variogram` | Build composite variogram functions from fitted components |
 | `RegionalUncertaintyEstimator` | `uncertainty` | Propagate uncertainty over polygonal regions (Krige's relation) |
+| `DerivativeUncertaintyEstimator` | `uncertainty` | Uncertainty for derived products |
 
 ### Alignment and Registration
 
-| Class | Module | Description |
-|-------|--------|-------------|
+| Class / Function | Module | Description |
+|------------------|--------|-------------|
 | `LandscapeAligner` | `alignment` | ICP-based point cloud registration via small_gicp |
 | `RegistrationConfig` | `alignment` | Configuration for registration parameters |
+| `RegistrationResult` | `alignment` | Registration output with quality metrics |
+| `RegistrationMethod` | `alignment` | Enum of available methods (ICP, Plane-ICP, GICP, VGICP) |
+| `align_point_clouds()` | `alignment` | Convenience function for one-step alignment |
+| `PointCloudPreprocessor` | `alignment_utils` | Point cloud preparation and filtering |
+| `AlignmentQualityMetrics` | `alignment_utils` | Registration quality assessment |
+| `load_points_from_las()` | `alignment_utils` | Load points from LAS/LAZ for alignment |
+| `save_transformed_las()` | `alignment_utils` | Save transformed point cloud to LAS/LAZ |
+| `compute_alignment_quality()` | `alignment_utils` | Compute RMSE, fitness, and convergence metrics |
+
+### CRS and Datum Management
+
+| Class / Function | Module | Description |
+|------------------|--------|-------------|
+| `CRSHistory` | `crs_history` | Track CRS transformations through workflow for audit trails |
+| `CRSState` | `pipeline_builder` | CRS descriptor with epoch, vertical kind, and geoid info |
+| `build_vertical_pipeline()` | `pipeline_builder` | Construct PROJ transformation pipelines |
+
+### Data Access
+
+| Class | Module | Description |
+|-------|--------|-------------|
+| `DataAccess` | `data_access` | Unified data access interface |
+| `OpenTopographyQuery` | `data_access` | Query OpenTopography catalog API |
+| `GetDEMs` | `data_access` | Download and process DEM data from AWS EPT archives |
 
 ### Interactive Tools
 
@@ -335,6 +391,10 @@ The repository includes four notebooks that demonstrate complete workflows from 
 | `TopoMapInteractor` | `stable_area_analysis` | Interactive map for selecting stable areas |
 | `StableAreaRasterizer` | `stable_area_analysis` | Rasterize selected polygons for masking |
 | `StableAreaAnalyzer` | `stable_area_analysis` | Analyze error statistics in stable regions |
+
+### Backward Compatibility
+
+The following aliases are available for code written against earlier versions: `VariogramAnalysis`, `FittedVariogramModel`, `EmpiricalVariogram`, `StatisticalAnalysis`.
 
 ---
 
@@ -356,7 +416,10 @@ pytest -m metadata         # Metadata extraction tests
 pytest -m transformation   # CRS transformation tests
 pytest -m dem              # DEM creation tests
 pytest -m integration      # End-to-end integration tests
+pytest -m "not slow"       # Skip long-running tests
 ```
+
+The test suite includes 18 test modules covering raster and point cloud I/O, CRS transformations, variogram analysis and model fitting, composite variograms, uncertainty propagation, alignment, data access pipelines, metadata propagation, synthetic stress tests, performance benchmarks, and regression tests.
 
 ---
 
