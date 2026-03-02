@@ -336,7 +336,7 @@ class SingleVariogram:
     # supported estimators
     ESTIMATORS = ("matheron", "cressie_hawkins")
     # bounded model families to try
-    BOUNDED_MODELS = ["spherical", "exponential", "matern"]
+    BOUNDED_MODELS = ["spherical", "exponential", "matern", "damped_hole_effect"]
     # minimum pair count threshold
     MIN_PAIRS = 10
 
@@ -1115,11 +1115,6 @@ class SingleVariogram:
         much the parameters of the *chosen* model vary across
         independent spatial samples.
 
-        References
-        ----------
-        Lark, R.M. (2000). A comparison of some robust estimators of
-        the variogram for use in soil survey. *Eur. J. Soil Sci.*,
-        51, 137-157.
         """
         if self.best_model is None:
             raise RuntimeError(
@@ -1533,7 +1528,7 @@ class SingleVariogram:
             )
 
         plt.tight_layout()
-        return fig
+        #return fig
 
 
 #  GridVariogram 
@@ -2375,7 +2370,7 @@ class GridVariogram:
         lines.append("=" * 72)
         return "\n".join(lines)
 
-    # ── plotting ────────────────────────────────────────────────────
+    #  plotting 
 
     def plot_variogram(
         self,
@@ -2676,7 +2671,7 @@ class GridVariogram:
         ax.set_title("  |  ".join(title_parts), fontsize=9)
 
         plt.tight_layout()
-        return fig
+        #return fig
 
 
 
@@ -2801,7 +2796,7 @@ class StatisticalAnalysis:
         ax.set_title("Histogram of differencing results with exploratory statistics")
         ax.legend()
         plt.tight_layout()
-        return fig
+        #return fig
 
     def bootstrap_uncertainty_subsample(
         self, n_bootstrap: int = 1000, subsample_proportion: float = 0.1
