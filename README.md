@@ -52,11 +52,11 @@ The variogram computation is accelerated using [Numba](https://numba.pydata.org/
 
 ### Key references
 
-- Matheron, G. (1965). *Les Variables Regionalisées et leur Estimation*. Masson.
-- Rolstad, C., Haug, T., & Denby, B. (2009). Spatially integrated geodetic glacier mass balance and its uncertainty based on geostatistical analysis. *Journal of Glaciology*, 55(192), 666-680. https://doi.org/10.3189/002214309789470950
-- Hugonnet, R., et al. (2022). Uncertainty analysis of digital elevation model differencing. *Remote Sensing of Environment*, 270, 112876. https://doi.org/10.1016/j.rse.2021.112876
-- Oliver, M. A., & Webster, R. (2015). *Basic Steps in Geostatistics: The Variogram and Kriging*. Springer.
-- Anderson, S. W. (2019). Uncertainty in quantitative analyses of topographic change. *Earth-Science Reviews*, 198, 102929. https://doi.org/10.1016/j.earscirev.2019.102929
+- Matheron, G. (1965). *Les variables régionalisées et leur estimation: une application de la théorie de fonctions aléatoires aux sciences de la nature*. Masson et Cie.
+- Rolstad, C., Haug, T., & Denby, B. (2009). Spatially integrated geodetic glacier mass balance and its uncertainty based on geostatistical analysis. *EEE Journal of Selected Topics in Applied Earth Observations and Remote Sensing*, 15, 6456-6472. https://doi.org/10.3189/002214309789470950 
+- Hugonnet, R., et al. (2022). Uncertainty analysis of digital elevation model differencing. *Remote Sensing of Environment*, 270, 112876. https://doi.org/10.1109/JSTARS.2022.3188922
+- Oliver, M. A., & Webster, R. (2015). *Basic Steps in Geostatistics: The Variogram and Kriging*. Springer International Publishing.
+- Anderson, S. W. (2019). Uncertainty in quantitative analyses of topographic change: error propagation and the role of thresholding. *Earth Surface Processes and Landforms *, 44(5), 1015-1033. https://doi.org/10.1002/esp.4551 
 
 ---
 
