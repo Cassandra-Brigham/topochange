@@ -274,6 +274,7 @@ def _bin_distances_and_squared_differences(
     local_counts = np.zeros((n_threads, n_bins), dtype=np.int64)
     local_sum_sq = np.zeros((n_threads, n_bins), dtype=np.float64)
     local_sum_sqrt = np.zeros((n_threads, n_bins), dtype=np.float64)
+    local_sum_dist = np.zeros((n_threads, n_bins), dtype=np.float64)
     local_max_dist = np.zeros(n_threads, dtype=np.float64)
 
     for i in prange(M):
@@ -293,12 +294,14 @@ def _bin_distances_and_squared_differences(
                 local_counts[tid, bin_idx] += 1
                 local_sum_sq[tid, bin_idx] += diff ** 2
                 local_sum_sqrt[tid, bin_idx] += np.sqrt(np.abs(diff))
+                local_sum_dist[tid, bin_idx] += dist
 
     # Reduce per-thread accumulators into final arrays.
     # This is single-threaded but very fast (n_threads × n_bins).
     bin_counts = np.zeros(n_bins, dtype=np.int64)
     binned_sum_sq = np.zeros(n_bins, dtype=np.float64)
     binned_sum_sqrt = np.zeros(n_bins, dtype=np.float64)
+    binned_sum_dist = np.zeros(n_bins, dtype=np.float64)
     max_distance = 0.0
 
     for t in range(n_threads):
@@ -308,8 +311,9 @@ def _bin_distances_and_squared_differences(
             bin_counts[b] += local_counts[t, b]
             binned_sum_sq[b] += local_sum_sq[t, b]
             binned_sum_sqrt[b] += local_sum_sqrt[t, b]
+            binned_sum_dist[b] += local_sum_dist[t, b]
 
-    return n_bins, bin_counts, binned_sum_sq, binned_sum_sqrt, max_distance
+    return n_bins, bin_counts, binned_sum_sq, binned_sum_sqrt, binned_sum_dist, max_distance
 
 
 #  SingleVariogram 
@@ -381,7 +385,7 @@ class SingleVariogram:
         for i in range(len(bin_counts)):
             if bin_counts[i] >= min_pairs:
                 mean_fourth = (sum_sqrt_abs[i] / bin_counts[i]) ** 4
-                correction = 0.457 + 0.494 / bin_counts[i]
+                correction = 0.457 + 0.494 / bin_counts[i] + 0.045 / bin_counts[i]**2
                 gamma[i] = 0.5 * mean_fourth / correction
         return gamma
 
@@ -397,7 +401,7 @@ class SingleVariogram:
     ):
         """Sample the raster once and compute one empirical variogram.
 
-        Returns (bin_counts, gamma_estimate, n_bins, coords, values).
+        Returns (bin_counts, gamma_estimate, n_bins, coords, values, mean_lags).
         """
         self.rdh.sample_raster(
             area_side, samples_per_area, max_samples, seed=seed
@@ -405,11 +409,19 @@ class SingleVariogram:
         coords = self.rdh.coords.copy()
         values = self.rdh.samples.copy()
 
-        (n_bins, bin_counts, bssd, bssad, _max_dist) = (
+        (n_bins, bin_counts, bssd, bssad, binned_sum_dist, _max_dist) = (
             _bin_distances_and_squared_differences(
                 coords, values, bin_width, max_lag
             )
         )
+
+        # actual mean distance per bin
+        with np.errstate(invalid='ignore', divide='ignore'):
+            mean_lags = np.where(
+                bin_counts > 0,
+                binned_sum_dist / bin_counts,
+                np.nan,
+            )
 
         if estimator == "cressie_hawkins":
             gamma = self._compute_cressie_hawkins(
@@ -418,7 +430,7 @@ class SingleVariogram:
         else:
             gamma = self._compute_matheron(bin_counts, bssd, self.MIN_PAIRS)
 
-        return bin_counts, gamma, n_bins, coords, values
+        return bin_counts, gamma, n_bins, coords, values, mean_lags
 
     def compute_empirical_variogram(
         self,
@@ -473,7 +485,7 @@ class SingleVariogram:
         max_lag = float(diag * max_lag_multiplier)
 
         # sample and compute
-        bin_counts, gamma, n_bins_run, coords, values = (
+        bin_counts, gamma, n_bins_run, coords, values, mean_lags = (
             self._single_variogram_run(
                 area_side, samples_per_area, max_samples,
                 bin_width, max_lag, estimator, seed=seed,
@@ -486,9 +498,7 @@ class SingleVariogram:
 
         self.variogram = gamma[valid]
         self.pair_counts = bin_counts[valid].astype(float)
-        self.lags = np.linspace(
-            bin_width / 2, bin_width * n_kept - bin_width / 2, n_kept
-        )
+        self.lags = mean_lags[valid]
         self.n_bins = n_kept
         self.estimator = estimator
 
@@ -629,15 +639,29 @@ class SingleVariogram:
         k = model.n_params
         n_eff = len(lags)
 
-        #  Pseudo-AIC/BIC for WLS 
-        # Following Cressie (1985) / Webster & Oliver (2007): use the
-        # weighted RSS as the pseudo-deviance for model ranking.
-        # These are not proper likelihoods but are valid for relative
-        # comparison among candidates fitted with the same weights.
+        # ── Pseudo-AIC/BIC for WLS ──
+        #
+        # Following Cressie (1985) and Webster & Oliver (2007, §5.3):
+        # use the weighted RSS as a pseudo-deviance for model ranking.
+        # These are NOT proper log-likelihoods, so AIC/BIC values are
+        # only meaningful for *relative* comparison among candidates
+        # fitted with the same weights on the same empirical variogram.
+        #
+        # NOTE: n_eff is the number of lag bins, NOT the number of
+        # data points.  With typical bin counts of 15–30, the AICc
+        # correction can be large.  The AICc formula below is the
+        # standard Burnham & Anderson (2002) second-order correction,
+        # but its bias-correction properties are derived for MLE
+        # under Gaussian assumptions — not for WLS pseudo-deviance.
+        # We apply it as a conservative heuristic that penalises
+        # complex models more heavily when n_eff/k is small, which
+        # is appropriate for our use case.  For more rigorous model
+        # selection, prefer LOOCV-based MSSPE (criterion='msspe').
         aic = n_eff * np.log(rss / max(n_eff, 1)) + 2 * k
         bic = n_eff * np.log(rss / max(n_eff, 1)) + k * np.log(max(n_eff, 1))
 
-        # AICc (small-sample corrected; Burnham & Anderson, 2002)
+        # AICc (small-sample correction; Burnham & Anderson, 2002)
+        # Applied as heuristic to WLS pseudo-deviance — see note above.
         denom = max(n_eff - k - 1, 1)
         aicc = float(aic) + 2 * k * (k + 1) / denom
 
@@ -664,6 +688,7 @@ class SingleVariogram:
         model: CompositeVariogramModel,
         n_subset: int = 500,
         dist_matrix: Optional[np.ndarray] = None,
+        seed: Optional[int] = None,
     ) -> KrigingLOOCVResult:
         """Leave-one-out kriging cross-validation on a point set.
 
@@ -683,7 +708,7 @@ class SingleVariogram:
         """
         n = len(values)
         if n > n_subset:
-            rng = np.random.default_rng()
+            rng = np.random.default_rng(seed)
             idx = rng.choice(n, n_subset, replace=False)
             coords = coords[idx]
             values = values[idx]
@@ -792,10 +817,12 @@ class SingleVariogram:
 
         n = len(values)
         if n > n_subset:
-            rng = np.random.default_rng(seed)
+            rng = np.random.default_rng(seed)  # fixed seed for reproducibility
             idx = rng.choice(n, n_subset, replace=False)
             coords = coords[idx]
             values = values[idx]
+            n = n_subset
+            dist_matrix = None  # invalidated by subsample
 
         return SingleVariogram._kriging_loocv(
             coords, values, model, n_subset=len(values),
@@ -1162,7 +1189,7 @@ class SingleVariogram:
             run_seed = int(child_seeds[i].generate_state(1)[0])
             try:
                 # draw new sample and compute empirical variogram
-                bin_counts, gamma, n_bins, _coords, _values = (
+                bin_counts, gamma, n_bins, _coords, _values, mean_lags = (
                     self._single_variogram_run(
                         area_side, samples_per_area, max_samples,
                         bin_width, max_lag, estimator, seed=run_seed,
@@ -1180,9 +1207,7 @@ class SingleVariogram:
 
                 boot_gamma = gamma[valid]
                 boot_counts = bin_counts[valid].astype(float)
-                boot_lags = np.linspace(
-                    bin_width / 2, bin_width * n_kept - bin_width / 2, n_kept
-                )
+                boot_lags = mean_lags[valid]
 
                 # Cressie (1985) weights
                 gamma_sq = np.square(boot_gamma)
@@ -1764,19 +1789,22 @@ class GridVariogram:
 
         all_gamma = []
         all_counts = []
+        all_mean_lags = [] 
         kept_coords = None
         kept_values = None
 
         for j in range(n_samples):
             s = int(inner_seeds[j].generate_state(1)[0])
-            bin_counts, gamma, n_bins_run, coords, values = (
-                sv._single_variogram_run(
-                    area_side, samples_per_area, max_samples,
-                    bin_width, max_lag, estimator, seed=s,
+            bin_counts, gamma, n_bins_run, coords, values, mean_lags = (
+            sv._single_variogram_run(
+                area_side, samples_per_area, max_samples,
+                bin_width, max_lag, estimator, seed=s,
                 )
             )
             all_gamma.append(gamma)
             all_counts.append(bin_counts.astype(float))
+            all_mean_lags.append(mean_lags)
+            
 
             # keep the first valid sample for MSSPE
             if return_sample and kept_coords is None:
@@ -1790,6 +1818,8 @@ class GridVariogram:
         with np.errstate(all="ignore"):
             median_gamma = np.nanmedian(gamma_arr, axis=0)
             mean_counts = np.nanmean(count_arr, axis=0)
+            mean_lags_arr = np.array(all_mean_lags)
+            median_lags = np.nanmedian(mean_lags_arr, axis=0)
 
         # keep only valid (non-NaN) bins
         valid = ~np.isnan(median_gamma)
@@ -1797,9 +1827,7 @@ class GridVariogram:
 
         sv.variogram = median_gamma[valid]
         sv.pair_counts = mean_counts[valid]
-        sv.lags = np.linspace(
-            bin_width / 2, bin_width * n_kept - bin_width / 2, n_kept
-        )
+        sv.lags = median_lags[valid]
         sv.n_bins = n_kept
         sv.estimator = estimator
 

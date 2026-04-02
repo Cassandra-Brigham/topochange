@@ -1,26 +1,4 @@
 """Point cloud registration using ICP-based methods via small_gicp.
-
-This module provides the core alignment function and configuration for
-registering point clouds using ICP, GICP, VGICP, or Plane-ICP methods.
-All downsampling during alignment is handled by small_gicp.preprocess_points(),
-ensuring a single, consistent downsampling path.
-
-The main entry point is align_point_clouds(), which takes centered Nx3 arrays
-and a RegistrationConfig, runs multi-resolution coarse-to-fine registration,
-and returns a RegistrationResult with quality metrics.
-
-For file I/O utilities (loading, saving, preprocessing), see alignment_utils.py.
-
-References
-----------
-- Besl & McKay (1992). A Method for Registration of 3-D Shapes.
-- Koide et al. (2021). Voxelized GICP for Fast and Accurate 3D Point Cloud
-  Registration. https://doi.org/10.1109/ICRA48506.2021.9560835
-- Koide (2024). small_gicp: Efficient and parallel algorithms for point cloud
-  registration. JOSS 9(103), 6948. https://doi.org/10.21105/joss.06948
-- Scott et al. (2021). Measuring change at Earth's surface: On-demand vertical
-  and three-dimensional topographic differencing. Geosphere 18(1), 210-232.
-  https://doi.org/10.1130/GES02259.1
 """
 
 import gc
