@@ -1,4 +1,4 @@
-# deformation_utils.py (UPDATED)
+# deformation_utils.py
 
 from __future__ import annotations
 

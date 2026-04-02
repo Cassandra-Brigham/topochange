@@ -1270,6 +1270,526 @@ class SingleVariogram:
             )
 
         return param_samples
+    
+    from scipy.spatial.distance import cdist
+    from scipy.stats import rankdata, norm as sp_norm
+    
+    """
+    Two additional bootstrap methods for variogram parameter uncertainty.
+
+    INSERT BOTH METHODS into class SingleVariogram, immediately after
+    bootstrap_parameters() and before the `# FittedVariogramModel` comment
+    (i.e. after line 1272 in variogram-668c3dcd.py).
+
+    Also add this import at the top of the file (line 11, after the
+    existing scipy import):
+
+        from scipy.spatial.distance import cdist
+        from scipy.stats import rankdata, norm as sp_norm
+
+    Both methods share the same storage convention as bootstrap_parameters():
+    they populate self.bootstrap_param_samples, self.bootstrap_param_percentiles,
+    and self.best_model["param_samples"] / ["param_percentiles"], so the
+    existing plot_single_variogram() bootstrap envelope code works unchanged.
+
+    References
+    ----------
+    [1] Olea, R.A. & Pardo-Igúzquiza, E. (2011). Generalized Bootstrap Method
+        for Assessment of Uncertainty in Semivariogram Inference. Mathematical
+        Geosciences, 43, 203–228.
+        https://link.springer.com/article/10.1007/s11004-010-9269-6
+
+    [2] Pardo-Igúzquiza, E. & Olea, R.A. (2012). VARBOOT: A Spatial Bootstrap
+        Program for Semivariogram Uncertainty Assessment. Computers &
+        Geosciences, 41, 188–198.
+        https://doi.org/10.1016/j.cageo.2011.09.002
+
+    [3] Diggle, P.J. & Ribeiro Jr, P.J. (2007). Model-based Geostatistics.
+        Springer. Section 5.4.
+
+    [4] Sjöstedt-de Luna, S. & Young, A. (2003). The Bootstrap and Kriging
+        Prediction Intervals. Scandinavian Journal of Statistics, 30, 175–192.
+    """
+
+    # ─────────────────────────────────────────────────────────────────────
+    # OPTION 1 — Generalized (spatial) bootstrap
+    # ─────────────────────────────────────────────────────────────────────
+
+    def generalized_bootstrap_parameters(
+        self,
+        n_realizations: int = 1000,
+        *,
+        seed: Optional[int] = None,
+        verbose: bool = False,
+    ) -> np.ndarray:
+        """Estimate parameter uncertainty via the generalized spatial bootstrap.
+
+        Keeps the original sample locations fixed and resamples *values*
+        through a decorrelation–resample–recorrelation cycle that preserves
+        spatial correlation structure.  This isolates estimation noise from
+        sampling-geometry variability, producing tighter intervals than the
+        nonparametric :meth:`bootstrap_parameters`.
+
+        Procedure (per realisation)
+        ---------------------------
+        1. Normal-score transform the sample values.
+        2. Decorrelate via Cholesky: w = L⁻¹ z_ns.
+        3. Bootstrap (with replacement) the independent residuals w.
+        4. Re-correlate: z_boot = L w*.
+        5. Back-transform to original marginal distribution.
+        6. Compute empirical variogram on (original coords, z_boot).
+        7. Fit the winning model structure via WLS.
+
+        Parameters
+        ----------
+        n_realizations : int
+            Number of bootstrap realisations (≥ 1000 recommended;
+            Pardo-Igúzquiza & Olea 2012).
+        seed : int, optional
+            Base seed for reproducibility.
+        verbose : bool
+            Print per-realisation progress.
+
+        Returns
+        -------
+        param_samples : ndarray, shape (n_succeeded, n_params)
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`fit_model` has not been called, or if
+            ``compute_empirical_variogram`` was called without
+            ``return_sample=True``.
+
+        References
+        ----------
+        Olea, R.A. & Pardo-Igúzquiza, E. (2011). Mathematical Geosciences,
+        43, 203–228.
+        """
+        # ── guards ──────────────────────────────────────────────────────
+        if self.best_model is None:
+            raise RuntimeError("No fitted model. Call fit_model() first.")
+        if self.sample_coords is None or self.sample_values is None:
+            raise RuntimeError(
+                "No spatial sample stored. Re-run "
+                "compute_empirical_variogram(return_sample=True)."
+            )
+
+        coords = self.sample_coords          # (n, 2)
+        values = self.sample_values           # (n,)
+        n = len(values)
+        model_template = self.best_model["model"]
+        model_template.set_params(self.best_model["params"])
+
+        bin_width = self._stored_bin_width
+        estimator = self._stored_estimator
+
+        # max_lag from stored multiplier
+        xs = self.rdh.rioxarray_obj.x.values
+        ys = self.rdh.rioxarray_obj.y.values
+        x_ext = float(np.max(xs) - np.min(xs))
+        y_ext = float(np.max(ys) - np.min(ys))
+        max_lag = float(
+            np.sqrt(x_ext ** 2 + y_ext ** 2) * self._stored_max_lag_multiplier
+        )
+
+        # ── 1. build covariance matrix from fitted model ────────────────
+        D = cdist(coords, coords)
+        total_sill = model_template.get_total_sill()
+        if total_sill is None or total_sill <= 0:
+            raise ValueError(
+                "Model must be stationary with positive sill for "
+                "generalized bootstrap."
+            )
+
+        gamma_mat = model_template(D)
+        C = total_sill - gamma_mat
+        np.fill_diagonal(C, total_sill)
+
+        # small jitter for numerical PD
+        jitter = 1e-10 * total_sill
+        C += np.eye(n) * jitter
+
+        try:
+            L = np.linalg.cholesky(C)
+        except np.linalg.LinAlgError:
+            # fall back to eigenvalue repair
+            eigvals, eigvecs = np.linalg.eigh(C)
+            eigvals = np.maximum(eigvals, jitter)
+            C_repaired = eigvecs @ np.diag(eigvals) @ eigvecs.T
+            L = np.linalg.cholesky(C_repaired)
+            warnings.warn(
+                "Covariance matrix was not positive-definite; eigenvalues "
+                "were clipped. Bootstrap intervals may be approximate.",
+                UserWarning,
+            )
+
+        L_inv = np.linalg.solve(L, np.eye(n))
+
+        # ── 2. normal-score transform ───────────────────────────────────
+        # rank → uniform → Gaussian
+        ranks = rankdata(values, method="average")
+        u = ranks / (n + 1)               # avoid 0 and 1
+        z_ns = sp_norm.ppf(u)
+
+        # store sorted original values for back-transform
+        sorted_values = np.sort(values)
+
+        # ── 3. decorrelate ──────────────────────────────────────────────
+        w = L_inv @ z_ns                   # independent standard-ish residuals
+
+        # ── 4. bootstrap loop ───────────────────────────────────────────
+        ss = np.random.SeedSequence(seed)
+        child_seeds = ss.spawn(n_realizations)
+
+        collected = []
+        n_failed = 0
+
+        for i in range(n_realizations):
+            rng = np.random.default_rng(child_seeds[i])
+            try:
+                # resample decorrelated residuals with replacement
+                w_star = rng.choice(w, size=n, replace=True)
+
+                # re-correlate
+                z_boot_ns = L @ w_star
+
+                # back-transform: normal-score → original marginal
+                # map quantile positions of z_boot_ns into sorted_values
+                boot_u = sp_norm.cdf(z_boot_ns)
+                indices = np.clip(
+                    (boot_u * n).astype(int), 0, n - 1
+                )
+                z_boot = sorted_values[indices]
+
+                # compute empirical variogram on original coords
+                (n_bins, bin_counts, bssd, bssad,
+                binned_sum_dist, _max_dist) = (
+                    _bin_distances_and_squared_differences(
+                        coords, z_boot, bin_width, max_lag,
+                    )
+                )
+
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    mean_lags = np.where(
+                        bin_counts > 0,
+                        binned_sum_dist / bin_counts,
+                        np.nan,
+                    )
+
+                if estimator == "cressie_hawkins":
+                    gamma = self._compute_cressie_hawkins(
+                        bin_counts, bssad, self.MIN_PAIRS
+                    )
+                else:
+                    gamma = self._compute_matheron(
+                        bin_counts, bssd, self.MIN_PAIRS
+                    )
+
+                valid = ~np.isnan(gamma)
+                n_kept = int(np.sum(valid))
+                if n_kept < 3:
+                    n_failed += 1
+                    if verbose:
+                        print(
+                            f"  [{i+1}/{n_realizations}] SKIP: "
+                            f"too few bins ({n_kept})"
+                        )
+                    continue
+
+                boot_lags = mean_lags[valid]
+                boot_gamma = gamma[valid]
+                boot_counts = bin_counts[valid].astype(float)
+
+                # Cressie (1985) WLS weights
+                gamma_sq = np.maximum(
+                    np.square(boot_gamma), np.finfo(float).eps
+                )
+                weights = boot_counts / gamma_sq
+
+                model = copy.deepcopy(model_template)
+                result = self._fit_single_composite_model(
+                    model, boot_lags, boot_gamma, None, weights,
+                )
+
+                if result is not None:
+                    collected.append(result["params"])
+                    if verbose:
+                        print(f"  [{i+1}/{n_realizations}] OK")
+                else:
+                    n_failed += 1
+                    if verbose:
+                        print(f"  [{i+1}/{n_realizations}] FIT FAILED")
+
+            except Exception as e:
+                n_failed += 1
+                if verbose:
+                    print(f"  [{i+1}/{n_realizations}] ERROR: {e}")
+                continue
+
+        if not collected:
+            raise RuntimeError(
+                f"All {n_realizations} generalized bootstrap "
+                f"realisations failed."
+            )
+
+        param_samples = np.array(collected)
+
+        # ── percentile summary (same convention as bootstrap_parameters) ─
+        pct_keys = [5, 16, 50, 84, 95]
+        param_names = list(model_template.param_names)
+        param_percentiles = {}
+        for j, name in enumerate(param_names):
+            vals = param_samples[:, j]
+            param_percentiles[name] = {
+                f"p{p}": float(np.percentile(vals, p)) for p in pct_keys
+            }
+
+        self.bootstrap_param_samples = param_samples
+        self.bootstrap_param_percentiles = param_percentiles
+        self.best_model["param_samples"] = param_samples
+        self.best_model["param_percentiles"] = param_percentiles
+
+        if verbose or n_failed > 0:
+            print(
+                f"Generalized bootstrap complete: "
+                f"{len(collected)}/{n_realizations} succeeded, "
+                f"{n_failed} failed."
+            )
+
+        return param_samples
+
+
+    # ─────────────────────────────────────────────────────────────────────
+    # OPTION 2 — Parametric (model-based) bootstrap
+    # ─────────────────────────────────────────────────────────────────────
+
+    def parametric_bootstrap_parameters(
+        self,
+        n_realizations: int = 1000,
+        *,
+        seed: Optional[int] = None,
+        verbose: bool = False,
+    ) -> np.ndarray:
+        """Estimate parameter uncertainty via parametric (model-based) bootstrap.
+
+        Simulates Gaussian random fields from the fitted variogram model
+        at the original sample locations, computes the empirical variogram
+        of each simulated field, and refits the model structure.  This
+        gives the tightest intervals because all simulated data obey the
+        fitted model exactly — the only variability is finite-sample
+        estimation noise.
+
+        Procedure (per realisation)
+        ---------------------------
+        1. Generate z_sim = L ε,  where L = chol(C),  ε ~ N(0, I).
+        2. Compute empirical variogram of (original coords, z_sim).
+        3. Fit the winning model structure via WLS.
+        4. Collect fitted parameters.
+
+        Parameters
+        ----------
+        n_realizations : int
+            Number of bootstrap realisations (≥ 1000 recommended).
+        seed : int, optional
+            Base seed for reproducibility.
+        verbose : bool
+            Print per-realisation progress.
+
+        Returns
+        -------
+        param_samples : ndarray, shape (n_succeeded, n_params)
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`fit_model` has not been called, or if
+            ``compute_empirical_variogram`` was called without
+            ``return_sample=True``.
+
+        Notes
+        -----
+        Intervals from this method are a *lower bound* on true parameter
+        uncertainty because they assume perfect model specification.  If
+        the true spatial covariance departs from the fitted model, the
+        intervals will be anti-conservative.  Compare with
+        :meth:`bootstrap_parameters` (upper bound) or
+        :meth:`generalized_bootstrap_parameters` (intermediate) to gauge
+        model-specification sensitivity.
+
+        References
+        ----------
+        Diggle, P.J. & Ribeiro Jr, P.J. (2007). Model-based Geostatistics.
+        Springer. §5.4.
+
+        Sjöstedt-de Luna, S. & Young, A. (2003). Scandinavian Journal of
+        Statistics, 30, 175–192.
+        """
+        # ── guards ──────────────────────────────────────────────────────
+        if self.best_model is None:
+            raise RuntimeError("No fitted model. Call fit_model() first.")
+        if self.sample_coords is None or self.sample_values is None:
+            raise RuntimeError(
+                "No spatial sample stored. Re-run "
+                "compute_empirical_variogram(return_sample=True)."
+            )
+
+        coords = self.sample_coords
+        n = len(self.sample_values)
+        model_template = self.best_model["model"]
+        model_template.set_params(self.best_model["params"])
+
+        bin_width = self._stored_bin_width
+        estimator = self._stored_estimator
+
+        xs = self.rdh.rioxarray_obj.x.values
+        ys = self.rdh.rioxarray_obj.y.values
+        x_ext = float(np.max(xs) - np.min(xs))
+        y_ext = float(np.max(ys) - np.min(ys))
+        max_lag = float(
+            np.sqrt(x_ext ** 2 + y_ext ** 2) * self._stored_max_lag_multiplier
+        )
+
+        # ── 1. build covariance matrix from fitted model ────────────────
+        D = cdist(coords, coords)
+        total_sill = model_template.get_total_sill()
+        if total_sill is None or total_sill <= 0:
+            raise ValueError(
+                "Model must be stationary with positive sill for "
+                "parametric bootstrap."
+            )
+
+        gamma_mat = model_template(D)
+        C = total_sill - gamma_mat
+        np.fill_diagonal(C, total_sill)
+
+        # small jitter for numerical PD
+        jitter = 1e-10 * total_sill
+        C += np.eye(n) * jitter
+
+        try:
+            L = np.linalg.cholesky(C)
+        except np.linalg.LinAlgError:
+            eigvals, eigvecs = np.linalg.eigh(C)
+            eigvals = np.maximum(eigvals, jitter)
+            C_repaired = eigvecs @ np.diag(eigvals) @ eigvecs.T
+            L = np.linalg.cholesky(C_repaired)
+            warnings.warn(
+                "Covariance matrix was not positive-definite; eigenvalues "
+                "were clipped. Bootstrap intervals may be approximate.",
+                UserWarning,
+            )
+
+        # ── 2. simulation loop ──────────────────────────────────────────
+        ss = np.random.SeedSequence(seed)
+        child_seeds = ss.spawn(n_realizations)
+
+        collected = []
+        n_failed = 0
+
+        for i in range(n_realizations):
+            rng = np.random.default_rng(child_seeds[i])
+            try:
+                # simulate Gaussian field: z = L ε, ε ~ N(0, I)
+                epsilon = rng.standard_normal(n)
+                z_sim = L @ epsilon
+
+                # compute empirical variogram on original coords
+                (n_bins, bin_counts, bssd, bssad,
+                binned_sum_dist, _max_dist) = (
+                    _bin_distances_and_squared_differences(
+                        coords, z_sim, bin_width, max_lag,
+                    )
+                )
+
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    mean_lags = np.where(
+                        bin_counts > 0,
+                        binned_sum_dist / bin_counts,
+                        np.nan,
+                    )
+
+                if estimator == "cressie_hawkins":
+                    gamma = self._compute_cressie_hawkins(
+                        bin_counts, bssad, self.MIN_PAIRS
+                    )
+                else:
+                    gamma = self._compute_matheron(
+                        bin_counts, bssd, self.MIN_PAIRS
+                    )
+
+                valid = ~np.isnan(gamma)
+                n_kept = int(np.sum(valid))
+                if n_kept < 3:
+                    n_failed += 1
+                    if verbose:
+                        print(
+                            f"  [{i+1}/{n_realizations}] SKIP: "
+                            f"too few bins ({n_kept})"
+                        )
+                    continue
+
+                boot_lags = mean_lags[valid]
+                boot_gamma = gamma[valid]
+                boot_counts = bin_counts[valid].astype(float)
+
+                # Cressie (1985) WLS weights
+                gamma_sq = np.maximum(
+                    np.square(boot_gamma), np.finfo(float).eps
+                )
+                weights = boot_counts / gamma_sq
+
+                model = copy.deepcopy(model_template)
+                result = self._fit_single_composite_model(
+                    model, boot_lags, boot_gamma, None, weights,
+                )
+
+                if result is not None:
+                    collected.append(result["params"])
+                    if verbose:
+                        print(f"  [{i+1}/{n_realizations}] OK")
+                else:
+                    n_failed += 1
+                    if verbose:
+                        print(f"  [{i+1}/{n_realizations}] FIT FAILED")
+
+            except Exception as e:
+                n_failed += 1
+                if verbose:
+                    print(f"  [{i+1}/{n_realizations}] ERROR: {e}")
+                continue
+
+        if not collected:
+            raise RuntimeError(
+                f"All {n_realizations} parametric bootstrap "
+                f"realisations failed."
+            )
+
+        param_samples = np.array(collected)
+
+        # ── percentile summary (same convention as bootstrap_parameters) ─
+        pct_keys = [5, 16, 50, 84, 95]
+        param_names = list(model_template.param_names)
+        param_percentiles = {}
+        for j, name in enumerate(param_names):
+            vals = param_samples[:, j]
+            param_percentiles[name] = {
+                f"p{p}": float(np.percentile(vals, p)) for p in pct_keys
+            }
+
+        self.bootstrap_param_samples = param_samples
+        self.bootstrap_param_percentiles = param_percentiles
+        self.best_model["param_samples"] = param_samples
+        self.best_model["param_percentiles"] = param_percentiles
+
+        if verbose or n_failed > 0:
+            print(
+                f"Parametric bootstrap complete: "
+                f"{len(collected)}/{n_realizations} succeeded, "
+                f"{n_failed} failed."
+            )
+
+        return param_samples
 
     # FittedVariogramModel
 
@@ -2237,6 +2757,522 @@ class GridVariogram:
 
         return param_samples
 
+    """
+    Two additional bootstrap methods for GridVariogram parameter uncertainty.
+
+    INSERT BOTH METHODS into class GridVariogram, immediately after
+    bootstrap_parameters() and before the `# FittedVariogramModel bridge`
+    comment (i.e. after line 2758 in variogram-668c3dcd.py).
+
+    These require the same imports added for the SingleVariogram methods:
+
+        from scipy.spatial.distance import cdist
+        from scipy.stats import rankdata, norm as sp_norm
+
+    Both methods use the ensemble's *central model* (the modal best-model
+    from run()) and draw a fresh reference spatial sample from the raster
+    to provide the fixed coordinate set needed for Cholesky decomposition.
+
+    Storage convention matches GridVariogram.bootstrap_parameters():
+        self.bootstrap_param_samples
+        self.bootstrap_param_percentiles
+
+    References
+    ----------
+    Same as SingleVariogram versions — see bootstrap_methods.py header.
+    """
+
+
+    # ─────────────────────────────────────────────────────────────────────
+    # OPTION 1 — Generalized (spatial) bootstrap for GridVariogram
+    # ─────────────────────────────────────────────────────────────────────
+
+    def generalized_bootstrap_parameters(
+        self,
+        n_realizations: int = 1000,
+        *,
+        seed: Optional[int] = None,
+        verbose: bool = False,
+    ) -> np.ndarray:
+        """Generalized spatial bootstrap for the ensemble's central model.
+
+        Draws one reference spatial sample from the raster, builds the
+        covariance matrix from the central model, then runs the
+        decorrelation–resample–recorrelation cycle from Olea &
+        Pardo-Igúzquiza (2011) to produce bootstrap parameter samples.
+
+        Parameters
+        ----------
+        n_realizations : int
+            Number of bootstrap realisations (≥ 1000 recommended).
+        seed : int, optional
+            Base seed for reproducibility.  The first child seed is used
+            to draw the reference sample; remaining seeds drive the
+            bootstrap iterations.
+        verbose : bool
+            Print per-realisation progress.
+
+        Returns
+        -------
+        param_samples : ndarray, shape (n_succeeded, n_params)
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`run` has not been called yet.
+        """
+        if self.central_model_name is None:
+            raise RuntimeError("No central model. Call run() first.")
+
+        # ── resolve stored parameters ───────────────────────────────────
+        def _resolve(val, attr_name):
+            if val is not None:
+                return val
+            stored = getattr(self, attr_name, None)
+            if stored is None:
+                raise ValueError(
+                    f"'{attr_name.replace('_stored_', '')}' not provided "
+                    f"and no stored value from run()."
+                )
+            return stored
+
+        area_side = _resolve(None, "_stored_area_side")
+        samples_per_area = _resolve(None, "_stored_samples_per_area")
+        max_samples = _resolve(None, "_stored_max_samples")
+        bin_width = _resolve(None, "_stored_bin_width")
+        max_lag_multiplier = _resolve(None, "_stored_max_lag_multiplier")
+        estimator = _resolve(None, "_stored_estimator")
+
+        # ── find central model template ─────────────────────────────────
+        model_template = None
+        for sv_obj in self.variograms:
+            if (
+                sv_obj.best_model is not None
+                and sv_obj.best_model["description"] == self.central_model_name
+            ):
+                model_template = sv_obj.best_model["model"]
+                break
+
+        if model_template is None:
+            raise RuntimeError(
+                f"Could not find a fitted model matching the central "
+                f"model '{self.central_model_name}' in any realisation."
+            )
+
+        # ── draw one reference spatial sample ───────────────────────────
+        ss = np.random.SeedSequence(seed)
+        # child 0 → reference sample, children 1..N → bootstrap iterations
+        ref_seed, *boot_child_seeds_raw = ss.spawn(n_realizations + 1)
+        ref_seed_int = int(ref_seed.generate_state(1)[0])
+
+        ref_sv = SingleVariogram(self.rdh)
+        ref_sv.compute_empirical_variogram(
+            area_side=area_side,
+            samples_per_area=samples_per_area,
+            max_samples=max_samples,
+            bin_width=bin_width,
+            max_lag_multiplier=max_lag_multiplier,
+            seed=ref_seed_int,
+            estimator=estimator,
+            return_sample=True,
+        )
+
+        coords = ref_sv.sample_coords       # (n, 2)
+        values = ref_sv.sample_values        # (n,)
+        n = len(values)
+
+        xs = self.rdh.rioxarray_obj.x.values
+        ys = self.rdh.rioxarray_obj.y.values
+        x_ext = float(np.max(xs) - np.min(xs))
+        y_ext = float(np.max(ys) - np.min(ys))
+        max_lag = float(
+            np.sqrt(x_ext ** 2 + y_ext ** 2) * max_lag_multiplier
+        )
+
+        # ── build covariance matrix from central model ──────────────────
+        total_sill = model_template.get_total_sill()
+        if total_sill is None or total_sill <= 0:
+            raise ValueError(
+                "Central model must be stationary with positive sill."
+            )
+
+        D = cdist(coords, coords)
+        gamma_mat = model_template(D)
+        C = total_sill - gamma_mat
+        np.fill_diagonal(C, total_sill)
+
+        jitter = 1e-10 * total_sill
+        C += np.eye(n) * jitter
+
+        try:
+            L = np.linalg.cholesky(C)
+        except np.linalg.LinAlgError:
+            eigvals, eigvecs = np.linalg.eigh(C)
+            eigvals = np.maximum(eigvals, jitter)
+            C_repaired = eigvecs @ np.diag(eigvals) @ eigvecs.T
+            L = np.linalg.cholesky(C_repaired)
+            warnings.warn(
+                "Covariance matrix was not positive-definite; eigenvalues "
+                "were clipped. Bootstrap intervals may be approximate.",
+                UserWarning,
+            )
+
+        L_inv = np.linalg.solve(L, np.eye(n))
+
+        # ── normal-score transform ──────────────────────────────────────
+        ranks = rankdata(values, method="average")
+        u = ranks / (n + 1)
+        z_ns = sp_norm.ppf(u)
+        sorted_values = np.sort(values)
+
+        # ── decorrelate ─────────────────────────────────────────────────
+        w = L_inv @ z_ns
+
+        # ── bootstrap loop ──────────────────────────────────────────────
+        collected = []
+        n_failed = 0
+
+        for i in range(n_realizations):
+            rng = np.random.default_rng(boot_child_seeds_raw[i])
+            try:
+                w_star = rng.choice(w, size=n, replace=True)
+                z_boot_ns = L @ w_star
+
+                boot_u = sp_norm.cdf(z_boot_ns)
+                indices = np.clip((boot_u * n).astype(int), 0, n - 1)
+                z_boot = sorted_values[indices]
+
+                (n_bins, bin_counts, bssd, bssad,
+                binned_sum_dist, _max_dist) = (
+                    _bin_distances_and_squared_differences(
+                        coords, z_boot, bin_width, max_lag,
+                    )
+                )
+
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    mean_lags = np.where(
+                        bin_counts > 0,
+                        binned_sum_dist / bin_counts,
+                        np.nan,
+                    )
+
+                if estimator == "cressie_hawkins":
+                    gamma = SingleVariogram._compute_cressie_hawkins(
+                        bin_counts, bssad, SingleVariogram.MIN_PAIRS
+                    )
+                else:
+                    gamma = SingleVariogram._compute_matheron(
+                        bin_counts, bssd, SingleVariogram.MIN_PAIRS
+                    )
+
+                valid = ~np.isnan(gamma)
+                n_kept = int(np.sum(valid))
+                if n_kept < 3:
+                    n_failed += 1
+                    if verbose:
+                        print(
+                            f"  [{i+1}/{n_realizations}] SKIP: "
+                            f"too few bins ({n_kept})"
+                        )
+                    continue
+
+                boot_lags = mean_lags[valid]
+                boot_gamma = gamma[valid]
+                boot_counts = bin_counts[valid].astype(float)
+
+                gamma_sq = np.maximum(
+                    np.square(boot_gamma), np.finfo(float).eps
+                )
+                weights = boot_counts / gamma_sq
+
+                model = copy.deepcopy(model_template)
+                result = ref_sv._fit_single_composite_model(
+                    model, boot_lags, boot_gamma, None, weights,
+                )
+
+                if result is not None:
+                    collected.append(result["params"])
+                    if verbose:
+                        print(f"  [{i+1}/{n_realizations}] OK")
+                else:
+                    n_failed += 1
+                    if verbose:
+                        print(f"  [{i+1}/{n_realizations}] FIT FAILED")
+
+            except Exception as e:
+                n_failed += 1
+                if verbose:
+                    print(f"  [{i+1}/{n_realizations}] ERROR: {e}")
+                continue
+
+        if not collected:
+            raise RuntimeError(
+                f"All {n_realizations} generalized bootstrap "
+                f"realisations failed."
+            )
+
+        param_samples = np.array(collected)
+
+        pct_keys = [5, 16, 50, 84, 95]
+        param_names = list(model_template.param_names)
+        param_percentiles = {}
+        for j, name in enumerate(param_names):
+            vals = param_samples[:, j]
+            param_percentiles[name] = {
+                f"p{p}": float(np.percentile(vals, p)) for p in pct_keys
+            }
+
+        self.bootstrap_param_samples = param_samples
+        self.bootstrap_param_percentiles = param_percentiles
+
+        if verbose or n_failed > 0:
+            print(
+                f"Generalized bootstrap complete: "
+                f"{len(collected)}/{n_realizations} succeeded, "
+                f"{n_failed} failed."
+            )
+
+        return param_samples
+
+
+    # ─────────────────────────────────────────────────────────────────────
+    # OPTION 2 — Parametric (model-based) bootstrap for GridVariogram
+    # ─────────────────────────────────────────────────────────────────────
+
+    def parametric_bootstrap_parameters(
+        self,
+        n_realizations: int = 1000,
+        *,
+        seed: Optional[int] = None,
+        verbose: bool = False,
+    ) -> np.ndarray:
+        """Parametric bootstrap for the ensemble's central model.
+
+        Draws one reference spatial sample from the raster for the
+        coordinate geometry, builds the covariance matrix from the
+        central model, then simulates Gaussian random fields and refits.
+
+        Parameters
+        ----------
+        n_realizations : int
+            Number of bootstrap realisations (≥ 1000 recommended).
+        seed : int, optional
+            Base seed for reproducibility.
+        verbose : bool
+            Print per-realisation progress.
+
+        Returns
+        -------
+        param_samples : ndarray, shape (n_succeeded, n_params)
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`run` has not been called yet.
+
+        Notes
+        -----
+        Produces the tightest intervals (lower bound on uncertainty)
+        because simulated fields perfectly obey the central model.
+        Compare with :meth:`bootstrap_parameters` (upper bound) or
+        :meth:`generalized_bootstrap_parameters` (intermediate).
+        """
+        if self.central_model_name is None:
+            raise RuntimeError("No central model. Call run() first.")
+
+        # ── resolve stored parameters ───────────────────────────────────
+        def _resolve(val, attr_name):
+            if val is not None:
+                return val
+            stored = getattr(self, attr_name, None)
+            if stored is None:
+                raise ValueError(
+                    f"'{attr_name.replace('_stored_', '')}' not provided "
+                    f"and no stored value from run()."
+                )
+            return stored
+
+        area_side = _resolve(None, "_stored_area_side")
+        samples_per_area = _resolve(None, "_stored_samples_per_area")
+        max_samples = _resolve(None, "_stored_max_samples")
+        bin_width = _resolve(None, "_stored_bin_width")
+        max_lag_multiplier = _resolve(None, "_stored_max_lag_multiplier")
+        estimator = _resolve(None, "_stored_estimator")
+
+        # ── find central model template ─────────────────────────────────
+        model_template = None
+        for sv_obj in self.variograms:
+            if (
+                sv_obj.best_model is not None
+                and sv_obj.best_model["description"] == self.central_model_name
+            ):
+                model_template = sv_obj.best_model["model"]
+                break
+
+        if model_template is None:
+            raise RuntimeError(
+                f"Could not find a fitted model matching the central "
+                f"model '{self.central_model_name}' in any realisation."
+            )
+
+        # ── draw one reference spatial sample ───────────────────────────
+        ss = np.random.SeedSequence(seed)
+        ref_seed, *boot_child_seeds_raw = ss.spawn(n_realizations + 1)
+        ref_seed_int = int(ref_seed.generate_state(1)[0])
+
+        ref_sv = SingleVariogram(self.rdh)
+        ref_sv.compute_empirical_variogram(
+            area_side=area_side,
+            samples_per_area=samples_per_area,
+            max_samples=max_samples,
+            bin_width=bin_width,
+            max_lag_multiplier=max_lag_multiplier,
+            seed=ref_seed_int,
+            estimator=estimator,
+            return_sample=True,
+        )
+
+        coords = ref_sv.sample_coords
+        n = len(ref_sv.sample_values)
+
+        xs = self.rdh.rioxarray_obj.x.values
+        ys = self.rdh.rioxarray_obj.y.values
+        x_ext = float(np.max(xs) - np.min(xs))
+        y_ext = float(np.max(ys) - np.min(ys))
+        max_lag = float(
+            np.sqrt(x_ext ** 2 + y_ext ** 2) * max_lag_multiplier
+        )
+
+        # ── build covariance matrix from central model ──────────────────
+        total_sill = model_template.get_total_sill()
+        if total_sill is None or total_sill <= 0:
+            raise ValueError(
+                "Central model must be stationary with positive sill."
+            )
+
+        D = cdist(coords, coords)
+        gamma_mat = model_template(D)
+        C = total_sill - gamma_mat
+        np.fill_diagonal(C, total_sill)
+
+        jitter = 1e-10 * total_sill
+        C += np.eye(n) * jitter
+
+        try:
+            L = np.linalg.cholesky(C)
+        except np.linalg.LinAlgError:
+            eigvals, eigvecs = np.linalg.eigh(C)
+            eigvals = np.maximum(eigvals, jitter)
+            C_repaired = eigvecs @ np.diag(eigvals) @ eigvecs.T
+            L = np.linalg.cholesky(C_repaired)
+            warnings.warn(
+                "Covariance matrix was not positive-definite; eigenvalues "
+                "were clipped. Bootstrap intervals may be approximate.",
+                UserWarning,
+            )
+
+        # ── simulation loop ─────────────────────────────────────────────
+        collected = []
+        n_failed = 0
+
+        for i in range(n_realizations):
+            rng = np.random.default_rng(boot_child_seeds_raw[i])
+            try:
+                epsilon = rng.standard_normal(n)
+                z_sim = L @ epsilon
+
+                (n_bins, bin_counts, bssd, bssad,
+                binned_sum_dist, _max_dist) = (
+                    _bin_distances_and_squared_differences(
+                        coords, z_sim, bin_width, max_lag,
+                    )
+                )
+
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    mean_lags = np.where(
+                        bin_counts > 0,
+                        binned_sum_dist / bin_counts,
+                        np.nan,
+                    )
+
+                if estimator == "cressie_hawkins":
+                    gamma = SingleVariogram._compute_cressie_hawkins(
+                        bin_counts, bssad, SingleVariogram.MIN_PAIRS
+                    )
+                else:
+                    gamma = SingleVariogram._compute_matheron(
+                        bin_counts, bssd, SingleVariogram.MIN_PAIRS
+                    )
+
+                valid = ~np.isnan(gamma)
+                n_kept = int(np.sum(valid))
+                if n_kept < 3:
+                    n_failed += 1
+                    if verbose:
+                        print(
+                            f"  [{i+1}/{n_realizations}] SKIP: "
+                            f"too few bins ({n_kept})"
+                        )
+                    continue
+
+                boot_lags = mean_lags[valid]
+                boot_gamma = gamma[valid]
+                boot_counts = bin_counts[valid].astype(float)
+
+                gamma_sq = np.maximum(
+                    np.square(boot_gamma), np.finfo(float).eps
+                )
+                weights = boot_counts / gamma_sq
+
+                model = copy.deepcopy(model_template)
+                result = ref_sv._fit_single_composite_model(
+                    model, boot_lags, boot_gamma, None, weights,
+                )
+
+                if result is not None:
+                    collected.append(result["params"])
+                    if verbose:
+                        print(f"  [{i+1}/{n_realizations}] OK")
+                else:
+                    n_failed += 1
+                    if verbose:
+                        print(f"  [{i+1}/{n_realizations}] FIT FAILED")
+
+            except Exception as e:
+                n_failed += 1
+                if verbose:
+                    print(f"  [{i+1}/{n_realizations}] ERROR: {e}")
+                continue
+
+        if not collected:
+            raise RuntimeError(
+                f"All {n_realizations} parametric bootstrap "
+                f"realisations failed."
+            )
+
+        param_samples = np.array(collected)
+
+        pct_keys = [5, 16, 50, 84, 95]
+        param_names = list(model_template.param_names)
+        param_percentiles = {}
+        for j, name in enumerate(param_names):
+            vals = param_samples[:, j]
+            param_percentiles[name] = {
+                f"p{p}": float(np.percentile(vals, p)) for p in pct_keys
+            }
+
+        self.bootstrap_param_samples = param_samples
+        self.bootstrap_param_percentiles = param_percentiles
+
+        if verbose or n_failed > 0:
+            print(
+                f"Parametric bootstrap complete: "
+                f"{len(collected)}/{n_realizations} succeeded, "
+                f"{n_failed} failed."
+            )
+
+        return param_samples
+    
     # FittedVariogramModel bridge 
 
     @property
