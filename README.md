@@ -64,12 +64,12 @@ The variogram computation is accelerated using [Numba](https://numba.pydata.org/
 
 - **Raster DEM comparison** — Load, align, and difference GeoTIFF DEMs with automatic CRS and vertical datum reconciliation
 - **Point cloud workflows** — Load LAS/LAZ files via PDAL, classify, filter, generate DEMs, and register point clouds using ICP variants (ICP, point-to-plane ICP, GICP, VGICP) via [small_gicp](https://github.com/koide3/small_gicp)
-- **Variogram-based uncertainty analysis** — Compute empirical variograms with bootstrap confidence intervals, fit nested models (spherical, exponential, Gaussian, Matern, damped hole-effect) using weighted nonlinear least squares with AIC model selection and Bayesian Model Averaging
+- **Variogram-based uncertainty analysis** — Compute empirical variograms with bootstrap confidence intervals, fit nested models (spherical, exponential, Gaussian, Matern, damped hole-effect) using weighted nonlinear least squares with AIC model selection
 - **Regional uncertainty propagation** — Monte Carlo integration of the covariance function over arbitrary polygonal areas to obtain regionalized standard deviations
 - **Interactive stable area identification** — Select stable (no-change) regions on interactive maps using [ipyleaflet](https://ipyleaflet.readthedocs.io/) for focused error characterization
 - **CRS and datum transformations** — Automatic vertical CRS reconciliation, geoid model handling, and tectonic deformation corrections via PROJ deformation grids
 - **OpenTopography integration** — Query the OpenTopography catalog API and download data from AWS-hosted Entwine Point Tile (EPT) archives
-- **Performance** — Numba-accelerated variogram computation (~40x faster and ~4 orders of magnitude less memory than scikit-gstat)
+- **Performance** — Numba-accelerated variogram computation 
 
 ---
 
