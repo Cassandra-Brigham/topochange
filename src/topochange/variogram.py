@@ -569,6 +569,7 @@ class SingleVariogram:
         weights: np.ndarray,
         n_restarts: int = 8,
         maxfev: int = 10_000,
+        rng: Optional[np.random.Generator] = None,
     ) -> Optional[Dict[str, Any]]:
         """Fit one composite model via multi-start WLS.
 
@@ -576,6 +577,14 @@ class SingleVariogram:
         passed through ``weights``.  These are converted to ``sigma``
         values for ``scipy.optimize.curve_fit`` so that the optimiser
         minimises the weighted residual sum of squares directly.
+
+        Parameters
+        ----------
+        rng : numpy.random.Generator, optional
+            Source of randomness for the multi-start initial guesses.
+            Pass a seeded generator for reproducible fits (e.g. inside a
+            seeded bootstrap loop). If ``None`` (default), a fresh
+            entropy-seeded generator is used, so results vary run to run.
 
         Returns a dict with keys: 'model', 'params', 'rss', 'aic', 'bic',
         'warnings', or None if fitting fails entirely.
@@ -607,7 +616,8 @@ class SingleVariogram:
         else:
             sigma_from_weights = sigma
 
-        rng = np.random.default_rng()
+        if rng is None:
+            rng = np.random.default_rng()
         guesses = self._generate_multistart_guesses(
             p0_base, bounds, n_restarts, rng
         )
@@ -944,10 +954,14 @@ class SingleVariogram:
                         continue
 
         # ── fit each candidate via multi-start WLS ──
+        # Seed the multi-start guesses so model selection is reproducible
+        # when a seed is supplied (e.g. from run()); falls back to fresh
+        # entropy when seed is None.
         self.fitted_models = []
+        fit_rng = np.random.default_rng(seed)
         for cand in candidates:
             result = self._fit_single_composite_model(
-                cand, lags, variogram, None, weights
+                cand, lags, variogram, None, weights, rng=fit_rng,
             )
             if result is not None:
                 result["trend_order"] = 0
@@ -1225,6 +1239,7 @@ class SingleVariogram:
 
                 result = self._fit_single_composite_model(
                     model, boot_lags, boot_gamma, None, weights,
+                    rng=np.random.default_rng(run_seed),
                 )
 
                 if result is not None:
@@ -1511,7 +1526,7 @@ class SingleVariogram:
 
                 model = copy.deepcopy(model_template)
                 result = self._fit_single_composite_model(
-                    model, boot_lags, boot_gamma, None, weights,
+                    model, boot_lags, boot_gamma, None, weights, rng=rng,
                 )
 
                 if result is not None:
@@ -1743,7 +1758,7 @@ class SingleVariogram:
 
                 model = copy.deepcopy(model_template)
                 result = self._fit_single_composite_model(
-                    model, boot_lags, boot_gamma, None, weights,
+                    model, boot_lags, boot_gamma, None, weights, rng=rng,
                 )
 
                 if result is not None:
@@ -2713,6 +2728,7 @@ class GridVariogram:
 
                 result = sv._fit_single_composite_model(
                     model, sv.lags, sv.variogram, None, weights,
+                    rng=np.random.default_rng(run_seed),
                 )
 
                 if result is not None:
@@ -2793,6 +2809,7 @@ class GridVariogram:
         self,
         n_realizations: int = 1000,
         *,
+        max_cov_points: Optional[int] = 3000,
         seed: Optional[int] = None,
         verbose: bool = False,
     ) -> np.ndarray:
@@ -2807,6 +2824,14 @@ class GridVariogram:
         ----------
         n_realizations : int
             Number of bootstrap realisations (≥ 1000 recommended).
+        max_cov_points : int or None, optional
+            Cap on the number of reference points used to build the
+            dense covariance matrix (default 3000). This method holds
+            several ``n × n`` matrices at once (``C``, ``L``, ``L_inv``),
+            so the full sampling density used by :meth:`run` would
+            exhaust RAM. When the reference sample exceeds this cap it is
+            randomly subsampled (reproducibly, from ``seed``). Set to
+            ``None`` to disable the cap (only safe for small rasters).
         seed : int, optional
             Base seed for reproducibility.  The first child seed is used
             to draw the reference sample; remaining seeds drive the
@@ -2883,6 +2908,24 @@ class GridVariogram:
         values = ref_sv.sample_values        # (n,)
         n = len(values)
 
+        # ── cap covariance dimension to bound memory / Cholesky cost ────
+        # See parametric_bootstrap_parameters: the dense n×n covariance
+        # (plus L and L_inv here) would OOM the kernel at run()'s full
+        # sampling density, so subsample reference points past the cap.
+        # coords and values share the same indices to stay aligned.
+        if max_cov_points is not None and n > max_cov_points:
+            sub_rng = np.random.default_rng(ref_seed_int)
+            sub_idx = sub_rng.choice(n, size=max_cov_points, replace=False)
+            coords = coords[sub_idx]
+            values = values[sub_idx]
+            if verbose:
+                print(
+                    f"  Subsampled reference points {n} -> {max_cov_points} "
+                    f"for the {max_cov_points}x{max_cov_points} covariance "
+                    f"matrix (set max_cov_points to adjust)."
+                )
+            n = max_cov_points
+
         xs = self.rdh.rioxarray_obj.x.values
         ys = self.rdh.rioxarray_obj.y.values
         x_ext = float(np.max(xs) - np.min(xs))
@@ -2898,13 +2941,17 @@ class GridVariogram:
                 "Central model must be stationary with positive sill."
             )
 
+        # Build C in place and free intermediates promptly to keep peak
+        # memory near a single n×n array rather than several.
         D = cdist(coords, coords)
         gamma_mat = model_template(D)
+        del D
         C = total_sill - gamma_mat
-        np.fill_diagonal(C, total_sill)
-
+        del gamma_mat
+        # Diagonal = covariance at lag 0 (total_sill) plus a tiny jitter
+        # for numerical positive-definiteness; avoids allocating np.eye(n).
         jitter = 1e-10 * total_sill
-        C += np.eye(n) * jitter
+        np.fill_diagonal(C, total_sill + jitter)
 
         try:
             L = np.linalg.cholesky(C)
@@ -2918,8 +2965,12 @@ class GridVariogram:
                 "were clipped. Bootstrap intervals may be approximate.",
                 UserWarning,
             )
+        del C
 
-        L_inv = np.linalg.solve(L, np.eye(n))
+        # Triangular solve for L⁻¹ (L is lower-triangular) — cheaper and
+        # lighter than a general solve against a full identity matrix.
+        from scipy.linalg import solve_triangular
+        L_inv = solve_triangular(L, np.eye(n), lower=True)
 
         # ── normal-score transform ──────────────────────────────────────
         ranks = rankdata(values, method="average")
@@ -2989,7 +3040,7 @@ class GridVariogram:
 
                 model = copy.deepcopy(model_template)
                 result = ref_sv._fit_single_composite_model(
-                    model, boot_lags, boot_gamma, None, weights,
+                    model, boot_lags, boot_gamma, None, weights, rng=rng,
                 )
 
                 if result is not None:
@@ -3045,6 +3096,7 @@ class GridVariogram:
         self,
         n_realizations: int = 1000,
         *,
+        max_cov_points: Optional[int] = 3000,
         seed: Optional[int] = None,
         verbose: bool = False,
     ) -> np.ndarray:
@@ -3058,8 +3110,26 @@ class GridVariogram:
         ----------
         n_realizations : int
             Number of bootstrap realisations (≥ 1000 recommended).
+        max_cov_points : int or None, optional
+            Cap on the number of reference points used to build the
+            dense covariance matrix (default 3000). The matrix is
+            ``n × n`` in memory and Cholesky-factored at ``O(n³)`` cost,
+            so the full sampling density used by :meth:`run` (often tens
+            of thousands of points) would exhaust RAM — e.g. ``n=20000``
+            needs ~3.2 GB *per* matrix and several are held at once.
+            When the reference sample exceeds this cap it is randomly
+            subsampled (reproducibly, from ``seed``). Set to ``None`` to
+            disable the cap and use every reference point (only safe for
+            small rasters). Raising it tightens the simulated-field
+            geometry at a memory/time cost that grows as ``n²``–``n³``.
         seed : int, optional
-            Base seed for reproducibility.
+            Base seed for reproducibility. Governs the reference sample,
+            the simulated fields, *and* the multi-start optimiser guesses,
+            so repeated calls return identical results — exact when run
+            single-threaded; differences are at the level of parallel
+            floating-point reduction noise otherwise (most visible in
+            weakly-identified parameters such as a Matérn ``nu`` at its
+            bound).
         verbose : bool
             Print per-realisation progress.
 
@@ -3137,6 +3207,24 @@ class GridVariogram:
         coords = ref_sv.sample_coords
         n = len(ref_sv.sample_values)
 
+        # ── cap covariance dimension to bound memory / Cholesky cost ────
+        # The dense covariance below is n×n in RAM and factored at O(n³).
+        # run()'s empirical variograms tolerate huge n (numba binning is
+        # O(n_bins) in memory), but here the full sample would OOM the
+        # kernel, so subsample the reference points when they exceed the
+        # cap. Reproducible from the reference seed.
+        if max_cov_points is not None and n > max_cov_points:
+            sub_rng = np.random.default_rng(ref_seed_int)
+            sub_idx = sub_rng.choice(n, size=max_cov_points, replace=False)
+            coords = coords[sub_idx]
+            if verbose:
+                print(
+                    f"  Subsampled reference points {n} -> {max_cov_points} "
+                    f"for the {max_cov_points}x{max_cov_points} covariance "
+                    f"matrix (set max_cov_points to adjust)."
+                )
+            n = max_cov_points
+
         xs = self.rdh.rioxarray_obj.x.values
         ys = self.rdh.rioxarray_obj.y.values
         x_ext = float(np.max(xs) - np.min(xs))
@@ -3152,13 +3240,17 @@ class GridVariogram:
                 "Central model must be stationary with positive sill."
             )
 
+        # Build C in place and free intermediates promptly to keep peak
+        # memory near a single n×n array rather than several.
         D = cdist(coords, coords)
         gamma_mat = model_template(D)
+        del D
         C = total_sill - gamma_mat
-        np.fill_diagonal(C, total_sill)
-
+        del gamma_mat
+        # Diagonal = covariance at lag 0 (total_sill) plus a tiny jitter
+        # for numerical positive-definiteness; avoids allocating np.eye(n).
         jitter = 1e-10 * total_sill
-        C += np.eye(n) * jitter
+        np.fill_diagonal(C, total_sill + jitter)
 
         try:
             L = np.linalg.cholesky(C)
@@ -3172,6 +3264,7 @@ class GridVariogram:
                 "were clipped. Bootstrap intervals may be approximate.",
                 UserWarning,
             )
+        del C
 
         # ── simulation loop ─────────────────────────────────────────────
         collected = []
@@ -3228,7 +3321,7 @@ class GridVariogram:
 
                 model = copy.deepcopy(model_template)
                 result = ref_sv._fit_single_composite_model(
-                    model, boot_lags, boot_gamma, None, weights,
+                    model, boot_lags, boot_gamma, None, weights, rng=rng,
                 )
 
                 if result is not None:
