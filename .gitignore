@@ -5,6 +5,12 @@
 *.tiff
 *.las
 *.laz
+*.csv
+*.shp
+*.prj
+*.dbf
+*.shx
+*.cpg
 
 # Python
 __pycache__/
