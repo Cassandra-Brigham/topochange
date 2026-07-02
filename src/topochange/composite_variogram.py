@@ -164,7 +164,8 @@ class CompositeVariogramModel:
             return 0.0
         if self._params is None:
             raise ValueError("Parameters not set.")
-        return float(self._params[self._param_slices['nugget']])
+        # NumPy 2.x: float() of a length-1 array raises; take the scalar explicitly.
+        return float(np.asarray(self._params[self._param_slices['nugget']]).reshape(-1)[0])
     
     def __call__(self, h: np.ndarray) -> np.ndarray:
         """Evaluate variogram at lag distances.
