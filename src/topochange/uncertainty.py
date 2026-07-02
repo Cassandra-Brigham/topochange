@@ -405,6 +405,9 @@ class RegionalUncertaintyEstimator:
         self.mean_correlated_raster_min = None
         self.mean_correlated_raster_max = None
 
+        # correlation-aware standard error of the systematic bias (P0-3)
+        self.sigma_a_stable = None
+
         # component-wise - Polygon
         self.mean_correlated_components_polygon: List[Optional[float]] = [None, None, None]
         self.mean_correlated_components_polygon_min: List[Optional[float]] = [None, None, None]
@@ -641,6 +644,45 @@ class RegionalUncertaintyEstimator:
                     raster_geom, self.gamma_funcs_components_max[i], self.sigma2_max, n_pairs, seed
                 )
 
+    def calc_bias_se(
+        self,
+        n_pairs: int = 200_000,
+        seed: Optional[int] = None,
+    ) -> Optional[float]:
+        """Correlation-aware standard error of the systematic bias.
+
+        Over a finite domain a constant bias is statistically aliased with a
+        long-wavelength realization of the spatially correlated error, so the
+        standard error of the stable-area median/bias equals the area-averaged
+        standard deviation of the fitted correlated error over the *stable*
+        area (Rolstad et al., 2009; Hugonnet et al., 2022).  Unlike an
+        independence-assuming (RMS/sqrt(N)) standard error, this accounts for
+        spatial correlation; it was the empirically well-calibrated bias-SE
+        estimator in the synthetic benchmark.  Falls back to the area of
+        interest when no stable geometry is available.
+
+        Returns
+        -------
+        float or None
+            sigma_A evaluated over the stable area, also stored on
+            ``self.sigma_a_stable``.
+        """
+        if self.gamma_func is None or self.sigma2 is None:
+            return None
+        geom = self.stable_geom if self.stable_geom is not None else self.polygon
+        try:
+            self.sigma_a_stable = self.estimate_std_mean_monte_carlo(
+                geom, self.gamma_func, self.sigma2, n_pairs, seed
+            )
+        except Exception as e:
+            warnings.warn(
+                f"Stable-area bias SE could not be computed "
+                f"({type(e).__name__}: {e}).",
+                UserWarning, stacklevel=2,
+            )
+            self.sigma_a_stable = None
+        return self.sigma_a_stable
+
     def calc_total_uncertainty(
         self,
         n_pairs: int = 200_000,
@@ -668,6 +710,8 @@ class RegionalUncertaintyEstimator:
         self.calc_mean_correlated_raster(
             n_pairs=n_pairs, seed=seed, n_boot_eval=n_boot_eval
         )
+        # correlation-aware standard error of the systematic bias (P0-3)
+        self.calc_bias_se(n_pairs=n_pairs, seed=seed)
 
         def quadrature(uncorr, corr):
             if uncorr is not None and corr is not None:
@@ -720,6 +764,10 @@ class RegionalUncertaintyEstimator:
             lines.append(f"Uncorrelated σ₀: {self.sigma0_uncorrelated:.6f}")
         if self.mean_uncorrelated_polygon:
             lines.append(f"Uncorrelated (polygon mean): {self.mean_uncorrelated_polygon:.6f}")
+        if self.sigma_a_stable is not None:
+            lines.append(
+                f"Bias SE (correlation-aware, stable area): ± {self.sigma_a_stable:.6f}"
+            )
 
         lines.append("")
         lines.append("POLYGON CORRELATED UNCERTAINTY:")
