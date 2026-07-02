@@ -358,6 +358,10 @@ class SingleVariogram:
         self.sample_coords: Optional[np.ndarray] = None
         self.sample_values: Optional[np.ndarray] = None
 
+        # detrending (P0-2): optional low-order polynomial drift removal
+        self.trend_info: Optional[Dict[str, Any]] = None
+        self._detrend_order: int = 0
+
         # model fitting attributes (populated by fit_model)
         self.fitted_models: List[Dict[str, Any]] = []
         self.best_model: Optional[Dict[str, Any]] = None
@@ -391,6 +395,72 @@ class SingleVariogram:
                 gamma[i] = 0.5 * mean_fourth / correction
         return gamma
 
+    # ── detrending (P0-2) ───────────────────────────────────────────
+
+    @staticmethod
+    def _trend_design_matrix(coords, order, center, scale):
+        """Polynomial design matrix in centered/scaled coordinates.
+
+        order 0 -> [1]; order 1 -> [1, x, y];
+        order 2 -> [1, x, y, x^2, x*y, y^2].  Centering and scaling keep
+        X^T X well conditioned when coordinates are large (e.g. UTM).
+        """
+        coords = np.asarray(coords, dtype=float)
+        x = (coords[:, 0] - center[0]) / scale[0]
+        y = (coords[:, 1] - center[1]) / scale[1]
+        cols = [np.ones_like(x)]
+        if order >= 1:
+            cols += [x, y]
+        if order >= 2:
+            cols += [x * x, x * y, y * y]
+        return np.column_stack(cols)
+
+    @classmethod
+    def _fit_polynomial_trend(cls, coords, values, order):
+        """Fit and remove a low-order polynomial drift by ordinary least squares.
+
+        Removing a deterministic ramp/offset before variogram estimation
+        prevents long-wavelength drift from being aliased into spurious
+        long-range correlation, which otherwise inflates the area-averaged
+        uncertainty (Chiles & Delfiner, 2012; Erten et al., 2020;
+        Hugonnet et al., 2022).
+
+        Returns
+        -------
+        residuals : ndarray
+            ``values`` minus the fitted trend (same units as ``values``).
+        trend_info : dict
+            Keys: order, beta, beta_cov, center, scale, var_explained.
+            ``beta_cov`` is the OLS coefficient covariance (an independence
+            approximation; a GLS/REML covariance would be tighter, but the
+            drift term is small over large stable areas).
+        """
+        coords = np.asarray(coords, dtype=float)
+        values = np.asarray(values, dtype=float)
+        center = coords.mean(axis=0)
+        scale = coords.std(axis=0)
+        scale[scale == 0.0] = 1.0
+        X = cls._trend_design_matrix(coords, order, center, scale)
+        beta, _res, _rank, _sv = np.linalg.lstsq(X, values, rcond=None)
+        residuals = values - X @ beta
+        n, p = X.shape
+        dof = max(n - p, 1)
+        s2 = float(residuals @ residuals) / dof
+        beta_cov = s2 * np.linalg.pinv(X.T @ X)
+        total_var = float(np.var(values))
+        var_explained = (
+            0.0 if total_var <= 0.0 else 1.0 - float(np.var(residuals)) / total_var
+        )
+        trend_info = {
+            "order": int(order),
+            "beta": beta,
+            "beta_cov": beta_cov,
+            "center": center,
+            "scale": scale,
+            "var_explained": var_explained,
+        }
+        return residuals, trend_info
+
     def _single_variogram_run(
         self,
         area_side: float,
@@ -400,16 +470,32 @@ class SingleVariogram:
         max_lag: float,
         estimator: str,
         seed: Optional[int] = None,
+        detrend_order: Optional[int] = None,
+        store_trend: bool = False,
     ):
         """Sample the raster once and compute one empirical variogram.
 
         Returns (bin_counts, gamma_estimate, n_bins, coords, values, mean_lags).
+
+        When ``detrend_order`` (or the stored ``self._detrend_order``) is
+        > 0, a low-order polynomial drift is removed from the sampled values
+        before binning (P0-2), so the variogram describes the residual,
+        stationary error rather than an aliased trend.  Passing
+        ``detrend_order=None`` inherits the stored order, keeping bootstrap
+        resampling consistent with the main computation.
         """
         self.rdh.sample_raster(
             area_side, samples_per_area, max_samples, seed=seed
         )
         coords = self.rdh.coords.copy()
         values = self.rdh.samples.copy()
+
+        # optional polynomial detrending (P0-2) before binning
+        order = self._detrend_order if detrend_order is None else int(detrend_order)
+        if order and order > 0 and values.size > 3 * (order + 1):
+            values, trend_info = self._fit_polynomial_trend(coords, values, order)
+            if store_trend:
+                self.trend_info = trend_info
 
         (n_bins, bin_counts, bssd, bssad, binned_sum_dist, _max_dist) = (
             _bin_distances_and_squared_differences(
@@ -445,6 +531,7 @@ class SingleVariogram:
         seed: Optional[int] = None,
         estimator: str = "matheron",
         return_sample: bool = False,
+        detrend_order: int = 0,
     ) -> None:
         """Compute a single empirical variogram from one spatial sample.
 
@@ -471,12 +558,23 @@ class SingleVariogram:
         return_sample : bool
             If True, retain the sampled coordinates and values
             (needed for downstream MSSPE computation in ``fit_model``).
+        detrend_order : int, default 0
+            If > 0, remove a polynomial drift of this order (1 = planar,
+            2 = quadratic) from the sampled values before binning (P0-2).
+            This prevents a ramp/offset from being aliased into spurious
+            long-range structure that inflates the area-averaged
+            uncertainty.  The fitted trend is stored on ``self.trend_info``
+            and is inherited by the spatial-resampling bootstrap.
         """
         if estimator not in self.ESTIMATORS:
             raise ValueError(
                 f"Unknown estimator '{estimator}'. "
                 f"Choose from {self.ESTIMATORS}."
             )
+
+        # record detrend setting so bootstrap resampling inherits it (P0-2)
+        self._detrend_order = int(detrend_order)
+        self.trend_info = None
 
         # compute max_lag from raster extent
         xs = self.rdh.rioxarray_obj.x.values
@@ -491,6 +589,7 @@ class SingleVariogram:
             self._single_variogram_run(
                 area_side, samples_per_area, max_samples,
                 bin_width, max_lag, estimator, seed=seed,
+                detrend_order=detrend_order, store_trend=True,
             )
         )
 
