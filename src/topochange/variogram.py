@@ -1907,6 +1907,108 @@ class SingleVariogram:
 
         return param_samples
 
+    def akaike_weights(self, *, criterion: str = "aicc") -> np.ndarray:
+        """Akaike weights over ``self.fitted_models`` (Burnham & Anderson, 2002).
+
+        w_k = exp(-0.5 ΔIC_k) / Σ exp(-0.5 ΔIC_j), where ΔIC is the
+        information-criterion difference from the best model.  Used to weight
+        candidate structures when building the calibrated ensemble.
+        """
+        if not getattr(self, "fitted_models", None):
+            raise RuntimeError("Call fit_model() first.")
+        key = criterion if criterion in ("aic", "aicc", "bic") else "aicc"
+        ic = np.array([m[key] for m in self.fitted_models], float)
+        d = ic - np.nanmin(ic)
+        w = np.exp(-0.5 * d)
+        s = np.nansum(w)
+        return w / s if s > 0 else np.ones_like(w) / len(w)
+
+    def calibrated_parameter_ensemble(
+        self, n_realizations: int = 300, *, criterion: str = "aicc",
+        max_models: int = 3, weight_floor: float = 0.05,
+        seed=None, store: bool = True, verbose: bool = False,
+    ):
+        """Build a realization + model-selection aware parameter ensemble.
+
+        For the top Akaike-weighted model structures, runs the parametric
+        (model-based) bootstrap to capture finite-sample realization variance,
+        and tags each structure with its Akaike weight so that between-model
+        (structure-selection) variance is also propagated to sigma_A
+        (Buckland et al., 1997; Burnham & Anderson, 2002).  This replaces the
+        anti-conservative single-model, within-fit envelope.
+
+        Populates ``best_model['model_ensemble']`` with a list of
+        ``(composite_model, weight, param_samples)`` and
+        ``best_model['param_samples']`` with the winning model's draws.
+
+        Requires ``compute_empirical_variogram(return_sample=True)`` and
+        ``fit_model()``.  Returns the ensemble list.
+        """
+        if self.best_model is None:
+            raise RuntimeError("Call fit_model() first.")
+        if self.sample_coords is None or self.sample_values is None:
+            raise RuntimeError(
+                "No spatial sample stored. Re-run "
+                "compute_empirical_variogram(return_sample=True)."
+            )
+        weights = self.akaike_weights(criterion=criterion)
+        order = np.argsort(weights)[::-1]
+        chosen = [int(i) for i in order if weights[i] >= weight_floor][:max_models]
+        if not chosen:
+            chosen = [int(order[0])]
+        wsum = float(np.sum([weights[i] for i in chosen]))
+
+        # parametric_bootstrap_parameters mutates best_model / bootstrap_param_samples;
+        # preserve and restore caller state.
+        saved_best = self.best_model
+        saved_boot = getattr(self, "bootstrap_param_samples", None)
+        ensemble = []
+        try:
+            for i in chosen:
+                md = self.fitted_models[i]
+                w = float(weights[i] / wsum) if wsum > 0 else 1.0 / len(chosen)
+                self.best_model = md
+                try:
+                    samp = self.parametric_bootstrap_parameters(
+                        n_realizations=max(50, int(round(n_realizations * w))),
+                        seed=seed, verbose=verbose,
+                    )
+                except Exception as e:
+                    if verbose:
+                        print(f"  model {i} ensemble failed: {e}")
+                    continue
+                if samp is None or len(samp) == 0:
+                    continue
+                mm = copy.deepcopy(md["model"]); mm.set_params(md["params"])
+                ensemble.append((mm, w, np.asarray(samp, float)))
+        finally:
+            self.best_model = saved_best
+            self.bootstrap_param_samples = saved_boot
+
+        if not ensemble:
+            wm = copy.deepcopy(self.best_model["model"])
+            wm.set_params(self.best_model["params"])
+            ensemble = [(wm, 1.0,
+                         np.atleast_2d(np.asarray(self.best_model["params"], float)))]
+        tw = float(sum(w for _, w, _ in ensemble))
+        ensemble = [(m, (w / tw if tw > 0 else 1.0 / len(ensemble)), s)
+                    for m, w, s in ensemble]
+
+        # winner's own samples for the single-model path / percentiles
+        win_desc = self.best_model["description"]
+        win_samples = None
+        for m, _w, s in ensemble:
+            if m.structural_description() == win_desc:
+                win_samples = s
+                break
+        if win_samples is None:
+            win_samples = ensemble[0][2]
+        if store:
+            self.best_model["model_ensemble"] = ensemble
+            self.best_model["param_samples"] = win_samples
+            self.bootstrap_param_samples = win_samples
+        return ensemble
+
     # FittedVariogramModel
 
     @property
@@ -1945,9 +2047,10 @@ class SingleVariogram:
             msspe=bm.get("msspe"),
             msspe_std=bm.get("msspe_std"),
             msspe_n_runs=bm.get("msspe_n_runs", 0),
+            model_ensemble=bm.get("model_ensemble"),
         )
 
-    #  plotting 
+    #  plotting
 
     def plot_single_variogram(
         self,
@@ -3950,6 +4053,8 @@ class FittedVariogramModel:
     msspe_std: Optional[float] = None
     msspe_n_runs: int = 0
     loocv_result: Optional[AggregatedLOOCVResult] = None
+    # calibrated model-averaged ensemble: list of (model, weight, param_samples)
+    model_ensemble: Optional[list] = None
 
     def predict(self, h: np.ndarray) -> np.ndarray:
         return self.composite_model(h)
