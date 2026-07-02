@@ -54,6 +54,7 @@ class RegionalUncertaintyEstimator:
         unstable_geoms=None,
         derive_stable_from_unstable: bool = True,
         fitted_model: Optional[FittedVariogramModel] = None,
+        calibrate: bool = True,
     ):
         self.raster_data_handler = raster_data_handler
         self.variogram_analysis = variogram_analysis
@@ -61,6 +62,27 @@ class RegionalUncertaintyEstimator:
         # Auto-derive fitted_model from variogram object if not provided
         if fitted_model is None:
             fitted_model = variogram_analysis.fitted_model
+
+        # Calibrated uncertainty is the DEFAULT (P0-1): if no model ensemble
+        # is present, build a realization + model-averaged one so the reported
+        # envelope reflects realization and model-selection variance rather
+        # than within-fit parameter noise for a single model (Buckland et al.,
+        # 1997; Burnham & Anderson, 2002).  Set ``calibrate=False`` to
+        # reproduce the legacy single-model bootstrap behaviour.
+        if calibrate and getattr(fitted_model, "model_ensemble", None) is None:
+            builder = getattr(variogram_analysis, "calibrated_parameter_ensemble", None)
+            if callable(builder):
+                try:
+                    builder()
+                    fitted_model = variogram_analysis.fitted_model
+                except Exception as e:
+                    warnings.warn(
+                        f"Calibrated uncertainty ensemble could not be built "
+                        f"({type(e).__name__}: {e}); falling back to the "
+                        f"available bootstrap/central estimate. Call a bootstrap "
+                        f"method explicitly for bounds.",
+                        UserWarning, stacklevel=2,
+                    )
 
         # --- Setup gamma functions (central, min, max) ---
         self._setup_gamma_functions(fitted_model)
@@ -157,6 +179,9 @@ class RegionalUncertaintyEstimator:
 
         self.gamma_func = fitted_model.predict
         self.sigma2 = fitted_model.composite_model.get_total_sill()
+
+        # calibrated model-averaged ensemble: list of (model, weight, samples) or None
+        self._model_ensemble = getattr(fitted_model, "model_ensemble", None)
 
         # min/max from bootstrap if available
         if fitted_model.param_samples is not None and len(fitted_model.param_samples) > 0:
@@ -405,6 +430,10 @@ class RegionalUncertaintyEstimator:
         self.mean_correlated_raster_min = None
         self.mean_correlated_raster_max = None
 
+        # calibrated model-averaged spread (std of the pooled sigma_A) (P0-1)
+        self.mean_correlated_polygon_sd = None
+        self.mean_correlated_raster_sd = None
+
         # correlation-aware standard error of the systematic bias (P0-3)
         self.sigma_a_stable = None
 
@@ -514,6 +543,62 @@ class RegionalUncertaintyEstimator:
 
         return 0.0 if var_mean < 0 else math.sqrt(var_mean)
 
+    def _propagate_model_averaged(
+        self,
+        domain,
+        n_pairs: int = 200_000,
+        seed: Optional[int] = None,
+        n_boot_eval: int = 100,
+    ):
+        """Model-averaged sigma_A propagation (P0-1; Buckland et al., 1997).
+
+        Pools sigma_A Monte-Carlo draws across the Akaike-weighted candidate
+        models in ``self._model_ensemble`` (each an entry
+        ``(composite_model, weight, param_samples)``), allocating draws in
+        proportion to model weight.  The pooled distribution therefore contains
+        both within-model (parameter/realization) and between-model
+        (structure-selection) uncertainty -- the variance sources the
+        single-model bootstrap omits.
+
+        Returns
+        -------
+        (p16, p50, p84, mean, sd) : tuple of float, or None if unavailable.
+        """
+        ens = getattr(self, "_model_ensemble", None)
+        if not ens:
+            return None
+        rng = np.random.default_rng(seed)
+        pair_seed = int(rng.integers(0, 2 ** 31))
+        h_pairs = self._sample_pair_distances(domain, n_pairs, pair_seed)
+        pooled: List[float] = []
+        for model, weight, samples in ens:
+            samples = np.atleast_2d(np.asarray(samples, dtype=float))
+            ns = len(samples)
+            if ns == 0 or weight <= 0:
+                continue
+            n_draw = max(1, int(round(weight * n_boot_eval)))
+            idx = rng.choice(ns, n_draw, replace=(ns < n_draw))
+            for bi in idx:
+                try:
+                    model.set_params(samples[bi])
+                    s2 = model.get_total_sill()
+                    if s2 is None or s2 <= 0:
+                        continue
+                    cov = s2 - model(h_pairs)
+                    pooled.append(math.sqrt(max(float(np.mean(cov)), 0.0)))
+                except Exception:
+                    continue
+        if not pooled:
+            return None
+        pooled = np.asarray(pooled, dtype=float)
+        return (
+            float(np.percentile(pooled, 16)),
+            float(np.percentile(pooled, 50)),
+            float(np.percentile(pooled, 84)),
+            float(pooled.mean()),
+            float(pooled.std()),
+        )
+
     def calc_mean_correlated_polygon(
         self,
         n_pairs: int = 200_000,
@@ -542,12 +627,23 @@ class RegionalUncertaintyEstimator:
                 self.polygon, self.gamma_func, self.sigma2, n_pairs, seed
             )
 
-        # min/max via bootstrap propagation or fallback to central estimate
+        # min/max: prefer the calibrated model-averaged ensemble (P0-1), then
+        # the single-model bootstrap ensemble, then the central estimate.
+        ma = (
+            self._propagate_model_averaged(
+                self.polygon, n_pairs=n_pairs, seed=seed, n_boot_eval=n_boot_eval
+            )
+            if getattr(self, "_model_ensemble", None) else None
+        )
         has_bootstrap = (
             hasattr(self, '_bootstrap_samples')
             and self._bootstrap_samples is not None
         )
-        if has_bootstrap:
+        if ma is not None:
+            self.mean_correlated_polygon_min = ma[0]
+            self.mean_correlated_polygon_max = ma[2]
+            self.mean_correlated_polygon_sd = ma[4]
+        elif has_bootstrap:
             p16, p84 = self._propagate_bootstrap_uncertainty(
                 self.polygon, n_pairs=n_pairs, seed=seed,
                 n_boot_eval=n_boot_eval,
@@ -606,12 +702,23 @@ class RegionalUncertaintyEstimator:
                 raster_geom, self.gamma_func, self.sigma2, n_pairs, seed
             )
 
-        # min/max via bootstrap propagation or fallback to central estimate
+        # min/max: prefer the calibrated model-averaged ensemble (P0-1), then
+        # the single-model bootstrap ensemble, then the central estimate.
+        ma = (
+            self._propagate_model_averaged(
+                raster_geom, n_pairs=n_pairs, seed=seed, n_boot_eval=n_boot_eval
+            )
+            if getattr(self, "_model_ensemble", None) else None
+        )
         has_bootstrap = (
             hasattr(self, '_bootstrap_samples')
             and self._bootstrap_samples is not None
         )
-        if has_bootstrap:
+        if ma is not None:
+            self.mean_correlated_raster_min = ma[0]
+            self.mean_correlated_raster_max = ma[2]
+            self.mean_correlated_raster_sd = ma[4]
+        elif has_bootstrap:
             p16, p84 = self._propagate_bootstrap_uncertainty(
                 raster_geom, n_pairs=n_pairs, seed=seed,
                 n_boot_eval=n_boot_eval,
