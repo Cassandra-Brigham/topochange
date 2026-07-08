@@ -2771,6 +2771,21 @@ class GridVariogram:
         # full summary rows (with param_stats) for programmatic access
         self._summary_rows = summary_rows
 
+        # Raw central-model parameter vectors across realisations. These act
+        # as fallback ``param_samples`` for :attr:`fitted_model`, so the
+        # RegionalUncertaintyEstimator obtains min/max bounds from the
+        # realization-to-realization spread even when no explicit bootstrap
+        # has been run. All records under one description share the same
+        # parameter layout, so stacking is safe.
+        central_records = by_description.get(self.central_model_name, [])
+        try:
+            self.ensemble_param_samples = (
+                np.array([r["params"] for r in central_records])
+                if central_records else None
+            )
+        except Exception:
+            self.ensemble_param_samples = None
+
     # parameter bootstrap
 
     def bootstrap_parameters(
@@ -2977,30 +2992,72 @@ class GridVariogram:
 
         return param_samples
 
-    """
-    Two additional bootstrap methods for GridVariogram parameter uncertainty.
+    def calibrated_parameter_ensemble(self, seed=None, min_realizations: int = 2):
+        """Build the realization-based model ensemble used for uncertainty bounds.
 
-    INSERT BOTH METHODS into class GridVariogram, immediately after
-    bootstrap_parameters() and before the `# FittedVariogramModel bridge`
-    comment (i.e. after line 2758 in variogram-668c3dcd.py).
+        One entry per successful realisation: a deep copy of that
+        realisation's AICc-winning model at its fitted parameters, weighted
+        equally, with that realisation's parameter vector (plus its
+        parametric-bootstrap samples, when present) as the sample set.  The
+        :class:`RegionalUncertaintyEstimator` propagates sigma_A per entry and
+        takes percentiles of the pooled *output* distribution
+        (``_propagate_model_averaged``), so the reported bounds contain
+        realization-to-realization sampling variance and — whenever model
+        selection flips between realisations — structure-selection variance.
 
-    These require the same imports added for the SingleVariogram methods:
+        Design note: unlike the Akaike-weighted candidate averaging of
+        :meth:`SingleVariogram.calibrated_parameter_ensemble`, no *losing*
+        candidates are averaged in.  On unambiguous data every entry shares
+        one structure and the envelope reduces to the pure realization
+        spread, so this estimator cannot dilute the clean case — the failure
+        mode of candidate averaging identified in the calibration
+        experiments (see ``validation/check_gridvariogram_bounds.py``).
 
-        from scipy.spatial.distance import cdist
-        from scipy.stats import rankdata, norm as sp_norm
+        Parameters
+        ----------
+        seed : int, optional
+            Unused; accepted for interface compatibility with the
+            SingleVariogram method (the ensemble is deterministic given
+            ``run()``).
+        min_realizations : int
+            Minimum number of successful realisations required; below this
+            no ensemble is built and ``None`` is returned with a warning.
 
-    Both methods use the ensemble's *central model* (the modal best-model
-    from run()) and draw a fresh reference spatial sample from the raster
-    to provide the fixed coordinate set needed for Cholesky decomposition.
+        Returns
+        -------
+        list of (composite_model, weight, param_samples) or None
+            Also stored for the :attr:`fitted_model` bridge.
+        """
+        if not self.variograms:
+            raise RuntimeError("No realisations. Call run() first.")
+        entries = []
+        for sv in self.variograms:
+            bm = sv.best_model
+            if bm is None:
+                continue
+            model = copy.deepcopy(bm["model"])
+            params = np.asarray(bm["params"], dtype=float)
+            samples = bm.get("param_samples")
+            if samples is not None and len(samples) > 0:
+                samples = np.atleast_2d(np.asarray(samples, dtype=float))
+            else:
+                samples = params.reshape(1, -1)
+            model.set_params(params.copy())
+            entries.append((model, samples))
+        if len(entries) < min_realizations:
+            warnings.warn(
+                f"Only {len(entries)} realisation(s) carry a fitted model; "
+                f"need >= {min_realizations} for a realization ensemble. "
+                f"Increase n_realizations or call bootstrap_parameters().",
+                UserWarning, stacklevel=2,
+            )
+            self._realization_model_ensemble = None
+            return None
+        w = 1.0 / len(entries)
+        ensemble = [(m, w, smp) for m, smp in entries]
+        self._realization_model_ensemble = ensemble
+        return ensemble
 
-    Storage convention matches GridVariogram.bootstrap_parameters():
-        self.bootstrap_param_samples
-        self.bootstrap_param_percentiles
-
-    References
-    ----------
-    Same as SingleVariogram versions — see bootstrap_methods.py header.
-    """
 
 
     # ─────────────────────────────────────────────────────────────────────
@@ -3630,8 +3687,12 @@ class GridVariogram:
 
         model.set_params(median_params)
 
-        # attach bootstrap samples if available
+        # attach bootstrap samples if available; otherwise fall back to the
+        # per-realisation central-model fits collected by run(), so the
+        # ensemble's realization spread propagates into min/max bounds
         param_samples = getattr(self, "bootstrap_param_samples", None)
+        if param_samples is None or len(param_samples) == 0:
+            param_samples = getattr(self, "ensemble_param_samples", None)
 
         return FittedVariogramModel(
             composite_model=model,
@@ -3641,6 +3702,7 @@ class GridVariogram:
             aic=ref_fm["aic"],
             bic=ref_fm["bic"],
             param_samples=param_samples,
+            model_ensemble=getattr(self, "_realization_model_ensemble", None),
             warnings=ref_fm.get("warnings", []),
             msspe=ref_fm.get("msspe"),
             msspe_std=ref_fm.get("msspe_std"),
