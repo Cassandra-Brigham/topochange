@@ -1581,6 +1581,7 @@ class PointCloud:
         power: float = 2.0,
         radius: Optional[float] = None,
         overwrite: bool = False,
+        stream: bool = False,
     ) -> "Raster":
         """
         Create advanced DEM with comprehensive options.
@@ -1592,6 +1593,22 @@ class PointCloud:
         - Hole filling
         - COG output
         - Custom output CRS
+        - Streaming execution for very large clouds (stream=True)
+
+        stream : bool, default False
+            If True, grid in PDAL streaming mode so only ~1M points are resident
+            at a time instead of loading the whole (ground-filtered) cloud into
+            RAM — use this for very large clouds (tens of GB) that OOM the default
+            non-streaming path. The grid is pinned to the exact post-filter data
+            extent via a lightweight streaming stats pre-pass, so elevation values
+            match the non-streaming output; the grid origin may differ by a
+            sub-pixel (< 1 cell) registration offset because PDAL's non-streaming
+            auto-grid origin cannot be reproduced bit-for-bit in streaming mode.
+            The difference step resamples both DEMs to a common grid, so this
+            offset does not bias the computed difference. Silently ignored (falls
+            back to non-streaming) when the pipeline is not streamable — i.e.
+            interpolation="tin" (Delaunay) or use_smrf=True (SMRF needs all points
+            at once). Costs one extra streaming read for the stats pre-pass.
         """
 
         from .raster import Raster  # local import to avoid circulars
@@ -1801,9 +1818,60 @@ class PointCloud:
             pipeline_steps.append(writer_options)
 
         # execute Pipeline
+        # Streaming (opt-in) processes points in fixed ~1M-point chunks instead of
+        # loading the whole ground-filtered cloud into RAM. Only the writers.gdal
+        # path streams: TIN triangulates all points (Delaunay) and SMRF needs the
+        # full cloud, so both fall back to non-streaming execute().
+        use_stream = bool(stream) and interpolation != "tin" and not use_smrf
         try:
+            if use_stream:
+                # In streaming mode writers.gdal has no full-cloud pass to size its
+                # grid from, so by default it falls back to the reader-header extent
+                # — shifting the grid by up to a pixel and changing interpolated
+                # values (~0.1 m). Pin the grid instead to the exact post-filter X/Y
+                # extent obtained from a lightweight streaming stats pre-pass over
+                # the same filtered points, using writers.gdal's own grid convention
+                # (origin at the data min, pixel size = resolution, enough cells to
+                # cover the max). This keeps the streamed raster equal to the
+                # non-streaming output to within a sub-pixel registration offset
+                # (elevation values unchanged; only the grid origin can move by a
+                # fraction of a cell, which the difference step resamples away).
+                stats_steps = [
+                    s for s in pipeline_steps
+                    if not str(s.get("type", "")).startswith("writers.")
+                ]
+                stats_steps.append({"type": "filters.stats", "dimensions": "X,Y"})
+                sp = pdal.Pipeline(json.dumps({"pipeline": stats_steps}))
+                sp.execute_streaming(chunk_size=1000000)
+                meta = sp.metadata or {}
+                if isinstance(meta, str):
+                    meta = json.loads(meta)
+                stats = (
+                    meta.get("metadata", meta)
+                    .get("filters.stats", {})
+                    .get("statistic", [])
+                )
+                by = {d.get("name"): d for d in stats}
+                if "X" in by and "Y" in by:
+                    _minx = float(by["X"]["minimum"])
+                    _maxx = float(by["X"]["maximum"])
+                    _miny = float(by["Y"]["minimum"])
+                    _maxy = float(by["Y"]["maximum"])
+                    _res = float(resolution)
+                    # writer_options is the last element of pipeline_steps (same
+                    # dict object), so setting the grid here pins the streamed grid.
+                    writer_options["origin_x"] = _minx
+                    writer_options["origin_y"] = _miny
+                    writer_options["width"] = int((_maxx - _minx) // _res) + 1
+                    writer_options["height"] = int((_maxy - _miny) // _res) + 1
+                else:
+                    # no points / no stats available — fall back to non-streaming
+                    use_stream = False
+
             p = pdal.Pipeline(json.dumps({"pipeline": pipeline_steps}))
-            points_processed = p.execute()
+            points_processed = (
+                p.execute_streaming(chunk_size=1000000) if use_stream else p.execute()
+            )
         except Exception as e:
             raise RuntimeError(f"PDAL pipeline failed: {e}")
 
