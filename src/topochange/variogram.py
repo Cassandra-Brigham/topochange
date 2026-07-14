@@ -4221,7 +4221,7 @@ class StatisticalAnalysis:
         ax.set_title("Histogram of differencing results with exploratory statistics")
         ax.legend()
         plt.tight_layout()
-        #return fig
+        return fig
 
     def bootstrap_uncertainty_subsample(
         self, n_bootstrap: int = 1000, subsample_proportion: float = 0.1

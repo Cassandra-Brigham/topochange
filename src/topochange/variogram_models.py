@@ -503,7 +503,7 @@ class VariogramModelRegistry:
             max_gamma = np.nanmax(variogram) * 3
             max_lag = np.nanmax(lags)
             bin_width = float(np.min(np.diff(lags))) if len(lags) > 1 else 1e-6
-            return ([0, bin_width, 0.1],
+            return ([0, bin_width, 0.5],
                     [max_gamma, max_lag, 5.0])
         
         matern_spec = VariogramModelSpec(
