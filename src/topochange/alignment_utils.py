@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -160,43 +161,87 @@ def load_points_from_las(
     if not filename.exists():
         raise FileNotFoundError(f"Point cloud file not found: {filename}")
 
-    steps = [{"type": "readers.las", "filename": str(filename)}]
-
-    # classification filter
+    # Build the individual filter stages once; they are reused by both the
+    # streaming-crop path and the plain single-pass path below.
+    class_step = None
     if point_filter and point_filter not in ("all", "All", None):
         if point_filter in ("ground", "Ground"):
-            steps.append({"type": "filters.range", "limits": "Classification[2:2]"})
+            class_step = {"type": "filters.range", "limits": "Classification[2:2]"}
         elif isinstance(point_filter, (list, tuple)):
             # support multiple classification codes
             ranges = ",".join(f"Classification[{c}:{c}]" for c in point_filter)
-            steps.append({"type": "filters.range", "limits": ranges})
+            class_step = {"type": "filters.range", "limits": ranges}
         elif isinstance(point_filter, int):
-            steps.append({"type": "filters.range", "limits": f"Classification[{point_filter}:{point_filter}]"})
+            class_step = {"type": "filters.range", "limits": f"Classification[{point_filter}:{point_filter}]"}
         else:
             logger.warning(f"Unknown point_filter value: {point_filter}, using all points")
 
-    # spatial crop
-    if crop_bounds is not None:
-        minx, miny, maxx, maxy = crop_bounds
-        steps.append({
-            "type": "filters.crop",
-            "bounds": f"([{minx},{maxx}],[{miny},{maxy}])"
-        })
-
-    # voxel downsampling
+    voxel_step = None
     if voxel_size is not None and voxel_size > 0:
-        steps.append({
-            "type": "filters.voxeldownsize",
-            "cell": float(voxel_size),
-            "mode": "center"
-        })
+        voxel_step = {"type": "filters.voxeldownsize", "cell": float(voxel_size), "mode": "center"}
 
-    # point limit (applied last)
+    head_step = None
     if max_points is not None and max_points > 0:
-        steps.append({"type": "filters.head", "count": int(max_points)})
+        head_step = {"type": "filters.head", "count": int(max_points)}
 
-    # execute Pipeline
-    arr, metadata = run_pdal_pipeline(steps, need_arrays=True, streaming=False)
+    tmp_crop_path = None
+    try:
+        if crop_bounds is not None:
+            # Stream the spatial crop to a temp file BEFORE reading points into
+            # memory. In non-streaming mode PDAL materializes every point of the
+            # source file in the PointTable *before* filters.crop runs, so
+            # cropping a small box out of a multi-GB tile still loads the whole
+            # tile into RAM (OOM -> kernel killed with ExitCode undefined).
+            # Streaming processes the file in chunks and discards out-of-box
+            # points as they flow, bounding peak memory to ~chunk_size points
+            # regardless of source size. Output points are identical.
+            minx, miny, maxx, maxy = crop_bounds
+            crop_step = {
+                "type": "filters.crop",
+                "bounds": f"([{minx},{maxx}],[{miny},{maxy}])",
+            }
+
+            stream_steps = [{"type": "readers.las", "filename": str(filename)}]
+            if class_step is not None:
+                stream_steps.append(class_step)
+            stream_steps.append(crop_step)
+            # A hard point cap can join the streaming pass ONLY when no voxel
+            # step follows: voxeldownsize is not streamable and head must stay
+            # the final stage. With a voxel step, head is applied after voxel
+            # on the (already small) cropped temp instead.
+            if head_step is not None and voxel_step is None:
+                stream_steps.append(head_step)
+
+            fd, tmp_crop_path = tempfile.mkstemp(suffix=".laz")
+            os.close(fd)
+            stream_steps.append({
+                "type": "writers.las",
+                "filename": tmp_crop_path,
+                "offset_x": "auto", "offset_y": "auto", "offset_z": "auto",
+                "scale_x": 0.001, "scale_y": 0.001, "scale_z": 0.001,
+            })
+            run_pdal_pipeline(stream_steps, need_arrays=False, streaming=True)
+
+            # Re-read the (small) cropped temp, applying any remaining stages.
+            read_steps = [{"type": "readers.las", "filename": tmp_crop_path}]
+            if voxel_step is not None:
+                read_steps.append(voxel_step)
+                if head_step is not None:
+                    read_steps.append(head_step)
+            arr, metadata = run_pdal_pipeline(read_steps, need_arrays=True, streaming=False)
+        else:
+            # No spatial crop: single-pass load (original behavior).
+            steps = [{"type": "readers.las", "filename": str(filename)}]
+            for s in (class_step, voxel_step, head_step):
+                if s is not None:
+                    steps.append(s)
+            arr, metadata = run_pdal_pipeline(steps, need_arrays=True, streaming=False)
+    finally:
+        if tmp_crop_path is not None and os.path.exists(tmp_crop_path):
+            try:
+                os.remove(tmp_crop_path)
+            except OSError:
+                pass
 
     if arr is None or len(arr) == 0:
         raise RuntimeError(f"No points loaded from {filename}")
